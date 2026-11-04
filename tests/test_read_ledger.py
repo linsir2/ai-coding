@@ -479,7 +479,7 @@ def test_the_render_wraps_itself_in_the_block_tags():
 
 def test_the_render_tells_the_model_to_read_only_the_gaps():
     text = _render_current((ReadMark("a.py", 1, 10, 441),))
-    assert "按缺口重读" in text
+    assert "只读缺口" in text
 
 
 def test_the_render_caps_the_file_count():
@@ -748,7 +748,7 @@ def test_a_changed_file_is_stale_even_before_another_read():
     marks = (ReadMark("a.py", 1, 150, 150, version="v1"),)
     text = render(marks, current_versions={"a.py": "v2"})
     assert "（完整）" not in text
-    assert "已过期" in text
+    assert "文件已变化" in text
 
 
 def test_a_fresh_file_is_still_named_so_it_is_not_reread():
@@ -763,7 +763,7 @@ def test_an_old_mark_without_a_version_is_not_claimed_complete():
     marks = (ReadMark("a.py", 1, 150, 150),)
     text = render(marks, current_versions={"a.py": "v1"})
     assert "（完整）" not in text
-    assert "未知版本" in text or "已过期" in text
+    assert "未知版本" in text
 
 
 def test_session_invalidate_reads_marks_the_evidence_stale():
@@ -772,7 +772,7 @@ def test_session_invalidate_reads_marks_the_evidence_stale():
     session.invalidate_reads(["a.py"])
     text = render(session.read_ledger, current_versions={"a.py": "v1"})
     assert "（完整）" not in text
-    assert "已过期" in text or "未知版本" in text
+    assert "未知版本" in text
 
 
 @pytest.mark.asyncio
@@ -798,7 +798,7 @@ async def test_the_request_assembly_compares_read_versions_with_the_filesystem(t
     bodies = [m.content or "" for m in reporter.calls[-1]["request"]]
     ledger = next(body for body in bodies if "<read-ledger>" in body)
     assert "a.py" in ledger
-    assert "已过期" in ledger
+    assert "文件已变化" in ledger
     assert "（完整）" not in ledger
 
 
@@ -849,11 +849,11 @@ def test_a_fresh_mark_with_unknown_total_is_not_claimed_complete():
     assert "不要声称完整" in text
 
 
-def test_a_stale_line_still_names_the_old_gap():
+def test_a_stale_line_does_not_publish_old_gaps_as_current():
     marks = (ReadMark("a.py", 1, 60, 441, version="v1"),)
     text = render(marks, current_versions={"a.py": "v2"})
-    assert "缺 61-441" in text
-    assert "已过期" in text
+    assert "缺 61-441" not in text
+    assert "旧行数/缺口不可信" in text
 
 
 def test_one_malformed_ledger_row_does_not_abort_the_session():
@@ -865,3 +865,18 @@ def test_one_malformed_ledger_row_does_not_abort_the_session():
         ],
     })
     assert [mark.path for mark in session.read_ledger] == ["ok.py"]
+
+
+def test_an_unknown_version_does_not_publish_its_stale_total():
+    marks = (ReadMark("a.py", 1, 150, 150),)
+    text = render(marks, current_versions={"a.py": "v1"})
+    assert "共 150 行" not in text
+    assert "旧行数" in text or "不可信" in text
+
+
+def test_a_changed_file_does_not_publish_its_old_total_or_gap():
+    marks = (ReadMark("a.py", 1, 60, 441, version="v1"),)
+    text = render(marks, current_versions={"a.py": "v2"})
+    assert "共 441 行" not in text
+    assert "缺 61-441" not in text
+    assert "旧行数" in text or "不可信" in text

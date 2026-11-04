@@ -5,7 +5,9 @@ Measured live 2026-10-31 (session c77c0a68, item 2): ``write`` refused with
 re-read the same file, and the duplicate-call guard refused it because the
 *old* result was still visible.  The two protections deadlocked the item for 75
 iterations (15 ``read`` refusals, 5 ``bash`` refusals).  A mutation after the
-read (even a failed one) is the refresh signal.
+read (even one that failed after reaching the tool) is the refresh signal.
+Calls refused by a guard or an unanswered approval never ran, so they are not
+mutations and must not reset the duplicate budget.
 """
 
 from ai_coding.core.guard import DuplicateCallGuard, TurnView
@@ -34,9 +36,11 @@ def _assistant_call(call_id: str, name: str) -> ChatMessage:
     )
 
 
-def _tool_result(call_id: str) -> ChatMessage:
+def _tool_result(
+    call_id: str, body: str = "body of a.py", *, tool_name: str = "read"
+) -> ChatMessage:
     return ChatMessage(
-        role="tool", content="body of a.py", timestamp="", tool_call_id=call_id, tool_name="read"
+        role="tool", content=body, timestamp="", tool_call_id=call_id, tool_name=tool_name
     )
 
 
@@ -142,5 +146,51 @@ def test_a_repeated_bash_is_not_excused_by_its_own_current_call():
         _assistant_call("b2", "bash"),  # the call being checked
     ]
     decision = guard.check(_bash("b2"), _ctx(history), TurnView())
+
+    assert decision.verdict.value == "deny"
+
+
+def test_a_guard_denied_bash_does_not_excuse_its_own_retry():
+    """A guard refusal never ran the command, so it cannot count as a mutation.
+
+    Measured in session fe53ff6f turn 6: the third identical ``tail`` was
+    refused, then the fourth was allowed because the *refused* third call sat
+    between the earlier result and the retry.  The guard reset itself and the
+    model looped approve/deny/approve.
+    """
+    guard = DuplicateCallGuard(threshold=1)
+    _success(guard, _bash("b1"))
+
+    history = [
+        _assistant_call("b1", "bash"),
+        _tool_result("b1", "same output", tool_name="bash"),
+        _assistant_call("b2", "bash"),
+        _tool_result(
+            "b2",
+            '{"decision": "deny", "guard": "duplicate_call", "tool": "bash"}',
+            tool_name="bash",
+        ),
+    ]
+    decision = guard.check(_bash("b3"), _ctx(history), TurnView())
+
+    assert decision.verdict.value == "deny"
+
+
+def test_an_unanswered_approval_does_not_excuse_the_next_retry():
+    """``approval_timeout``/``not_approved`` also never reached the workspace."""
+    guard = DuplicateCallGuard(threshold=1)
+    _success(guard, _bash("b1"))
+
+    history = [
+        _assistant_call("b1", "bash"),
+        _tool_result("b1", "same output", tool_name="bash"),
+        _assistant_call("b2", "bash"),
+        _tool_result(
+            "b2",
+            '{"decision": "warn", "approved": false, "reason": "approval_timeout"}',
+            tool_name="bash",
+        ),
+    ]
+    decision = guard.check(_bash("b3"), _ctx(history), TurnView())
 
     assert decision.verdict.value == "deny"

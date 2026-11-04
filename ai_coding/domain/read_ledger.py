@@ -316,25 +316,21 @@ def render(
         missing = ",".join(f"{a}-{b}" for a, b in gaps)
         version = rows[0].version
         now = current_versions.get(path, "")
-        gap_note = f"；缺 {missing}" if gaps else ""
         if not version:
-            suffix = "未知版本；无法确认是否有效，需要时重读"
             stale.append(
-                f"- {path}{f' 共 {total} 行' if total else ''}：{shown}{gap_note}（{suffix}）"
+                f"- {path}：已读 {shown}（未知版本；旧行数/缺口不可信，先重读当前文件）"
             )
         elif not now:
-            suffix = "文件不可读或不存在；需要时重读"
             stale.append(
-                f"- {path}{f' 共 {total} 行' if total else ''}：{shown}{gap_note}（{suffix}）"
+                f"- {path}：已读 {shown}（文件不可读或不存在；旧行数不可信，需要时重读）"
             )
         elif now != version:
-            suffix = "已过期；文件已变化，需要时重读"
             stale.append(
-                f"- {path}{f' 共 {total} 行' if total else ''}：{shown}{gap_note}（{suffix}）"
+                f"- {path}：已读 {shown}（文件已变化；旧行数/缺口不可信，先重读当前文件）"
             )
         elif not total:
             fresh_partial.append(
-                f"- {path}：{shown}{gap_note}（当前版本，但总行数未知；不要声称完整）"
+                f"- {path}：{shown}（当前版本，但总行数未知；不要声称完整）"
             )
         elif gaps:
             fresh_partial.append(
@@ -350,7 +346,8 @@ def render(
         body = f"{body}\n…还有 {len(order) - max_files} 个文件"
     return (
         "<read-ledger>\n"
-        "本会话已读（过期/待读的按缺口重读；当前完整文件不要重读，当前部分文件只读缺口）：\n"
+        "本会话已读（未知/过期文件先重读当前文件，不按旧行数推断；"
+        "当前部分文件只读缺口，当前完整文件不要重读）：\n"
         f"{body}\n"
         "</read-ledger>"
     )

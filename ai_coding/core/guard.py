@@ -218,6 +218,23 @@ _GONE_HEADS = ("[Previous: used", "<persisted-output")
 #: after one of these may be a *necessary* refresh, not a duplicate.
 _MUTATING_CALLS = frozenset({"bash", "write", "edit"})
 
+#: Tool results that prove the call never reached the workspace.  A guard
+#: refusal and an unanswered approval both leave the files untouched; counting
+#: them as mutations lets a denial reset the guard that just fired.
+_NON_EXECUTED_MARKERS = ('"decision": "deny"', '"approved": false')
+
+
+def _not_run_ids(history: Sequence[ChatMessage]) -> frozenset[str]:
+    """Call ids whose tool result says the tool was refused before execution."""
+    ids: set[str] = set()
+    for message in history:
+        if message.role != "tool" or not message.tool_call_id:
+            continue
+        body = message.content or ""
+        if any(marker in body for marker in _NON_EXECUTED_MARKERS):
+            ids.add(message.tool_call_id)
+    return frozenset(ids)
+
 
 def _mutated_after_read(
     history: Sequence[ChatMessage],
@@ -227,12 +244,15 @@ def _mutated_after_read(
 ) -> bool:
     """Did a mutating call happen after the last result of ``read_ids``?
 
-    Pure over the assembled history: no IO, no session.  A failed mutation still
-    counts -- the file may have changed even when the tool refused (the stale
-    write that started the deadlock did).
+    Pure over the assembled history: no IO, no session.  A mutation that ran
+    and failed still counts -- the file may have changed (the stale write that
+    started the deadlock did).  A guard refusal or unanswered approval never
+    reached the tool, so it is skipped (trace fe53ff6f turn 6: the refusal
+    itself reset the duplicate guard and the next identical bash ran).
     """
     read_index = -1
     ids = set(read_ids)
+    not_run = _not_run_ids(history)
     for index, message in enumerate(history):
         if message.role == "tool" and (message.tool_call_id or "") in ids:
             read_index = index
@@ -243,7 +263,10 @@ def _mutated_after_read(
             # The assistant message for the call being checked is already in
             # ctx.messages.  Its own bash call is not evidence that the
             # workspace changed after the earlier success.
-            if ignore_call_id is not None and str(getattr(call, "id", "")) == ignore_call_id:
+            call_id = str(getattr(call, "id", ""))
+            if ignore_call_id is not None and call_id == ignore_call_id:
+                continue
+            if call_id in not_run:
                 continue
             if str(getattr(call, "name", "")).lower() in _MUTATING_CALLS:
                 return True

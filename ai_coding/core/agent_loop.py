@@ -193,8 +193,16 @@ _STREAM_CONTINUE = (
 )
 
 #: How long a reactive compaction may take when the turn has no deadline left
-#: to divide.  Matches the floor ``compact_now`` already applies to ``/compact``.
+#: to divide.
 _REACTIVE_COMPACT_SECONDS = 60.0
+
+#: A manual ``/compact`` is not a turn, but it still needs a ceiling.  60s was
+#: shorter than one multi-chunk summary: 149k chars split into three 60k calls,
+#: each with its own 60s model timeout.  The outer deadline fired mid-summary,
+#: the pipeline returned the original history, and the REPL printed
+#: ``271 → 271 (removed 0)`` with no checkpoint.  Keep it bounded, but above
+#: the chunk count a 256k context can produce.
+_MANUAL_COMPACT_SECONDS = 300.0
 
 #: Rescue compactions one turn may spend on provider context-overflow
 #: rejections (11-spec §7.3).  The old one-pass wall predated checkpoint
@@ -2772,7 +2780,7 @@ class AgentLoop:
         # ``/compact`` is a manual operation, not a turn: the 1800s turn clock
         # would let a slow L4 summarizer leave a running card for half an hour.
         # Use the same short floor the compactor already applies.
-        budget = _REACTIVE_COMPACT_SECONDS
+        budget = _MANUAL_COMPACT_SECONDS
         report = await self.compactor.compact_now(session, timeout=budget)
         if report["after"] != report["messages"]:
             self.closer.save(session)

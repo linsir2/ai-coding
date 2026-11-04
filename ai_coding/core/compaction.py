@@ -472,6 +472,11 @@ class Compactor:
             except Exception:  # noqa: BLE001 — a REPL command must never crash
                 return report
             if result == list(session.messages):
+                if self._summary_attempted():
+                    _log.warning(
+                        "manual compaction left the history unchanged; "
+                        "the summary call may have failed or timed out"
+                    )
                 return report  # nothing changed; do not pretend it did
             # D-6: this is the only writer of `session.messages` in the codebase,
             # and it is the lossy one -- the summary replaces the file. The snip

@@ -14,7 +14,11 @@ from ai_coding.ai.engine import ChatEngine
 from ai_coding.app.commands import handle_input
 from ai_coding.app.slash import parse_slash
 from ai_coding.config.models import AIConfig
-from ai_coding.core.agent_loop import _REACTIVE_COMPACT_SECONDS, AgentLoop
+from ai_coding.core.agent_loop import (
+    _MANUAL_COMPACT_SECONDS,
+    _REACTIVE_COMPACT_SECONDS,
+    AgentLoop,
+)
 from ai_coding.core.context_compression import ContextManager
 from ai_coding.domain.loop import StepResult
 from ai_coding.service.session_service import SessionService
@@ -181,7 +185,7 @@ async def test_r11c_repl_memory_lists_scenes_when_there_are_any(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_compact_session_uses_the_short_manual_budget(tmp_path):
+async def test_compact_session_uses_a_budget_long_enough_for_multichunk_summaries(tmp_path):
     settings = _settings()
     loop = _loop(tmp_path, settings)
     session = loop.sessions.create()
@@ -197,4 +201,5 @@ async def test_compact_session_uses_the_short_manual_budget(tmp_path):
     loop.compactor = capture  # type: ignore[assignment]
     await loop.compact_session(session)
 
-    assert capture.timeout == _REACTIVE_COMPACT_SECONDS
+    assert capture.timeout == _MANUAL_COMPACT_SECONDS
+    assert _MANUAL_COMPACT_SECONDS > _REACTIVE_COMPACT_SECONDS
