@@ -1203,6 +1203,12 @@ M-D2 在 M-D1 的写边界之上补了**读边界**与 **AF_UNIX** 两层（`doc
   可用且实际 wrap；否则 `verify_unavailable`。
 - `verified`：有 `verify_cmd` 且通过 `True`；省略 `False`；失败路径 `False` 或
   `None`。`/tasks` 显示“已验证/未验证”。
+- `merged` outcome 额外携带内部 `file_changes`（path/kind/version）与 bounded
+  `changed_paths`，在 landing claim 内用 `head0..candidate` 捕获；repo path 转
+  workspace-relative，workspace 外/目录/symlink 跳过。`merge_agent` 只在
+  `status=merged` 且 per-file CAS 通过时写 `exact`/`delete` receipt；取消后已
+  landing 的回执丢失是 fail-closed 限制，需要 verify/override。`merge_skipped`
+  不是 action。
 
 ### journal 事件
 

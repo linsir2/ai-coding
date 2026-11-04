@@ -11,6 +11,7 @@ from ai_coding.core.merge_queue import MergeQueue, MergeQueueClosed, MergeTicket
 from ai_coding.core.task_journal import TaskJournal
 from ai_coding.core.worktree import WorktreeError, WorktreeManager
 from ai_coding.core.write_coordinator import WriteCoordinator
+from ai_coding.infra.file_utils import file_version
 
 pytestmark = pytest.mark.asyncio
 
@@ -461,3 +462,70 @@ async def test_scheduler_and_real_queue_share_the_merge_dataflow(repo: Path) -> 
     assert view is not None and view.kind == "merge"
     assert view.status == "merged"
     assert (repo / "new.txt").read_text(encoding="utf-8") == "x\n"
+
+
+async def test_a_merged_ticket_reports_landed_file_changes(repo: Path) -> None:
+    base = _head(repo)
+    _branch(repo, "ai_sub_changes", {"new.txt": "x\n"})
+    queue = _queue(repo)
+    ticket = _ticket("ai_sub_changes", base)
+    try:
+        queue.enqueue(ticket)
+        out = await queue.wait(ticket)
+    finally:
+        await queue.aclose()
+
+    assert out["status"] == "merged"
+    assert out["changed_paths"] == ["new.txt"]
+    assert out["file_changes"] == [
+        {
+            "path": "new.txt",
+            "kind": "write",
+            "version": file_version(repo / "new.txt"),
+        }
+    ]
+
+
+async def test_a_landed_rename_and_delete_are_reported(repo: Path) -> None:
+    base = _head(repo)
+    _sh(["git", "checkout", "-qb", "ai_sub_rename"], repo)
+    (repo / "f.txt").unlink()
+    (repo / "renamed.txt").write_text("renamed\n", encoding="utf-8")
+    _sh(["git", "add", "-A"], repo)
+    _sh(["git", "commit", "-qm", "rename"], repo)
+    _sh(["git", "checkout", "main"], repo)
+    queue = _queue(repo)
+    ticket = _ticket("ai_sub_rename", base)
+    try:
+        queue.enqueue(ticket)
+        out = await queue.wait(ticket)
+    finally:
+        await queue.aclose()
+
+    assert out["status"] == "merged"
+    changes = {(c["path"], c["kind"]) for c in out["file_changes"]}
+    assert ("f.txt", "delete") in changes
+    assert ("renamed.txt", "write") in changes
+
+
+async def test_a_landed_symlink_is_not_a_forged_write_receipt(repo: Path) -> None:
+    import os
+
+    base = _head(repo)
+    outside = repo.parent / "secret.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    _sh(["git", "checkout", "-qb", "ai_sub_link"], repo)
+    os.symlink(outside, repo / "evil")
+    _sh(["git", "add", "-A"], repo)
+    _sh(["git", "commit", "-qm", "link"], repo)
+    _sh(["git", "checkout", "main"], repo)
+    queue = _queue(repo)
+    ticket = _ticket("ai_sub_link", base)
+    try:
+        queue.enqueue(ticket)
+        out = await queue.wait(ticket)
+    finally:
+        await queue.aclose()
+
+    assert out["status"] == "merged"
+    assert out.get("file_changes") == []

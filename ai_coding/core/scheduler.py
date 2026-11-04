@@ -373,7 +373,12 @@ class Scheduler:
     # ---- explicit merge ---------------------------------------------------
 
     async def merge(
-        self, target: str, verify_cmd: str | None = None, *, session_id: str = ""
+        self,
+        target: str,
+        verify_cmd: str | None = None,
+        *,
+        session_id: str = "",
+        workspace: str = "",
     ) -> dict[str, Any]:
         """Queue one explicit merge and wait for its terminal outcome."""
         if self._closed:
@@ -398,6 +403,7 @@ class Scheduler:
             base_commit=source.base_commit,
             verify_cmd=(verify_cmd or "").strip() or None,
             session_id=source.session_id or session_id,
+            workspace=workspace,
         )
         ticket.on_update = self._sync_merge_view
         self._merge_inflight[branch] = ticket
@@ -571,6 +577,7 @@ class Scheduler:
             commit=outcome.get("commit"),
             verified=outcome.get("verified"),
             error=outcome.get("error"),
+            changed_paths=tuple(outcome.get("changed_paths") or ()),
             origin_session=ticket.session_id,
         )
         self._registry.register(view)

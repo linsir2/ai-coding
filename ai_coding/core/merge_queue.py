@@ -26,6 +26,7 @@ from ai_coding.core.gitcmd import git
 from ai_coding.core.task_journal import TaskJournal
 from ai_coding.core.worktree import WorktreeError, WorktreeManager
 from ai_coding.core.write_coordinator import WriteCoordinator
+from ai_coding.infra.file_utils import file_version
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.security.permission_gate import bash_denied
 from ai_coding.security.process_sandbox import SandboxGap, spawn_argv
@@ -67,6 +68,8 @@ class MergeTicket:
     base_commit: str | None = None
     verify_cmd: str | None = None
     session_id: str = ""
+    #: Workspace-relative key base for landed file receipts.  Empty = repo root.
+    workspace: str = ""
     status: str = "queued"
     phase: str = "queued"
     started: float = field(default_factory=time.monotonic)
@@ -376,7 +379,8 @@ class MergeQueue:
             if outcome is not None:
                 return outcome
             main_head = await self._rev_parse("HEAD")
-            return {
+            changes = await self._landed_changes(head0, candidate, ticket.workspace)
+            outcome = {
                 "status": "merged",
                 "branch": ticket.branch,
                 "base_commit": ticket.base_commit,
@@ -387,6 +391,12 @@ class MergeQueue:
                 "attempts": ticket.attempts,
                 "worktree_path": temp_path,
             }
+            if changes is None:
+                outcome["capture_error"] = "landed_changes_unavailable"
+            else:
+                outcome["file_changes"] = changes
+                outcome["changed_paths"] = [change["path"] for change in changes]
+            return outcome
         finally:
             if claim is not None:
                 claim.release()
@@ -429,6 +439,68 @@ class MergeQueue:
         code, _ = await self._git("merge-base", "--is-ancestor", ancestor,
                                   descendant, merge_stderr=False)
         return code == 0
+
+    async def _landed_changes(
+        self, head0: str, candidate: str, workspace: str = ""
+    ) -> list[dict[str, Any]] | None:
+        """Post-landing paths, captured while the landing claim is still held.
+
+        ``head0..candidate`` is exactly what this merge added; ``base..tip``
+        would include earlier merges when several tickets land sequentially.
+        """
+        code, text = await self._git(
+            "diff",
+            "--name-status",
+            "-z",
+            "--no-ext-diff",
+            "--no-renames",
+            "--no-relative",
+            head0,
+            candidate,
+            "--",
+            merge_stderr=False,
+        )
+        if code != 0:
+            return None
+        code, root_text = await self._git(
+            "rev-parse", "--show-toplevel", merge_stderr=False
+        )
+        if code != 0:
+            return None
+        repo_root = Path(root_text.strip()).resolve()
+        base = Path(workspace).expanduser().resolve() if workspace else repo_root
+        tokens = [token for token in text.split("\0") if token]
+        changes: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index in range(0, len(tokens) - 1, 2):
+            status = tokens[index]
+            raw_path = tokens[index + 1]
+            if not status or status[0] not in "AMTD":
+                continue
+            absolute = Path(os.path.normpath(str(repo_root / raw_path)))
+            try:
+                key = absolute.relative_to(base).as_posix()
+            except ValueError:
+                # A subdirectory-scoped session must not acquire completion
+                # evidence for files outside its workspace; the merge still
+                # lands, but the receipt is a safe miss.
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            if absolute.is_symlink() or absolute.is_dir():
+                continue
+            if status[0] == "D":
+                changes.append({"path": key, "kind": "delete", "version": ""})
+            elif absolute.is_file():
+                changes.append(
+                    {
+                        "path": key,
+                        "kind": "write",
+                        "version": file_version(absolute),
+                    }
+                )
+        return changes
 
     async def _changed_paths(self, base: str, tip: str) -> list[str] | None:
         code, text = await self._git(

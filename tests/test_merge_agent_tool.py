@@ -12,8 +12,8 @@ class _Scheduler:
         self.calls = []
         self.outcome = outcome or {"status": "merged", "commit": "c" * 40}
 
-    async def merge(self, target, verify_cmd=None, *, session_id=""):
-        self.calls.append((target, verify_cmd, session_id))
+    async def merge(self, target, verify_cmd=None, *, session_id="", workspace=""):
+        self.calls.append((target, verify_cmd, session_id, workspace))
         return dict(self.outcome)
 
 
@@ -36,7 +36,7 @@ async def test_merged_result_is_success_and_carries_data():
     )
 
     assert result.success is True
-    assert scheduler.calls == [("run-1", "pytest -q", "")]
+    assert scheduler.calls == [("run-1", "pytest -q", "", "")]
     assert result.data["status"] == "merged"
     assert result.data["commit"] == "c" * 40
 

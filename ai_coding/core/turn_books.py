@@ -206,6 +206,18 @@ class TurnFrame:
     deadline: Deadline | None = None
 
 
+def _is_action(item: Any) -> bool:
+    """A merge only counts as an action when it actually landed."""
+    if item.call.name in ACTION_TOOLS:
+        return True
+    if item.call.name != "merge_agent":
+        return False
+    return (
+        isinstance(item.result.data, dict)
+        and item.result.data.get("status") == "merged"
+    )
+
+
 @dataclass
 class TurnBooks:
     """The observable state of the turn so far."""
@@ -451,7 +463,7 @@ class TurnBooks:
                 self.search_calls += 1
                 # I1/R-7: a successful look also answers "is this news".
                 self._note_finding(item)
-            elif item.call.name in ACTION_TOOLS:
+            elif _is_action(item):
                 self.search_streak = 0
                 # The world may have moved: what we saw before is not evidence
                 # about it any more.  A *failed* action changes nothing.
@@ -465,9 +477,7 @@ class TurnBooks:
         # where a command (``find`` through bash) can succeed without changing
         # anything.  Keeping reads out avoids double-arming SEARCH for the
         # ordinary "read two files with identical bodies" turn.
-        action_calls = [
-            item for item in succeeded if item.call.name in ACTION_TOOLS
-        ]
+        action_calls = [item for item in succeeded if _is_action(item)]
         if action_calls:
             last = action_calls[-1]
             digest = _output_digest(last.result.output or "")

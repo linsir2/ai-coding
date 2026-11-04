@@ -7,9 +7,11 @@ It deliberately holds no queue, worktree or git logic.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolResult
+from ai_coding.infra.file_utils import file_version
 from ai_coding.tools.base import BaseTool, ToolContext
 
 __all__ = ["MergeAgentTool"]
@@ -118,13 +120,22 @@ class MergeAgentTool(BaseTool):
                 output="error: merge queue is not available in this session",
                 error="unavailable",
             )
+        context = ctx
+        base_seq = (
+            context.effects().sequence
+            if context is not None and context.effects is not None
+            else 0
+        )
         outcome = await self._scheduler.merge(
             target,
             verify_cmd,
             session_id=getattr(ctx, "session_id", "") if ctx is not None else "",
+            workspace=getattr(ctx, "workspace", "") if ctx is not None else "",
         )
         status = str(outcome.get("status") or "merge_failed")
         success = status in _SUCCESS
+        if status == "merged" and context is not None:
+            self._record_changes(outcome, context, base_seq)
         data = {
             "status": status,
             "branch": outcome.get("branch"),
@@ -142,12 +153,51 @@ class MergeAgentTool(BaseTool):
             data["cleanup_error"] = outcome["cleanup_error"]
         if outcome.get("journal_error"):
             data["journal_error"] = True
+        if outcome.get("capture_error"):
+            data["capture_error"] = outcome["capture_error"]
         return ToolResult(
             success=success,
             output=_render(status, outcome),
             data=data,
             error=None if success else status,
         )
+
+
+    @staticmethod
+    def _record_changes(outcome: dict[str, Any], ctx: Any, base_seq: int) -> None:
+        note = getattr(ctx, "note_effect", None)
+        if note is None:
+            return
+        effects = ctx.effects() if getattr(ctx, "effects", None) is not None else None
+        for change in outcome.get("file_changes") or ():
+            if not isinstance(change, dict):
+                continue
+            path = str(change.get("path") or "")
+            kind = str(change.get("kind") or "write")
+            version = str(change.get("version") or "")
+            if not path:
+                continue
+            absolute = Path(path)
+            if not absolute.is_absolute():
+                absolute = Path(getattr(ctx, "workspace", "") or ".") / absolute
+            if absolute.is_symlink():
+                continue
+            if kind == "write":
+                if not version or file_version(absolute) != version:
+                    continue
+            else:
+                if absolute.exists() or absolute.is_symlink():
+                    continue
+            if effects is not None and effects.receipt_for(path, min_seq=base_seq + 1):
+                continue
+            note(
+                path,
+                version,
+                "merge_agent",
+                kind,
+                call_id=getattr(ctx, "call_id", ""),
+                confidence="exact",
+            )
 
 
 def _render(status: str, outcome: dict[str, Any]) -> str:
@@ -158,6 +208,8 @@ def _render(status: str, outcome: dict[str, Any]) -> str:
         line = f"merged {branch} as {outcome.get('commit') or '?'} ({flag})"
         if outcome.get("cleanup_error"):
             line += f"\nwarning: candidate cleanup failed: {outcome['cleanup_error']}"
+        if outcome.get("capture_error"):
+            line += "\nwarning: landed paths could not be captured; no receipts were written"
         return line
     if status in ("merge_skipped", "nothing_to_merge"):
         return f"nothing to merge from {branch}"
