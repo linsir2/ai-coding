@@ -91,7 +91,13 @@ def tool_context(
     # R20/RC-2: the read tool reports the range it returned, so the ledger is
     # built from what the harness actually sent rather than from what the model
     # claims it read.
-    note_read: Callable[[str, int, int, int, str], None] | None = None,
+    note_read: Callable[..., None] | None = None,
+    effects: Callable[[], Any] | None = None,
+    note_effect: Callable[..., None] | None = None,
+    approval: Any = None,
+    completion_override_approved: bool = False,
+    completion_override_provider: Callable[[], bool] | None = None,
+    note_completion_override: Callable[[], None] | None = None,
     note_approval: Callable[[dict[str, Any] | None], None] | None = None,
     note_tool_loaded: Callable[[tuple[str, ...]], None] | None = None,
     #: What ``tool_search`` may offer: the deferred part of this request's own
@@ -140,6 +146,12 @@ def tool_context(
         turn=int(turn),
         note_checkpoint=note_checkpoint,
         note_read=note_read,
+        effects=effects,
+        note_effect=note_effect,
+        approval=approval,
+        completion_override_approved=completion_override_approved,
+        completion_override_provider=completion_override_provider,
+        note_completion_override=note_completion_override,
         note_approval=note_approval,
         note_tool_loaded=note_tool_loaded,
         loaded_tools=tuple(getattr(session, "loaded_tools", ()) or ()),

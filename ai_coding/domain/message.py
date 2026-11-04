@@ -240,3 +240,24 @@ class ChatMessage:
             raise ValueError("assistant messages must carry content or tool_calls")
         if not self.id:
             self.id = uuid4().hex
+
+
+#: The heads that mean a tool result no longer carries its body.  Shared by the
+#: duplicate guard and the read-coverage check: a range whose result was
+#: compacted/persisted away is not "still visible".
+GONE_TOOL_RESULT_HEADS = ("[Previous: used", "<persisted-output")
+
+
+def visible_tool_call_ids(
+    messages: list[ChatMessage] | tuple[ChatMessage, ...],
+) -> frozenset[str]:
+    """Call ids whose tool result is still fully in the supplied history."""
+    visible: set[str] = set()
+    for message in messages:
+        if message.role != "tool" or not message.tool_call_id:
+            continue
+        body = message.content or ""
+        if any(body.startswith(head) for head in GONE_TOOL_RESULT_HEADS):
+            continue
+        visible.add(message.tool_call_id)
+    return frozenset(visible)

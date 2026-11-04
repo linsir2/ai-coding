@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolArtifact, ToolResult
+from ai_coding.infra.file_utils import file_version
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import (
     Sandbox,
@@ -14,7 +15,7 @@ from ai_coding.security.sandbox import (
     open_inside,
     relative_to_root,
 )
-from ai_coding.tools.base import BaseTool, ToolContext
+from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_MAX_CHARS = 2_000_000  # 2M chars
 #: One call's content cap.  Measured (trace 2026-10-31, session f1d881ee):
@@ -185,6 +186,15 @@ class WriteTool(BaseTool):
             return ToolResult(success=False, output=f"write error: {exc}")
 
         self._tracker.record(target)
+        note_effect = resolve_ctx(ctx).note_effect
+        if note_effect is not None:
+            note_effect(
+                self._sandbox.key(target),
+                file_version(target),
+                "write",
+                "write",
+                call_id=resolve_ctx(ctx).call_id,
+            )
         verb = "appended" if mode == "append" else "wrote"
         return ToolResult(
             success=True,

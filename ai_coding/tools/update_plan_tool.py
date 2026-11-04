@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from ai_coding.core.completion import CompletionGate
 from ai_coding.domain.message import ToolResult
-from ai_coding.domain.task import TodoItem, TodoStatus
+from ai_coding.domain.task import TaskState, TodoItem, TodoStatus
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 __all__ = ["UpdatePlanTool"]
@@ -47,6 +48,13 @@ class UpdatePlanTool(BaseTool):
         step_properties: dict[str, Any] = {
             "step": {"type": "string"},
             "status": {"type": "string", "enum": list(_STATUSES)},
+            "files": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Files proving this step.",
+            },
+            "override": {"type": "boolean"},
+            "override_reason": {"type": "string"},
         }
         if self._verify_items:
             step_properties["verify"] = {"type": "string"}
@@ -80,7 +88,7 @@ class UpdatePlanTool(BaseTool):
         if not isinstance(raw, list) or not raw:
             return _invalid("plan must be a non-empty array")
         verify_enabled = bool(getattr(resolved, "plan_verify_items", False))
-        parsed: list[tuple[str, str, str]] = []
+        parsed: list[tuple[str, str, str, list[str], bool, str]] = []
         for entry in raw:
             if not isinstance(entry, dict):
                 return _invalid("each plan entry must be an object")
@@ -95,29 +103,110 @@ class UpdatePlanTool(BaseTool):
             verify = ""
             if verify_enabled and isinstance(entry.get("verify"), str):
                 verify = entry["verify"].strip()
-            parsed.append((step.strip(), status, verify))
+            raw_files = entry.get("files") or []
+            files = (
+                [str(path) for path in raw_files]
+                if isinstance(raw_files, list)
+                else []
+            )
+            parsed.append(
+                (
+                    step.strip(),
+                    status,
+                    verify,
+                    files,
+                    bool(entry.get("override", False)),
+                    str(entry.get("override_reason", "") or "").strip(),
+                )
+            )
 
         task = resolved.task
-        task.items.clear()
-        written: list[tuple[TodoItem, str]] = []
-        for step, status, verify in parsed:
-            item = task.add(step, verify=verify)
+        previous = {item.content: item for item in task.items}
+        previous_by_index = list(task.items)
+        candidate = TaskState(goal=task.goal)
+        written: list[TodoItem] = []
+        settled: set[str] = set()
+        next_seq = (
+            resolved.effects().sequence if resolved.effects is not None else 0
+        )
+        for index, (step, status, verify, files, _override, _reason) in enumerate(parsed):
+            item = candidate.add(step, verify=verify, files=files)
             item.status = cast(TodoStatus, status)
-            written.append((item, verify))
+            prior = previous.get(step)
+            if prior is None and index < len(previous_by_index):
+                prior = previous_by_index[index]
+            if status == "completed" and prior is not None and prior.status == "completed":
+                if not files and not verify:
+                    # ``update_plan`` replaces the whole list and only carries
+                    # step/status; a completed step advanced by a later call
+                    # must keep its proof/evidence or it is re-gated.
+                    item.files = list(prior.files)
+                    item.verify = prior.verify
+                    item.evidence = prior.evidence
+                    item.started_seq = prior.started_seq
+                    settled.add(item.id)
+            if status == "in_progress":
+                # Reasserting an in-progress step must not move the proof
+                # boundary past receipts produced while it was running; a
+                # reopen (completed -> in_progress) starts a new boundary.
+                item.started_seq = (
+                    prior.started_seq
+                    if prior is not None
+                    and prior.status == "in_progress"
+                    and prior.started_seq > 0
+                    else next_seq + 1
+                )
+            elif status == "completed" and item.id not in settled:
+                item.started_seq = (
+                    prior.started_seq
+                    if prior is not None and prior.started_seq > 0
+                    else next_seq
+                )
+            written.append(item)
 
-        verify_item = getattr(resolved, "verify_item", None)
-        if verify_enabled and verify_item is not None:
-            for item, verify in written:
-                if item.status != "completed" or not verify:
-                    continue
-                passed, tail = await verify_item(item.id, item.content, verify)
-                if not passed:
-                    item.status = "in_progress"
-                    return ToolResult(
-                        success=False,
-                        output=f"verify failed: {tail}",
-                        error="verify_failed",
-                    )
+        for item, entry in zip(written, parsed, strict=True):
+            if item.status != "completed" or item.id in settled:
+                continue
+            verdict = await CompletionGate.check(item, resolved)
+            if verdict.ok:
+                item.evidence = verdict.evidence
+                continue
+            _step, _status, _verify, _files, override, reason = entry
+            if not override:
+                error = (
+                    "verify_failed"
+                    if verdict.reason.startswith("verify failed:")
+                    else "completion_unverified"
+                )
+                return ToolResult(
+                    success=False,
+                    output=(
+                        verdict.reason
+                        if error == "verify_failed"
+                        else f"error: plan step '{item.content}' has no current "
+                        f"receipt/verify: {verdict.reason}. Add files/verify, "
+                        "or override with a reason."
+                    ),
+                    error=error,
+                    data={"id": item.id, "reason": verdict.reason},
+                )
+            override_verdict = await CompletionGate.override(item, resolved, reason)
+            if not override_verdict.ok:
+                if "reason is required" in override_verdict.reason:
+                    error = "missing_override_reason"
+                elif "needs operator" in override_verdict.reason:
+                    error = "override_unavailable"
+                else:
+                    error = "override_denied"
+                return ToolResult(
+                    success=False,
+                    output=f"error: {override_verdict.reason}",
+                    error=error,
+                    data={"id": item.id},
+                )
+            item.evidence = override_verdict.evidence
+
+        task.items = written
         return ToolResult(success=True, output="Plan updated")
 
 

@@ -95,6 +95,20 @@ class Sandbox:
             return root
         return None
 
+    def key(self, path: str | Path) -> str:
+        """A stable effect/read key: workspace-relative, or absolute outside.
+
+        Deliberately not ``normalize``: that helper folds an outside path to
+        its basename, which lets two extra roots with the same basename share
+        one evidence key.  A resolved path under a root other than the
+        workspace stays absolute and unique.
+        """
+        resolved = Path(path).expanduser().resolve()
+        try:
+            return resolved.relative_to(self.workspace).as_posix()
+        except ValueError:
+            return str(resolved)
+
     def resolve(self, path: str | Path) -> Path:
         """Resolve ``path`` and verify it lies within a known root.
 

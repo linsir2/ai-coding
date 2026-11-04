@@ -165,6 +165,8 @@ plan_verify_items: bool = False   # 仅 codex 路径读取；session 路径始�
 
 ### C-1 `update_plan` 工具（照抄 `plan.rs` / `plan_spec.rs`）
 
+> **2026-11-04 EffectLedger 偏差**：`update_plan` 的 step 现在额外接受 `files`、`override`、`override_reason`；`status=completed` 必须由 `CompletionGate` 验证 receipt/verify，缺证明时只能显式 override。这是为修复“模型自报 completed”的必要偏离；默认 schema 的 `verify` 仍只由 `plan_verify_items` 开启。
+
 新文件 `ai_coding/tools/update_plan_tool.py`：
 
 ```json

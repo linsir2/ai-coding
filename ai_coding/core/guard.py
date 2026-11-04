@@ -25,7 +25,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from ai_coding.domain.message import ChatMessage, ToolCall, ToolResult
+from ai_coding.domain.message import (
+    ChatMessage,
+    ToolCall,
+    ToolResult,
+    visible_tool_call_ids,
+)
 from ai_coding.tools.base import ToolContext
 
 __all__ = [
@@ -208,11 +213,6 @@ _REREADABLE = frozenset({"read"})
 #: with a marker immediately, so "nothing to reuse" would be true every time.
 _UNVISIBLE_REREAD_FACTOR = 2
 
-#: The heads that mean "this tool message no longer carries its body": the L2
-#: envelope and its legacy bare form, then L3's persisted marker.  An L4 summary
-#: removes the message entirely, so it never reaches this check.
-_GONE_HEADS = ("[Previous: used", "<persisted-output")
-
 
 #: Calls whose execution may change a file the model has already read.  A read
 #: after one of these may be a *necessary* refresh, not a duplicate.
@@ -271,24 +271,6 @@ def _mutated_after_read(
             if str(getattr(call, "name", "")).lower() in _MUTATING_CALLS:
                 return True
     return False
-
-
-def _visible_tool_ids(history: Sequence[ChatMessage]) -> frozenset[str]:
-    """Call ids whose tool result is still fully in the request's history (O-1).
-
-    ``ToolContext.messages`` is by construction the assembled history -- what
-    the model can still see (``tools/base.py``).  Reading it keeps this guard
-    pure: no IO, no session, no clock.
-    """
-    visible: set[str] = set()
-    for message in history:
-        if message.role != "tool" or not message.tool_call_id:
-            continue
-        body = message.content or ""
-        if any(body.startswith(head) for head in _GONE_HEADS):
-            continue
-        visible.add(message.tool_call_id)
-    return frozenset(visible)
 
 
 class DuplicateCallGuard:
@@ -353,7 +335,7 @@ class DuplicateCallGuard:
             return GuardDecision(GuardVerdict.ALLOW)
         if call.name.lower() in _REREADABLE:
             return self._check_reread(
-                call, succeeded, _visible_tool_ids(ctx.messages), ctx.messages
+                call, succeeded, visible_tool_call_ids(ctx.messages), ctx.messages
             )
         if len(succeeded) >= self.threshold:
             return self._refusal(call, succeeded[0], len(succeeded))

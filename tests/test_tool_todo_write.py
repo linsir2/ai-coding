@@ -19,7 +19,12 @@ def tool():
 
 @pytest.fixture
 def ctx():
-    return ToolContext(task=TaskState(goal="goal"), workspace="/tmp/ws", session_id="sid")
+    return ToolContext(
+        task=TaskState(goal="goal"),
+        workspace="/tmp/ws",
+        session_id="sid",
+        completion_override_approved=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -58,7 +63,14 @@ async def test_a_missing_action_is_inferred_from_the_params(tool, ctx):
 async def test_update_sets_status_and_evidence(tool, ctx):
     await tool.execute({"action": "add", "content": "task a"}, ctx)
     r = await tool.execute(
-        {"action": "update", "id": "1", "status": "completed", "evidence": "tests pass"},
+        {
+            "action": "update",
+            "id": "1",
+            "status": "completed",
+            "evidence": "tests pass",
+            "override": True,
+            "override_reason": "test fixture",
+        },
         ctx,
     )
     assert r.success is True
@@ -214,8 +226,26 @@ async def test_r9_after_the_dependency_completes_the_item_can_finish(ctx):
     tool = _gate_tool()
     await tool.execute({"action": "add", "content": "dep"}, ctx)
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
-    await tool.execute({"action": "update", "id": "1", "status": "completed"}, ctx)
-    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
+    await tool.execute(
+        {
+            "action": "update",
+            "id": "1",
+            "status": "completed",
+            "override": True,
+            "override_reason": "fixture",
+        },
+        ctx,
+    )
+    r = await tool.execute(
+        {
+            "action": "update",
+            "id": "2",
+            "status": "completed",
+            "override": True,
+            "override_reason": "fixture",
+        },
+        ctx,
+    )
     assert r.success is True
     assert ctx.task.get("2").status == "completed"
 
@@ -226,7 +256,16 @@ async def test_r9_dropping_the_dependency_unblocks(ctx):
     await tool.execute({"action": "add", "content": "dep"}, ctx)
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
     await tool.execute({"action": "update", "id": "1", "status": "dropped"}, ctx)
-    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
+    r = await tool.execute(
+        {
+            "action": "update",
+            "id": "2",
+            "status": "completed",
+            "override": True,
+            "override_reason": "fixture",
+        },
+        ctx,
+    )
     assert r.success is True
 
 
@@ -245,8 +284,17 @@ async def test_r9_the_gate_can_be_switched_off(ctx):
     tool = TodoWriteTool(enforce_dependencies=False)
     await tool.execute({"action": "add", "content": "dep"}, ctx)
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
-    r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
-    assert r.success is True  # today's behaviour
+    r = await tool.execute(
+        {
+            "action": "update",
+            "id": "2",
+            "status": "completed",
+            "override": True,
+            "override_reason": "fixture",
+        },
+        ctx,
+    )
+    assert r.success is True  # dependency gate off; completion uses the fixture override
 
 
 # ---- 19 §3.5 (Q6): completion is the execution stage's mark ------------------

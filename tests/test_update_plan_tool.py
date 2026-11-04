@@ -50,7 +50,13 @@ def test_schema_matches_codex_exactly() -> None:
     assert plan["minItems"] == 1
     step = plan["items"]
     assert set(step) == {"type", "properties", "required"}
-    assert set(step["properties"]) == {"step", "status"}
+    assert set(step["properties"]) == {
+        "step",
+        "status",
+        "files",
+        "override",
+        "override_reason",
+    }
     assert step["required"] == ["step", "status"]
     assert step["properties"]["status"]["enum"] == [
         "pending",
@@ -75,12 +81,17 @@ async def test_result_is_the_fixed_text() -> None:
 @pytest.mark.asyncio
 async def test_it_replaces_the_whole_list_with_ids_1_to_n() -> None:
     task = _task_with_old_items()
-    ctx = ToolContext(task=task)
+    ctx = ToolContext(task=task, completion_override_approved=True)
     result = await UpdatePlanTool().execute(
         {
             "explanation": "start",
             "plan": [
-                {"step": "first step", "status": "completed"},
+                {
+                    "step": "first step",
+                    "status": "completed",
+                    "override": True,
+                    "override_reason": "legacy plan task",
+                },
                 {"step": "second step", "status": "in_progress"},
                 {"step": "third step", "status": "pending"},
             ],
@@ -181,7 +192,7 @@ async def test_a_failed_verify_reverts_that_item_to_in_progress() -> None:
         {
             "plan": [
                 {"step": "done step", "status": "completed", "verify": "false"},
-                {"step": "other step", "status": "completed"},
+                {"step": "other step", "status": "pending"},
             ]
         },
         ctx,
@@ -190,9 +201,8 @@ async def test_a_failed_verify_reverts_that_item_to_in_progress() -> None:
     assert result.success is False
     assert result.error == "verify_failed"
     assert result.output == "verify failed: exit 1"
-    assert task.items[0].status == "in_progress"
-    # The other item keeps the status it was written with.
-    assert task.items[1].status == "completed"
+    # A failed gate must not install a half-applied plan.
+    assert task.items == []
 
 
 @pytest.mark.asyncio
@@ -210,9 +220,10 @@ async def test_verify_is_not_run_when_the_switch_is_off() -> None:
         ctx,
     )
 
-    assert result.success is True
+    assert result.success is False
+    assert result.error == "completion_unverified"
     assert calls == []
-    assert task.items[0].status == "completed"
+    assert task.items == []
 
 
 def test_codex_registers_update_plan_and_no_present_plan(tmp_path) -> None:
@@ -222,3 +233,112 @@ def test_codex_registers_update_plan_and_no_present_plan(tmp_path) -> None:
     names = set(registry.list_names())
     assert "update_plan" in names
     assert "present_plan" not in names
+
+
+@pytest.mark.asyncio
+async def test_reasserting_in_progress_does_not_move_the_receipt_boundary(tmp_path):
+    from ai_coding.domain.session import SessionData
+    from ai_coding.infra.file_utils import file_version
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="g")
+    ctx = ToolContext(
+        task=session.task,
+        workspace=str(tmp_path),
+        effects=lambda: session.effects,
+    )
+    tool = UpdatePlanTool()
+    await tool.execute(
+        {"plan": [{"step": "step", "status": "in_progress"}]}, ctx
+    )
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    session.record_effect("a.py", file_version(target), tool="write", call_id="c1")
+
+    await tool.execute(
+        {"plan": [{"step": "step", "status": "in_progress"}]}, ctx
+    )
+    result = await tool.execute(
+        {
+            "plan": [
+                {"step": "step", "status": "completed", "files": ["a.py"]}
+            ]
+        },
+        ctx,
+    )
+
+    assert result.success is True
+    assert session.task.items[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_first_completed_step_accepts_a_current_receipt(tmp_path):
+    from ai_coding.domain.session import SessionData
+    from ai_coding.infra.file_utils import file_version
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="g")
+    ctx = ToolContext(
+        task=session.task,
+        workspace=str(tmp_path),
+        effects=lambda: session.effects,
+    )
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    session.record_effect("a.py", file_version(target), tool="write", call_id="c1")
+
+    result = await UpdatePlanTool().execute(
+        {
+            "plan": [
+                {"step": "step", "status": "completed", "files": ["a.py"]}
+            ]
+        },
+        ctx,
+    )
+
+    assert result.success is True
+    assert session.task.items[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_advancing_a_plan_preserves_an_already_completed_steps_proof(tmp_path):
+    from ai_coding.domain.session import SessionData
+    from ai_coding.infra.file_utils import file_version
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    session.task = TaskState(goal="g")
+    ctx = ToolContext(
+        task=session.task,
+        workspace=str(tmp_path),
+        effects=lambda: session.effects,
+    )
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    session.record_effect("a.py", file_version(target), tool="write", call_id="c1")
+    tool = UpdatePlanTool()
+    first = await tool.execute(
+        {
+            "plan": [
+                {"step": "step", "status": "completed", "files": ["a.py"]},
+                {"step": "next", "status": "pending"},
+            ]
+        },
+        ctx,
+    )
+    assert first.success is True
+
+    # The model advances the next step and does not repeat step's files; the
+    # completed step must keep its proof instead of being re-gated.
+    second = await tool.execute(
+        {
+            "plan": [
+                {"step": "step", "status": "completed"},
+                {"step": "next", "status": "in_progress"},
+            ]
+        },
+        ctx,
+    )
+
+    assert second.success is True
+    assert session.task.items[0].status == "completed"
+    assert session.task.items[0].files == ["a.py"]

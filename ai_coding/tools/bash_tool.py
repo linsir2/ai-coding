@@ -23,6 +23,7 @@ from ai_coding.core.events import ToolChunk
 from ai_coding.core.jobs import WAIT_CANCELLED, WAIT_SETTLED
 from ai_coding.core.turn_report import emit_degraded
 from ai_coding.domain.message import ToolResult
+from ai_coding.infra.file_utils import file_version
 from ai_coding.infra.subprocess_runner import run_process_async
 from ai_coding.infra.text_clip import clip_head_tail
 from ai_coding.security.process_sandbox import (
@@ -32,6 +33,7 @@ from ai_coding.security.process_sandbox import (
     spawn_argv,
 )
 from ai_coding.security.sandbox import Sandbox
+from ai_coding.shell_parse import effect_path_candidates
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_TIMEOUT = 60
@@ -676,6 +678,73 @@ class BashTool(BaseTool):
         the knob would be a lie."""
         return self._max_timeout + _TIMEOUT_GRACE
 
+    @staticmethod
+    def _effect_key(path: Path, workspace: str) -> str:
+        try:
+            return path.relative_to(Path(workspace).resolve()).as_posix()
+        except (ValueError, OSError):
+            return str(path)
+
+    def _effect_candidates(
+        self, command: str, ctx: ToolContext | None
+    ) -> list[tuple[str, Path]]:
+        context = resolve_ctx(ctx)
+        workspace = context.workspace or "."
+        raw: list[str] = effect_path_candidates(command, workspace=workspace)
+        ledger = context.effects() if context.effects is not None else None
+        if ledger is not None:
+            raw.extend(mark.path for mark in ledger.reads)
+        if context.task is not None:
+            raw.extend(
+                path
+                for item in context.task.items
+                for path in item.files
+            )
+        found: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+        for value in raw:
+            path = Path(value).expanduser()
+            if not path.is_absolute():
+                path = Path(workspace) / path
+            try:
+                path = path.resolve()
+            except OSError:
+                continue
+            if path.exists() and not path.is_file():
+                continue
+            key = self._effect_key(path, workspace)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append((key, path))
+            if len(found) >= 64:
+                break
+        return found
+
+    def _effect_probe(
+        self, command: str, ctx: ToolContext | None
+    ) -> list[tuple[str, Path, str]]:
+        return [
+            (key, path, file_version(path))
+            for key, path in self._effect_candidates(command, ctx)
+        ]
+
+    def _apply_effect_probe(
+        self, probe: list[tuple[str, Path, str]], ctx: ToolContext | None
+    ) -> None:
+        context = resolve_ctx(ctx)
+        note = context.note_effect
+        if note is None:
+            return
+        for key, path, before in probe:
+            after = file_version(path)
+            if after == before:
+                continue
+            if after and path.is_file():
+                note(key, after, "bash", "write", call_id=context.call_id)
+            elif before and not path.exists():
+                note(key, "", "bash", "delete", call_id=context.call_id)
+
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
@@ -720,7 +789,11 @@ class BashTool(BaseTool):
         # registry the tool is foreground-only").
         registry = getattr(resolve_ctx(ctx), "jobs", None)
         if registry is not None:
-            return await self._run_as_job(command, effective, ctx, registry, network)
+            probe = self._effect_probe(command, ctx)
+            try:
+                return await self._run_as_job(command, effective, ctx, registry, network)
+            finally:
+                self._apply_effect_probe(probe, ctx)
 
         # R8c: stream what the command says while it says it.  Chunks are
         # observation only - the ToolResult below is what the model ever sees.
@@ -760,6 +833,7 @@ class BashTool(BaseTool):
                 data={"reason": exc.reason},
             )
 
+        probe = self._effect_probe(command, ctx)
         outcome = await run_process_async(
             argv,
             shell=False,
@@ -773,6 +847,7 @@ class BashTool(BaseTool):
             # M-D2 §D.3: the seccomp filter is an inherited descriptor.
             pass_fds=getattr(self._backend, "seccomp_fds", ()),
         )
+        self._apply_effect_probe(probe, ctx)
 
         if outcome.error is not None:
             return ToolResult(

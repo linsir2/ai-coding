@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from .agents import is_plan_agent
+from .effects import EffectLedger, FileReceipt
 from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
-from .read_ledger import ReadMark, merge_mark, normalize
+from .read_ledger import ReadMark, normalize
 from .task import TaskState
 from .turn_digest import TurnDigest
 
@@ -26,11 +27,12 @@ def _read_mark_from_dict(row: Mapping[str, Any]) -> ReadMark | None:
         end = int(row["end"])
         total = int(row.get("total", 0) or 0)
         version = str(row.get("version", "") or "")
+        call_id = str(row.get("callId", row.get("call_id", "")) or "")
     except (KeyError, TypeError, ValueError):
         return None
     if not path:
         return None
-    return ReadMark(path, start, end, total, version)
+    return ReadMark(path, start, end, total, version, call_id)
 
 
 def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
@@ -372,7 +374,10 @@ class SessionData:
     # content) and rewritten every iteration into the ``<read-ledger>`` tail
     # block -- a volatile block, so compaction cannot reach it.  The checkpoint
     # stores conclusions; this stores evidence.
-    read_ledger: tuple[ReadMark, ...] = ()
+    effects: EffectLedger = field(default_factory=EffectLedger)
+    #: The operator allowed the first completion override in this session;
+    #: later overrides do not ask again.  Persisted so a resume keeps it.
+    completion_override_approved: bool = False
     # R20: every source path any tool result named.  Tier 1 of the citation
     # check ("the model cited a file this session never touched") needs it, and
     # it must be *accumulated*, not derived from ``messages``: compaction keeps
@@ -540,8 +545,11 @@ class SessionData:
         and forget the other.
         """
         self.task = TaskState(goal=goal)
-        # A new plan must not inherit the previous approved plan.
+        # A new plan must not inherit the previous approved plan or the previous
+        # plan's file receipts.  Sequence is monotonic, so old started_seq
+        # values still sort correctly.
         self.approved_plan = ""
+        self.effects = self.effects.clear_files()
         # 13 §2.1 (Q2 拍板): a new plan starts on a clean ladder.
         self.intervention_state = None
         return self.task
@@ -551,6 +559,11 @@ class SessionData:
 
     # ---- R20/RC-2: the read ledger ---------------------------------------
 
+    @property
+    def read_ledger(self) -> tuple[ReadMark, ...]:
+        """Merged display/citation view; raw provenance lives in ``effects``."""
+        return self.effects.merged_reads()
+
     def note_read(
         self,
         path: str,
@@ -559,6 +572,8 @@ class SessionData:
         total: int = 0,
         *,
         version: str = "",
+        call_id: str = "",
+        canonical: bool = False,
         workspace: str = "",
     ) -> None:
         """Record that lines ``start..end`` of ``path`` reached the context.
@@ -568,11 +583,34 @@ class SessionData:
         two keys for one file would make ``covers`` miss a citation.  The range
         is the *returned* one, so a paged read records its page, not the file.
         """
-        key = normalize(path, workspace)
+        key = str(path) if canonical else normalize(path, workspace)
         if not key or end < start:
             return
-        self.read_ledger = merge_mark(
-            self.read_ledger, ReadMark(key, start, end, total, version)
+        self.effects = self.effects.note_read(
+            ReadMark(key, start, end, total, version, call_id)
+        )
+
+    def record_effect(
+        self,
+        path: str,
+        version: str,
+        *,
+        tool: str,
+        call_id: str = "",
+        kind: str = "write",
+        confidence: str = "exact",
+    ) -> None:
+        """Record one file effect and invalidate older reads of that path."""
+        key = str(path)
+        if not key:
+            return
+        self.effects = self.effects.invalidate_reads((key,)).record_effect(
+            key,
+            str(version),
+            tool=tool,
+            call_id=call_id,
+            kind=kind,
+            confidence=confidence,
         )
 
     def invalidate_reads(self, paths: Iterable[str], *, workspace: str = "") -> None:
@@ -586,10 +624,7 @@ class SessionData:
         keys.discard("")
         if not keys:
             return
-        self.read_ledger = tuple(
-            replace(mark, version="") if mark.path in keys else mark
-            for mark in self.read_ledger
-        )
+        self.effects = self.effects.invalidate_reads(tuple(keys))
 
     def note_seen(self, paths: Iterable[str]) -> None:
         """Accumulate the source paths a batch of tool results named.
@@ -777,8 +812,27 @@ class SessionData:
             data["compactionAnchor"] = self.compaction_anchor
         # R20: same rule again -- a session that never read a file writes no key,
         # so every file written before this layer existed reads the same.
-        if self.read_ledger:
+        if self.effects.reads:
             data["readLedger"] = [mark.to_dict() for mark in self.read_ledger]
+            if any(mark.call_id for mark in self.effects.reads):
+                data["readCalls"] = [mark.to_dict() for mark in self.effects.reads]
+        if self.effects.files:
+            data["fileReceipts"] = [
+                {
+                    "path": receipt.path,
+                    "version": receipt.version,
+                    "tool": receipt.tool,
+                    "call_id": receipt.call_id,
+                    "seq": receipt.seq,
+                    "kind": receipt.kind,
+                    "confidence": receipt.confidence,
+                }
+                for receipt in self.effects.files
+            ]
+        if self.effects.sequence:
+            data["effectSeq"] = int(self.effects.sequence)
+        if self.completion_override_approved:
+            data["completionOverrideApproved"] = True
         if self.seen_paths:
             data["seenPaths"] = list(self.seen_paths)
         # Deferred tool schemas: only a session that loaded some writes the key.
@@ -855,13 +909,45 @@ class SessionData:
         # any of the three fields, is dropped rather than written back -- the
         # runtime keeps the list, but nothing should be able to write a shape
         # the reader cannot read back (same rule as ``agentHistory``).
-        raw_ledger = data.get("readLedger")
+        raw_calls = data.get("readCalls")
+        raw_ledger = raw_calls if isinstance(raw_calls, list) else data.get("readLedger")
         ledger_rows = raw_ledger if isinstance(raw_ledger, list) else []
-        read_ledger = tuple(
+        read_marks = tuple(
             mark
             for row in ledger_rows
             if isinstance(row, Mapping)
             and (mark := _read_mark_from_dict(row)) is not None
+        )
+        raw_receipts = data.get("fileReceipts")
+        receipt_rows = raw_receipts if isinstance(raw_receipts, list) else []
+        receipts_list: list[FileReceipt] = []
+        for row in receipt_rows:
+            if not isinstance(row, Mapping) or not row.get("path"):
+                continue
+            try:
+                seq = int(row.get("seq", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            receipts_list.append(
+                FileReceipt(
+                    path=str(row["path"]),
+                    version=str(row.get("version", "")),
+                    tool=str(row.get("tool", "")),
+                    call_id=str(row.get("call_id", row.get("callId", "")) or ""),
+                    seq=seq,
+                    kind=str(row.get("kind", "write") or "write"),
+                    confidence=str(row.get("confidence", "exact") or "exact"),
+                )
+            )
+        try:
+            effect_seq = int(data.get("effectSeq", 0) or 0)
+        except (TypeError, ValueError):
+            effect_seq = 0
+        max_receipt_seq = max((receipt.seq for receipt in receipts_list), default=0)
+        effects = EffectLedger(
+            reads=read_marks,
+            files=tuple(receipts_list),
+            sequence=max(effect_seq, max_receipt_seq),
         )
         raw_seen = data.get("seenPaths")
         seen_rows = raw_seen if isinstance(raw_seen, list) else []
@@ -887,7 +973,7 @@ class SessionData:
             for row in history_rows
             if isinstance(row, Mapping) and row.get("from") and row.get("to")
         ]
-        return cls(
+        session = cls(
             session_id=data.get("sessionId", ""),
             title=data.get("title", ""),
             created_time=data.get("createdTime", ""),
@@ -906,7 +992,10 @@ class SessionData:
             compaction_checkpoint=str(data.get("compactionCheckpoint", "") or ""),
             compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
-            read_ledger=read_ledger,
+            effects=effects,
+            completion_override_approved=(
+                data.get("completionOverrideApproved") is True
+            ),
             seen_paths=seen_paths,
             loaded_tools=tuple(
                 str(name) for name in (data.get("loadedTools") or ()) if name
@@ -925,6 +1014,15 @@ class SessionData:
             readonly=raw_readonly,
             permissions=permissions,
         )
+        # Pre-EffectLedger sessions have no started_seq.  Give every open item
+        # a boundary after the loaded sequence so a write performed after this
+        # resume can prove it; completed items keep 0 and are not re-gated.
+        if session.task is not None:
+            boundary = effects.sequence + 1
+            for item in session.task.items:
+                if not item.is_terminal() and item.started_seq == 0:
+                    item.started_seq = boundary
+        return session
 
 
 # Re-export helper for callers that need to resolve references.

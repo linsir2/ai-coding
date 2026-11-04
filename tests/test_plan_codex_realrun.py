@@ -131,7 +131,11 @@ async def test_propose_then_implement_in_two_turns(tmp_path):
                 "c1",
                 "update_plan",
                 plan=[
-                    {"step": "加一个健康检查端点", "status": "in_progress"},
+                    {
+                        "step": "加一个健康检查端点",
+                        "status": "in_progress",
+                        "files": ["endpoint.txt"],
+                    },
                     {"step": "补一条测试", "status": "pending"},
                 ],
             ),
@@ -140,7 +144,11 @@ async def test_propose_then_implement_in_two_turns(tmp_path):
                 "c3",
                 "update_plan",
                 plan=[
-                    {"step": "加一个健康检查端点", "status": "completed"},
+                    {
+                        "step": "加一个健康检查端点",
+                        "status": "completed",
+                        "files": ["endpoint.txt"],
+                    },
                     {"step": "补一条测试", "status": "in_progress"},
                 ],
             ),
@@ -199,8 +207,15 @@ async def test_text_stop_leaves_items_open_without_continuing(tmp_path):
             _call(
                 "c1",
                 "update_plan",
-                plan=[{"step": "第一步", "status": "completed"},
-                      {"step": "第二步", "status": "pending"}],
+                plan=[
+                    {
+                        "step": "第一步",
+                        "status": "completed",
+                        "override": True,
+                        "override_reason": "legacy no-file step",
+                    },
+                    {"step": "第二步", "status": "pending"},
+                ],
             ),
             _text("我先停一下。"),
         ]
@@ -210,6 +225,7 @@ async def test_text_stop_leaves_items_open_without_continuing(tmp_path):
     session.agent = "build"
     session.plan_implementing = True
     session.plan_verify_items = False
+    session.completion_override_approved = True
 
     await loop.process_input(session, "Implement the plan.", synthetic=True)
     session.plan_implementing = False

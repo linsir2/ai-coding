@@ -30,6 +30,7 @@ them costs 0.04 ms together, and a parser holds no state between parses.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -37,6 +38,7 @@ __all__ = [
     "command_shape",
     "command_views",
     "command_words",
+    "effect_path_candidates",
     "parses_cleanly",
     "path_candidates",
 ]
@@ -377,4 +379,62 @@ def path_candidates(text: str) -> list[str]:
         if candidate in found:
             continue
         found.append(candidate)
+    return found
+
+
+_EFFECT_WRITE_PROGRAMS = frozenset(
+    {
+        "touch", "cp", "mv", "rm", "rmdir", "mkdir", "tee", "truncate",
+        "install", "ln", "sed", "perl", "dd", "tar", "unzip", "chmod",
+        "chown", "patch",
+    }
+)
+
+
+def effect_path_candidates(text: str, workspace: str = "") -> list[str]:
+    """Paths a shell command may write, including relative spellings.
+
+    This is deliberately a *candidate* list for the effect probe, not a
+    write-proof: the caller stats the candidates before and after and only
+    records a receipt when the version changed.  Reusing the tree-sitter
+    command views keeps quoting, redirections and command substitutions in
+    one place; a plain argument that happens to contain a slash is harmless
+    because the stat will not change.
+    """
+    if not str(text or "").strip():
+        return []
+    base = Path(workspace) if workspace else Path(".")
+    raw: list[str] = list(path_candidates(text))
+    forced: set[str] = set()
+    for view in command_views(text):
+        raw.extend(view.arguments)
+        raw.extend(view.redirects)
+        # A shell redirection is a write target even when it has no extension
+        # (``> Makefile``); the same is true for arguments of common writers.
+        forced.update(view.redirects)
+        if view.program.rsplit("/", 1)[-1] in _EFFECT_WRITE_PROGRAMS:
+            forced.update(view.arguments)
+    found: list[str] = []
+    for word in raw:
+        word = word.strip()
+        if len(word) >= 2 and word[0] == word[-1] and word[0] in ("'", '"'):
+            word = word[1:-1]
+        if not word or word.startswith("-"):
+            continue
+        if word.startswith(("http://", "https://", "//")):
+            continue
+        looks_path = (
+            word in (".", "..")
+            or word.startswith(("/", "~", "./", "../"))
+            or "/" in word
+            or "." in Path(word).name
+        )
+        if not looks_path and word not in forced:
+            continue
+        path = Path(word).expanduser()
+        if not path.is_absolute():
+            path = base / path
+        key = str(path)
+        if key not in found:
+            found.append(key)
     return found

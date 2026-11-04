@@ -262,6 +262,9 @@ async def test_read_stat_oserror(tmp_path):
         def is_file(self):
             return True
 
+        def open(self, *args, **kwargs):
+            raise PermissionError("no stat")
+
         def stat(self):
             raise PermissionError("no stat")
 

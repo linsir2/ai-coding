@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
-from ai_coding.domain.message import ToolResult
-from ai_coding.infra.file_utils import file_version
+from ai_coding.domain.message import ToolResult, visible_tool_call_ids
 from ai_coding.security.credentials import is_credential_path
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
@@ -104,10 +104,11 @@ class ReadTool(BaseTool):
 
         approved = resolve_ctx(ctx).credential_approved
         workspace = getattr(self._sandbox, "workspace", None)
-        if (
+        credential = (
             is_credential_path(path_str, workspace=workspace)
             or is_credential_path(target)
-        ) and not approved:
+        )
+        if credential and not approved:
             return ToolResult(
                 success=False,
                 output=(
@@ -120,19 +121,38 @@ class ReadTool(BaseTool):
         if not target.is_file():
             return ToolResult(success=False, output=f"file not found: {path_str}")
 
+        # Read and stat the same descriptor.  The old read-then-stat order
+        # could pair old bytes with a newer version when a writer raced us,
+        # which would make the coverage guard deny a necessary refresh.
         try:
-            size = target.stat().st_size
-        except OSError as exc:
-            return ToolResult(success=False, output=f"cannot stat file: {exc}")
-
-        if size > self._max_file_size:
-            msg = f"file too large ({size} bytes > {self._max_file_size} limit)"
-            return ToolResult(success=False, output=msg)
-
-        try:
-            text = target.read_text(encoding="utf-8", errors="replace")
+            with target.open("rb") as handle:
+                stat = os.fstat(handle.fileno())
+                if stat.st_size > self._max_file_size:
+                    msg = (
+                        f"file too large ({stat.st_size} bytes > "
+                        f"{self._max_file_size} limit)"
+                    )
+                    return ToolResult(success=False, output=msg)
+                raw = handle.read()
+                post = os.fstat(handle.fileno())
         except OSError as exc:
             return ToolResult(success=False, output=f"read error: {exc}")
+        if (
+            stat.st_mtime_ns,
+            stat.st_size,
+            stat.st_ino,
+        ) != (post.st_mtime_ns, post.st_size, post.st_ino):
+            return ToolResult(
+                success=False,
+                output=(
+                    f"file changed while it was being read: {path_str}; "
+                    "retry the read"
+                ),
+                error="read_raced",
+            )
+
+        text = raw.decode("utf-8", errors="replace")
+        version = f"{post.st_mtime_ns}:{post.st_size}:{post.st_ino}"
 
         lines = text.splitlines(keepends=False)
         # Clamp twice: ``offset + limit`` runs past the end of the file, and the
@@ -141,6 +161,34 @@ class ReadTool(BaseTool):
         end = max(end, offset)
         page_end = min(end, offset + self._max_lines)
         view = lines[offset:page_end]
+
+        resolved_ctx = resolve_ctx(ctx)
+        ledger = resolved_ctx.effects
+        if (
+            ledger is not None
+            and page_end > offset
+            and not credential
+            and (covering := ledger().covering_read(
+                self._sandbox.key(target), offset + 1, page_end, version
+            )) is not None
+            and covering.call_id
+            and covering.call_id in visible_tool_call_ids(resolved_ctx.messages)
+        ):
+            return ToolResult(
+                success=False,
+                output=(
+                    f"error: lines {offset + 1}-{page_end} of '{path_str}' are already "
+                    f"in the current context (call {covering.call_id}); reuse that "
+                    "result instead of reading the same range again"
+                ),
+                error="already_read",
+                data={
+                    "path": path_str,
+                    "call_id": covering.call_id,
+                    "start": offset + 1,
+                    "end": page_end,
+                },
+            )
 
         # line-numbered output, right-aligned 6-wide like `cat -n`
         numbered = [f"{i + 1:>6}  {line}" for i, line in enumerate(view, start=offset)]
@@ -175,14 +223,15 @@ class ReadTool(BaseTool):
         # The ledger records the *returned* page, so a paged read of a 3,081-line
         # file accumulates instead of pretending it read the whole thing.
         note_read = resolve_ctx(ctx).note_read
-        credential = is_credential_path(path_str, workspace=workspace) or is_credential_path(target)
         if note_read is not None and not credential:
             note_read(
-                path_str,
+                self._sandbox.key(target),
                 offset + 1,
                 page_end,
                 len(lines),
-                file_version(target),
+                version,
+                call_id=resolved_ctx.call_id,
+                canonical=True,
             )
 
         return ToolResult(success=True, output=output)

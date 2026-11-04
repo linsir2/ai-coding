@@ -115,7 +115,23 @@ class ToolContext:
     # the harness can render the ``<read-ledger>`` block from session state
     # instead of trusting a narrative.  Same shape as ``note_checkpoint``: the
     # loop gives it, the tool uses it, ``None`` outside a loop that owns a turn.
-    note_read: Callable[[str, int, int, int, str], None] | None = None
+    note_read: Callable[..., None] | None = None
+    #: Live view of the session effect ledger.  A callback, not a snapshot: a
+    #: write earlier in the same tool batch must be visible to a later
+    #: todo_write/read check.  ``None`` outside a loop that owns the ledger.
+    effects: Callable[[], Any] | None = None
+    #: A successful write/edit/bash reports its file effect here immediately;
+    #: a later call in the same batch can then see it.  ``call_id`` is passed
+    #: as a keyword so a tool never has to reach into the dispatcher.
+    note_effect: Callable[..., None] | None = None
+    #: The shared approval callback; only used for an explicit completion
+    #: override (the first one in a session).  None = no human available.
+    approval: Any = None
+    completion_override_approved: bool = False
+    #: Live session flag.  A batch context is copied per call; without this a
+    #: second override in the same batch would ask again.
+    completion_override_provider: Callable[[], bool] | None = None
+    note_completion_override: Callable[[], None] | None = None
     # P3 (补充式方案 06): how the dispatcher tells the running turn that an
     # approval question is about to be asked (or has been answered).  The loop
     # writes a small marker beside the session file so a crash during the wait

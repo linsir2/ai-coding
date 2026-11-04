@@ -91,11 +91,19 @@ class ReadMark:
     #: Empty means "unknown" (an old mark, or an explicitly invalidated mark);
     #: it must never be rendered as a complete read.
     version: str = ""
+    #: The tool call that produced this exact range.  Kept on the raw ledger so
+    #: the read-coverage guard can prove the earlier result is still visible;
+    #: the merged display view deliberately drops it.
+    call_id: str = ""
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
         if not self.version:
             data.pop("version", None)
+        if not self.call_id:
+            data.pop("call_id", None)
+        else:
+            data["callId"] = data.pop("call_id")
         return data
 
 

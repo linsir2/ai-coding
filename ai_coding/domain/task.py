@@ -40,6 +40,13 @@ _MARKERS: dict[str, str] = {
 RENDER_MAX_ITEMS = 40
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class TodoItem:
     """A single actionable item in the task list."""
@@ -63,6 +70,13 @@ class TodoItem:
     #: test/build commands; ``research`` items may run in a read-only sub-agent
     #: later.  Unwritten when default.
     kind: str = "write"
+    #: EffectLedger sequence at the moment this item entered in_progress.
+    #: Completion requires a receipt produced at or after it; an old receipt
+    #: from a previous plan cannot satisfy a new item.
+    started_seq: int = 0
+    #: Consecutive CompletionGate refusals.  At two, the item is blocked rather
+    #: than left to be retried forever.
+    completion_failures: int = 0
 
     def is_terminal(self) -> bool:
         return self.status in TERMINAL_STATUSES
@@ -83,6 +97,10 @@ class TodoItem:
             data["files"] = list(self.files)
         if self.kind != "write":
             data["kind"] = self.kind
+        if self.started_seq:
+            data["startedSeq"] = int(self.started_seq)
+        if self.completion_failures:
+            data["completionFailures"] = int(self.completion_failures)
         if self.created_at:
             data["createdAt"] = self.created_at
         if self.updated_at:
@@ -107,6 +125,12 @@ class TodoItem:
             verify=str(data.get("verify", "") or ""),
             files=files,
             kind=str(data.get("kind", "write") or "write"),
+            started_seq=_safe_int(
+                data.get("startedSeq", data.get("started_seq", 0))
+            ),
+            completion_failures=_safe_int(
+                data.get("completionFailures", data.get("completion_failures", 0))
+            ),
             created_at=str(data.get("createdAt", data.get("created_at", ""))),
             updated_at=str(data.get("updatedAt", data.get("updated_at", ""))),
         )
@@ -246,6 +270,8 @@ class TaskState:
         content: str | None = None,
         evidence: str | None = None,
         verify: str | None = None,
+        files: list[str] | None = None,
+        started_seq: int | None = None,
         ts: str = "",
     ) -> TodoItem:
         """Patch an item. Raises ``KeyError`` (unknown id) / ``ValueError`` (bad status)."""
@@ -264,6 +290,10 @@ class TaskState:
             item.evidence = evidence
         if verify is not None:
             item.verify = verify
+        if files is not None:
+            item.files = [str(path) for path in files]
+        if started_seq is not None:
+            item.started_seq = int(started_seq)
         item.updated_at = ts
         return item
 

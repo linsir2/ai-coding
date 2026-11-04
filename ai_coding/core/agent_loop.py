@@ -2149,12 +2149,32 @@ class AgentLoop:
         )
         self.closer.write_ahead = write_ahead
 
+        def _note_effect(
+            path: str,
+            version: str,
+            tool: str,
+            kind: str,
+            *,
+            call_id: str = "",
+            canonical: bool = False,
+        ) -> None:
+            session.record_effect(
+                path,
+                version,
+                tool=tool,
+                call_id=call_id,
+                kind=kind,
+            )
+
         def _note_read(
             path: str,
             start: int,
             end: int,
             total: int,
             version: str = "",
+            *,
+            call_id: str = "",
+            canonical: bool = False,
         ) -> None:
             session.note_read(
                 path,
@@ -2162,6 +2182,8 @@ class AgentLoop:
                 end,
                 total,
                 version=version,
+                call_id=call_id,
+                canonical=canonical,
                 workspace=self.workspace,
             )
 
@@ -2193,6 +2215,14 @@ class AgentLoop:
                 # absolute and a relative path in one session, and two keys for
                 # one file would make every citation look uncovered.
                 note_read=_note_read,
+                effects=lambda: session.effects,
+                note_effect=_note_effect,
+                approval=self.dispatcher.approval,
+                completion_override_approved=session.completion_override_approved,
+                completion_override_provider=lambda: session.completion_override_approved,
+                note_completion_override=lambda: setattr(
+                    session, "completion_override_approved", True
+                ),
                 # P3 (补充式方案 06): the dispatcher announces a pending approval
                 # here and clears it when answered; the loop mirrors it into a
                 # marker beside the session file, never into the session itself.
@@ -2260,6 +2290,34 @@ class AgentLoop:
             if item.result.success and item.call.name != "read"
             for path in paths_in(item.result.output or "", self.workspace)
         )
+        # Delegated writes: a subagent reports changed_paths in its structured
+        # result.  The parent must record those as its own effects or a
+        # completed parent item can never see the child's receipt.
+        workspace_path = Path(self.workspace).resolve()
+        for item in outcomes:
+            if not item.result.success or not isinstance(item.result.data, dict):
+                continue
+            for raw in item.result.data.get("changed_paths") or ():
+                candidate = Path(str(raw)).expanduser()
+                if not candidate.is_absolute():
+                    candidate = workspace_path / candidate
+                try:
+                    resolved = candidate.resolve()
+                    key = resolved.relative_to(workspace_path).as_posix()
+                except (OSError, ValueError):
+                    continue
+                # The child's changed path may be in a worktree the parent has
+                # not merged.  Record provenance, never an exact receipt: only
+                # verify/override may complete the parent without a real local
+                # write.
+                session.record_effect(
+                    key,
+                    "",
+                    tool=item.call.name,
+                    call_id=item.call.id,
+                    kind="write",
+                    confidence="unknown",
+                )
         # Round 1 evidence freshness: write/edit know the exact files they
         # changed.  bash/merge path discovery is deliberately deferred; the
         # request-time version comparison still catches appends by any tool.

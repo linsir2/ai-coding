@@ -11,8 +11,10 @@ point of change; the loop additionally injects the render on every iteration.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
+from ai_coding.core.completion import CompletionGate
 from ai_coding.domain.message import ToolResult
 from ai_coding.domain.task import VALID_STATUSES, Blockers, TaskState
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
@@ -84,6 +86,25 @@ class TodoWriteTool(BaseTool):
                     "type": "string",
                     "description": "Shell command proving this item (for 'add'/'update').",
                 },
+                "files": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Files this item is expected to create/change. Completed "
+                        "requires a current receipt for each one."
+                    ),
+                },
+                "override": {
+                    "type": "boolean",
+                    "description": (
+                        "Explicitly complete without a receipt/verify; the first "
+                        "use in a session asks the operator."
+                    ),
+                },
+                "override_reason": {
+                    "type": "string",
+                    "description": "Why this completion is unverified.",
+                },
             },
             "required": ["action"],
         }
@@ -107,7 +128,7 @@ class TodoWriteTool(BaseTool):
                 action = "list"
 
         if action == "add":
-            return self._add(params, task)
+            return self._add(params, task, ctx)
         if action == "update":
             # 19 §3.5 (Q6): completion is the execution stage's mark — the
             # planning posture may author the list, not finish it.  Measured
@@ -127,7 +148,7 @@ class TodoWriteTool(BaseTool):
                     error="readonly_completion",
                     data={"action": "update", "reason": "readonly_session"},
                 )
-            return self._update(params, task)
+            return await self._update(params, task, ctx)
         if action == "list":
             return self._ok(task, "list")
         return ToolResult(
@@ -138,7 +159,12 @@ class TodoWriteTool(BaseTool):
 
     # ---- actions ----------------------------------------------------------
 
-    def _add(self, params: dict[str, Any], task: TaskState) -> ToolResult:
+    def _add(
+        self,
+        params: dict[str, Any],
+        task: TaskState,
+        ctx: ToolContext | None,
+    ) -> ToolResult:
         content = str(params.get("content", "")).strip()
         if not content:
             return ToolResult(
@@ -179,10 +205,27 @@ class TodoWriteTool(BaseTool):
                 if target not in cleaned:
                     cleaned.append(target)
             deps = cleaned
-        item = task.add(content, depends_on=deps, verify=str(params.get("verify", "") or ""))
+        raw_files = params.get("files") or []
+        files = [str(path) for path in raw_files] if isinstance(raw_files, list) else []
+        item = task.add(
+            content,
+            depends_on=deps,
+            verify=str(params.get("verify", "") or ""),
+            files=files,
+        )
+        resolved = resolve_ctx(ctx)
+        if resolved.effects is not None:
+            # Any later effect must be after the item boundary; this makes a
+            # direct pending -> completed with an old receipt impossible.
+            item.started_seq = resolved.effects().sequence + 1
         return self._ok(task, "add", item_id=item.id)
 
-    def _update(self, params: dict[str, Any], task: TaskState) -> ToolResult:
+    async def _update(
+        self,
+        params: dict[str, Any],
+        task: TaskState,
+        ctx: ToolContext | None,
+    ) -> ToolResult:
         item_id = str(params.get("id", "")).strip()
         if not item_id:
             return ToolResult(
@@ -194,6 +237,12 @@ class TodoWriteTool(BaseTool):
         content = params.get("content")
         evidence = params.get("evidence")
         verify = params.get("verify")
+        raw_files = params.get("files")
+        files = (
+            [str(path) for path in raw_files]
+            if isinstance(raw_files, list)
+            else None
+        )
         normalised = None if status is None else str(status).strip().lower()
         if normalised == "skipped":
             # r24/C: ``skipped`` is a harness verdict (a dependency failed), not
@@ -212,13 +261,99 @@ class TodoWriteTool(BaseTool):
             blockers = task.blockers(item_id)
             if blockers.any:
                 return self._blocked_result(item_id, blockers)
+        resolved = resolve_ctx(ctx)
+        item = task.get(item_id)
+        if item is None:
+            return ToolResult(
+                success=False,
+                output=f"error: todo #{item_id} not found",
+                error="unknown_id",
+                data={"action": "update", "id": item_id},
+            )
+        completion_evidence = None if evidence is None else str(evidence)
+        sequence = resolved.effects().sequence if resolved.effects is not None else 0
+        new_start = sequence + 1
+        if normalised == "in_progress" and item.status == "in_progress" and item.started_seq > 0:
+            new_start = item.started_seq
+        if normalised == "completed" and item.started_seq == 0:
+            # A legacy/direct item has no boundary; require an effect produced
+            # after this point.  New items get the boundary at add time.
+            new_start = sequence + 1
+        if normalised == "completed":
+            # Validate the fields this same call supplies, not the old item.
+            # Otherwise a new files/verify pair is either rejected (not applied
+            # yet) or silently bypassed (old values are checked).
+            probe = replace(
+                item,
+                files=item.files if files is None else files,
+                verify=item.verify if verify is None else str(verify),
+                started_seq=(
+                    item.started_seq if item.started_seq > 0 else new_start
+                ),
+            )
+            if item.status == "completed":
+                return self._ok(task, "update", item_id=item_id)
+            verdict = await CompletionGate.check(probe, resolved)
+            if not verdict.ok:
+                override = bool(params.get("override", False))
+                reason = str(params.get("override_reason", "") or "").strip()
+                if not override:
+                    item.completion_failures += 1
+                    if item.completion_failures >= 2:
+                        item.status = "blocked"
+                        item.evidence = f"completion blocked: {verdict.reason}"
+                        return ToolResult(
+                            success=False,
+                            output=(
+                                f"error: todo #{item_id} completion blocked after "
+                                f"two unverified attempts: {verdict.reason}. "
+                                "Add a receipt/verify, or use override with a reason."
+                            ),
+                            error="completion_blocked",
+                            data={"id": item_id, "reason": verdict.reason},
+                        )
+                    return ToolResult(
+                        success=False,
+                        output=(
+                            f"error: todo #{item_id} has no current receipt/verify: "
+                            f"{verdict.reason}. Use files with a successful write/edit, "
+                            "a verify command, or override=true with a reason."
+                        ),
+                        error="completion_unverified",
+                        data={"id": item_id, "reason": verdict.reason},
+                    )
+                override_verdict = await CompletionGate.override(probe, resolved, reason)
+                if not override_verdict.ok:
+                    error = (
+                        "missing_override_reason"
+                        if "reason" in override_verdict.reason and not reason
+                        else "override_denied"
+                    )
+                    if (
+                        "no approval" in override_verdict.reason
+                        or "needs operator" in override_verdict.reason
+                    ):
+                        error = "override_unavailable"
+                    return ToolResult(
+                        success=False,
+                        output=f"error: {override_verdict.reason}",
+                        error=error,
+                        data={"id": item_id},
+                    )
+                completion_evidence = completion_evidence or override_verdict.evidence
+            else:
+                completion_evidence = completion_evidence or verdict.evidence
+            item.completion_failures = 0
+        started_seq = new_start if normalised == "in_progress" else None
         try:
             task.update(
                 item_id,
                 status=normalised,
                 content=None if content is None else str(content),
-                evidence=None if evidence is None else str(evidence),
+                evidence=completion_evidence,
                 verify=None if verify is None else str(verify),
+                files=files,
+                started_seq=started_seq if normalised == "in_progress" else None,
             )
         except KeyError:
             return ToolResult(

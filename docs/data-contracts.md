@@ -192,6 +192,11 @@ R1 新增/变更的契约集中在四处。
 | `task: TaskState \| None` | **有 todo 项时才写入 JSON**（只有 goal 是可从首条 user 消息还原的噪声） |
 | `approved_plan: str = ""` | 人类最近一次批准的 `<proposed_plan>` 正文；会话 JSON 始终落盘键 `approvedPlan`（空串表示显式清空）。它是**上下文**，不是 goal，也不是第二份 todo 清单；`/plan off` 与 `begin_plan` 清空；旧会话落盘前没有 `approvedPlan` 时，`from_dict` 会从历史里恢复"最后一块 `<proposed_plan>` + 后续 `Implement the plan.`"配对到的计划（先落盘的显式 `approvedPlan` 优先）。完整正文已在 history 时 tail **不再重复**；仅当 history 缺失正文（如压缩后）时注入 compact `<plan-record>`；当前 step 始终由 `<task-state>` 提供 |
 | `ReadMark.version: str = ""` | 读取时的轻量文件版本（`mtime_ns:size:inode`）；`request_assembly` 在每次组装时用当前 stat 对比。渲染只有一个版本感知路径：当前完整文件 compact 列出；当前部分文件列出总行数、已读段与缺口；未知/过期/文件不存在只列已读段，不再发布旧总行数或旧缺口（避免模型把“读取时 150 行”当成当前文件长度）；总行数未知也不声称完整。`write`/`edit` 成功 artifacts 会显式失效对应路径（同批 read 只保留 read 在 write 之后的证据）。旧 session 没有 version 的行按 unknown 处理；空 version 不落盘，读取时忽略未知键与坏行 |
+| `ReadMark.callId: str = ""` | 产生该范围的 tool call id；raw `readCalls` 保留它，`readLedger` 仍是 merged 展示投影。读取覆盖守卫只在同 canonical key、同当前版本、请求范围被覆盖，且该 call 的 tool result 仍在请求 history 中时拒绝 |
+| `SessionData.effects: EffectLedger` | 会话级单一效果账本：raw reads、`FileReceipt(path,version,tool,call_id,seq,kind,confidence)`、单调 `sequence`。`readLedger` 是兼容投影，`readCalls`/`fileReceipts` 是原始 provenance；旧 session 缺失时按空 receipts / `callId=""` fail-open。`write`/`edit`/foreground `bash`/subagent `changed_paths` 成功后立即入账并失效该路径旧 read |
+| `SessionData.completionOverrideApproved` | 本 session 已获准过一次显式 completion override；后续 override 不再弹用户确认。仅非空写入 |
+| `TodoItem.startedSeq/completionFailures` | `startedSeq` 是进入 in_progress 时的 effect sequence；receipt 必须不早于它。`completionFailures >= 2` 时完成门禁把条目置 `blocked`。均可选落盘 |
+| `todo_write` 完成门禁 | `status=completed` 必须有 `files` 的 current receipt、`verify` 通过，或显式 `override=true` + reason（首次 override 需用户批准，session 记住）。`update_plan` 的 step 同样支持 `files/verify/override`；`update_goal complete` 只把未完成项标 dropped，不绕过 item completion |
 
 ### 工具结果（`domain/message.py`）
 
