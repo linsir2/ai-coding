@@ -298,6 +298,18 @@ def parses_cleanly(text: str) -> bool:
     return not tree.root_node.has_error
 
 
+def _program_and_arguments(command: Any) -> tuple[str, tuple[str, ...]]:
+    name = command.child_by_field_name("name")
+    program = _text(name) if name is not None else ""
+    arguments: list[str] = []
+    for argument in command.children_by_field_name("argument"):
+        if argument.type in _WORD_NODES:
+            arguments.append(_text(argument))
+        elif argument.type in _STRING_NODES:
+            arguments.append(_string_content(argument))
+    return program, tuple(arguments)
+
+
 def command_views(text: str) -> list[CommandView]:
     """One view per command in ``text``, in the order they run.
 
@@ -311,18 +323,11 @@ def command_views(text: str) -> list[CommandView]:
         return []
     views: list[CommandView] = []
     for command in _commands(tree.root_node):
-        name = command.child_by_field_name("name")
-        program = _text(name) if name is not None else ""
-        arguments: list[str] = []
-        for argument in command.children_by_field_name("argument"):
-            if argument.type in _WORD_NODES:
-                arguments.append(_text(argument))
-            elif argument.type in _STRING_NODES:
-                arguments.append(_string_content(argument))
+        program, arguments = _program_and_arguments(command)
         views.append(
             CommandView(
                 program=program,
-                arguments=tuple(arguments),
+                arguments=arguments,
                 redirects=tuple(_redirect_targets(command)),
                 broken=_is_broken(command),
             )
@@ -392,49 +397,257 @@ _EFFECT_WRITE_PROGRAMS = frozenset(
 
 
 def effect_path_candidates(text: str, workspace: str = "") -> list[str]:
-    """Paths a shell command may write, including relative spellings.
+    """Absolute write candidates a shell command may produce.
 
-    This is deliberately a *candidate* list for the effect probe, not a
-    write-proof: the caller stats the candidates before and after and only
-    records a receipt when the version changed.  Reusing the tree-sitter
-    command views keeps quoting, redirections and command substitutions in
-    one place; a plain argument that happens to contain a slash is harmless
-    because the stat will not change.
+    This is a *candidate* list for BashTool's before/after stat probe, not a
+    proof that a path was written.  A scope-aware traversal is needed because
+    tree-sitter attaches a trailing redirect to a whole list/compound, and
+    because ``cd sub && ...`` changes the base for later relative paths.  The
+    public ``command_views`` contract stays unchanged for security rules.
     """
     if not str(text or "").strip():
         return []
-    base = Path(workspace) if workspace else Path(".")
-    raw: list[str] = list(path_candidates(text))
-    forced: set[str] = set()
-    for view in command_views(text):
-        raw.extend(view.arguments)
-        raw.extend(view.redirects)
-        # A shell redirection is a write target even when it has no extension
-        # (``> Makefile``); the same is true for arguments of common writers.
-        forced.update(view.redirects)
-        if view.program.rsplit("/", 1)[-1] in _EFFECT_WRITE_PROGRAMS:
-            forced.update(view.arguments)
+    tree = _tree(text)
+    if tree is None:
+        return []
     found: list[str] = []
-    for word in raw:
-        word = word.strip()
-        if len(word) >= 2 and word[0] == word[-1] and word[0] in ("'", '"'):
-            word = word[1:-1]
-        if not word or word.startswith("-"):
+    _effect_walk(tree.root_node, Path(workspace or ".").expanduser().resolve(), found)
+    for absolute in path_candidates(text):
+        try:
+            resolved = str(Path(absolute).expanduser())
+        except OSError:
             continue
-        if word.startswith(("http://", "https://", "//")):
-            continue
-        looks_path = (
-            word in (".", "..")
-            or word.startswith(("/", "~", "./", "../"))
-            or "/" in word
-            or "." in Path(word).name
-        )
-        if not looks_path and word not in forced:
-            continue
-        path = Path(word).expanduser()
-        if not path.is_absolute():
-            path = base / path
-        key = str(path)
-        if key not in found:
-            found.append(key)
+        if resolved not in found:
+            found.append(resolved)
     return found
+
+
+def _effect_add(
+    word: str,
+    cwd: Path | None,
+    found: list[str],
+    *,
+    force: bool = False,
+) -> None:
+    word = word.strip()
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in ("'", '"'):
+        word = word[1:-1]
+    if not word or word.startswith("-"):
+        return
+    if word.startswith(("http://", "https://", "//")):
+        return
+    looks_path = (
+        word in (".", "..")
+        or word.startswith(("/", "~", "./", "../"))
+        or "/" in word
+        or "." in Path(word).name
+    )
+    if not looks_path and not force:
+        return
+    path = Path(word).expanduser()
+    if not path.is_absolute():
+        if cwd is None:
+            return
+        path = cwd / path
+    try:
+        value = str(path.resolve())
+    except OSError:
+        value = str(path)
+    if value not in found:
+        found.append(value)
+
+
+def _effect_cd(args: tuple[str, ...], cwd: Path | None) -> Path | None:
+    if len(args) != 1:
+        return None
+    target = args[0]
+    if target in ("-", "") or target.startswith("-"):
+        return None
+    if any(ch in target for ch in "$`*?[]{}"):
+        return None
+    path = Path(target).expanduser()
+    if not path.is_absolute():
+        if cwd is None:
+            return None
+        path = cwd / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    # A missing literal cd fails in the shell; treat its cwd as unknown rather
+    # than predicting writes into a directory that is not there.
+    return resolved if resolved.is_dir() else None
+
+
+def _effect_substitutions(node: Any, cwd: Path | None, found: list[str]) -> None:
+    for child in node.named_children:
+        if child.type in ("command_substitution", "process_substitution"):
+            _effect_walk(child, cwd, found)
+        else:
+            _effect_substitutions(child, cwd, found)
+
+
+_OUTPUT_REDIRECT_OPS = frozenset({">", ">>", ">|", "&>", "&>>", ">&"})
+
+
+def _effect_contains_cd(node: Any) -> bool:
+    if node.type == "command":
+        program, _arguments = _program_and_arguments(node)
+        return program.rsplit("/", 1)[-1] == "cd"
+    return any(_effect_contains_cd(child) for child in node.named_children)
+
+
+def _effect_redirect(redirect: Any, cwd: Path | None, found: list[str]) -> None:
+    if redirect.type == "heredoc_redirect":
+        for child in redirect.children:
+            if child.type == "file_redirect":
+                _effect_redirect(child, cwd, found)
+        return
+    if redirect.type != "file_redirect":
+        return
+    operator = next(
+        (child.type for child in redirect.children if child.type in _OUTPUT_REDIRECT_OPS),
+        "",
+    )
+    if not operator:
+        return
+    destination = redirect.child_by_field_name("destination")
+    if destination is None or destination.type in ("number", "file_descriptor"):
+        return
+    if destination.type in ("command_substitution", "process_substitution"):
+        _effect_walk(destination, cwd, found)
+        return
+    _effect_add(_text(destination), cwd, found, force=True)
+
+
+def _effect_redirects(node: Any, cwd: Path | None, found: list[str]) -> None:
+    for redirect in node.children_by_field_name("redirect"):
+        destination = redirect.child_by_field_name("destination")
+        if destination is not None and destination.type in (
+            "command_substitution",
+            "process_substitution",
+        ):
+            _effect_walk(destination, cwd, found)
+        _effect_redirect(redirect, cwd, found)
+
+
+def _effect_walk(
+    node: Any,
+    cwd: Path | None,
+    found: list[str],
+) -> Path | None:
+    kind = node.type
+    if kind == "program":
+        current = cwd
+        before = cwd
+        for child in node.children:
+            if child.type == "&":
+                current = before
+                continue
+            if child.is_named:
+                before = current
+                current = _effect_walk(child, current, found)
+        return current
+    if kind == "command":
+        program, arguments = _program_and_arguments(node)
+        _effect_substitutions(node, cwd, found)
+        leaf = program.rsplit("/", 1)[-1]
+        if leaf == "cd":
+            return _effect_cd(arguments, cwd)
+        if leaf == "false":
+            return None
+        force = leaf in _EFFECT_WRITE_PROGRAMS
+        for argument in arguments:
+            _effect_add(argument, cwd, found, force=force)
+        _effect_substitutions(node, cwd, found)
+        return cwd
+    if kind == "subshell":
+        local = cwd
+        for child in node.named_children:
+            local = _effect_walk(child, local, found)
+        return cwd
+    if kind in ("if_statement", "for_statement", "while_statement", "case_statement"):
+        if _effect_contains_cd(node):
+            return None
+    if kind in (
+        "compound_statement",
+        "do_group",
+        "if_statement",
+        "for_statement",
+        "while_statement",
+        "case_statement",
+    ):
+        current = cwd
+        before = cwd
+        for child in node.children:
+            if child.type == "&":
+                current = before
+                continue
+            if child.is_named:
+                before = current
+                current = _effect_walk(child, current, found)
+        return current
+    if kind == "pipeline":
+        for child in node.named_children:
+            _effect_walk(child, cwd, found)
+        return cwd
+    if kind == "list":
+        current = cwd
+        left_start = cwd
+        op = ""
+        for child in node.children:
+            if child.type in ("&&", "||", ";", "\n", "&"):
+                op = child.type
+                continue
+            if not child.is_named:
+                continue
+            if op == "&&":
+                if current is None:
+                    # The left command failed/unknown; the right branch did not
+                    # run.  Do not predict writes from it.
+                    continue
+                result = _effect_walk(child, current, found)
+                current = result
+            elif op == "||":
+                if current is not None:
+                    # The left command succeeded; the right branch did not run.
+                    continue
+                result = _effect_walk(child, left_start, found)
+                current = result if result is not None else left_start
+            elif op == "&":
+                result = _effect_walk(child, left_start, found)
+                current = left_start
+            else:
+                result = _effect_walk(child, current, found)
+                current = result
+            left_start = current if op in ("&&", "||") else left_start
+            op = ""
+        return current
+    if kind == "redirected_statement":
+        body = node.child_by_field_name("body")
+        entry = cwd
+        after = _effect_walk(body, cwd, found) if body is not None else cwd
+        redirect_cwd = (
+            after
+            if body is not None
+            and body.type == "list"
+            and not _effect_contains_cd(body)
+            else entry
+        )
+        _effect_redirects(node, redirect_cwd, found)
+        return after
+    if kind in ("command_substitution", "process_substitution"):
+        local = cwd
+        for child in node.named_children:
+            local = _effect_walk(child, local, found)
+        return cwd
+    if kind == "function_definition":
+        # A function body is not executed at definition time.
+        return cwd
+    if kind in ("file_redirect", "heredoc_redirect"):
+        return cwd
+    # Transparent wrappers: process named children in order.
+    current = cwd
+    for child in node.named_children:
+        current = _effect_walk(child, current, found)
+    return current

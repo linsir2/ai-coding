@@ -741,9 +741,23 @@ class BashTool(BaseTool):
             if after == before:
                 continue
             if after and path.is_file():
-                note(key, after, "bash", "write", call_id=context.call_id)
+                note(
+                    key,
+                    after,
+                    "bash",
+                    "write",
+                    call_id=context.call_id,
+                    confidence="observed",
+                )
             elif before and not path.exists():
-                note(key, "", "bash", "delete", call_id=context.call_id)
+                note(
+                    key,
+                    "",
+                    "bash",
+                    "delete",
+                    call_id=context.call_id,
+                    confidence="observed",
+                )
 
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None

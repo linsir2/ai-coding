@@ -2157,6 +2157,7 @@ class AgentLoop:
             *,
             call_id: str = "",
             canonical: bool = False,
+            confidence: str = "exact",
         ) -> None:
             session.record_effect(
                 path,
@@ -2164,6 +2165,7 @@ class AgentLoop:
                 tool=tool,
                 call_id=call_id,
                 kind=kind,
+                confidence=confidence,
             )
 
         def _note_read(
