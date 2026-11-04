@@ -2854,3 +2854,21 @@ async def test_agent_select_refuses_subagent_and_unknown_ids(ipc):
         "ok": False,
         "reason": "unknown_agent",
     }
+
+
+@pytest.mark.asyncio
+async def test_a_steer_ack_names_the_running_turn(ipc):
+    """The composer may have lost the nested plan turn's id; a steer must
+    re-attach to the live turn so its final finish can clear busy."""
+    world, _service, client = ipc
+    client.request("initialize")
+    world.loop = _GateLoop()
+    first = client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
+
+    ack = client.request("session.steer", {"text": "先看测试"})
+
+    assert ack["accepted"] is True
+    assert ack["turnId"] == first["turnId"]
+    world.loop.release.set()
+    assert await client.wait_for(client.turn_finished.is_set)

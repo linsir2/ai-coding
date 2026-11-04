@@ -968,7 +968,14 @@ def make_handlers(
         if session is None:
             raise ValueError("no session initialized")
         accepted = _queue_next_step(session, str(params.get("text", "") or ""))
-        return {"accepted": accepted, "pending": _next_step_count(session)}
+        # A steer joins the turn that is already running.  Name it: the UI may
+        # have cleared its own turn id when a nested plan round ended, and a
+        # later finish would then be orphaned while its busy latch stayed up.
+        return {
+            "accepted": accepted,
+            "pending": _next_step_count(session),
+            "turnId": _live_turn_id(),
+        }
 
     def session_command(params: dict[str, Any]) -> dict[str, Any]:
         """Run a slash command through the REPL dispatcher (A1).

@@ -346,9 +346,17 @@ export function Session(props: SessionProps) {
       void props.client
         .request("session.steer", { text })
         .then((ack: unknown) => {
-          const accepted = (ack as { accepted?: boolean }).accepted !== false
-          if (accepted) apply({ kind: "submitted", text, images: [] })
-          else queueText(text)
+          const data = ack as { accepted?: boolean; turnId?: unknown } | null
+          const accepted = data?.accepted !== false
+          if (accepted) {
+            apply({ kind: "submitted", text, images: [] })
+            const turnId = Number(data?.turnId ?? 0)
+            if (Number.isInteger(turnId) && turnId > 0) {
+              apply({ kind: "turn-started", turnId })
+            }
+          } else {
+            queueText(text)
+          }
         })
         .catch(() => queueText(text))
       return true
@@ -421,7 +429,20 @@ export function Session(props: SessionProps) {
             return
           }
           disarmInterrupt()
-          void props.client.request("session.interrupt")
+          void props.client
+            .request("session.interrupt")
+            .then((ack: unknown) => {
+              // If the server says nothing was running, this busy latch is
+              // stale (the turn already ended, or its id was lost).  Esc is
+              // the operator's last recovery; do not leave them stuck.
+              const interrupted = Number(
+                (ack as { interrupted?: unknown } | null)?.interrupted ?? 0,
+              )
+              if (interrupted === 0) apply({ kind: "turn-refused" })
+            })
+            .catch(() => {
+              /* the connection is already the report */
+            })
         },
       },
       {
