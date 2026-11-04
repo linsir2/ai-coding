@@ -684,6 +684,16 @@ describe("turn lifecycle", () => {
         "[turn] 步数用完（10 步），任务未收尾：输入「继续」可接上",
       ],
       [
+        {
+          status: "max_iterations",
+          reason: "no progress: no tool call has succeeded in 2 iterations",
+          iterations: 10,
+          truncatedByLength: false,
+          handoff: "",
+        },
+        "[turn] 连续无进展（没有工具调用成功），任务未收尾：输入「继续」可接上",
+      ],
+      [
         { status: "error", reason: "RuntimeError: boom", iterations: 0, truncatedByLength: false, handoff: "" },
         "[turn] 错误：RuntimeError: boom",
       ],

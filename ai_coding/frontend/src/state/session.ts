@@ -506,6 +506,9 @@ function turnEndMarker(data: Record<string, unknown>): string {
     return "[turn] 回答因长度上限被截断：输入「继续」可接上"
   }
   if (status === "max_iterations") {
+    if (reason.startsWith("no progress")) {
+      return `[turn] 连续无进展（没有工具调用成功），任务未收尾：输入「继续」可接上`
+    }
     return `[turn] 步数用完（${num(data["iterations"])} 步），任务未收尾：输入「继续」可接上`
   }
   if (status === "error") return `[turn] 错误：${reason}`

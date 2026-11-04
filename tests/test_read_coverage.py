@@ -1,4 +1,4 @@
-"""Read coverage must stop parameter-variant re-reads without breaking recovery."""
+"""Read coverage records provenance; it must never trap a legitimate re-read."""
 
 from __future__ import annotations
 
@@ -56,7 +56,9 @@ def _visible(call_id: str) -> ChatMessage:
 
 
 @pytest.mark.asyncio
-async def test_a_current_overlapping_read_is_refused_when_its_result_is_visible(tmp_path):
+async def test_a_current_overlapping_read_still_returns_the_page(tmp_path):
+    """The ledger is provenance, not a veto.  A model that needs the exact
+    bytes again (after a failed edit) must get them instead of a refusal."""
     path = tmp_path / "a.py"
     path.write_text("\n".join(f"line {i}" for i in range(1, 101)), encoding="utf-8")
     session = _session()
@@ -73,9 +75,8 @@ async def test_a_current_overlapping_read_is_refused_when_its_result_is_visible(
         _ctx(tmp_path, session, messages=(_visible("c1"),), call_id="c2"),
     )
 
-    assert second.success is False
-    assert second.error == "already_read"
-    assert "c1" in second.output
+    assert second.success is True
+    assert "line 11" in second.output
 
 
 @pytest.mark.asyncio
@@ -156,8 +157,8 @@ async def test_symlink_spellings_share_one_effect_key(tmp_path):
         _ctx(tmp_path, session, messages=(_visible("c1"),), call_id="c2"),
     )
 
-    assert second.success is False
-    assert second.error == "already_read"
+    assert second.success is True
+    assert "line 11" in second.output
 
 
 def _user(content: str = "next turn") -> ChatMessage:

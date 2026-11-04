@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from ai_coding.domain.message import ToolResult, visible_tool_call_ids
+from ai_coding.domain.message import ToolResult
 from ai_coding.security.credentials import is_credential_path
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox, SandboxViolation
@@ -163,41 +163,6 @@ class ReadTool(BaseTool):
         view = lines[offset:page_end]
 
         resolved_ctx = resolve_ctx(ctx)
-        ledger = resolved_ctx.effects
-        # A result from a *previous* human turn is still in the transcript, but
-        # the model has started a new request: let it pull the exact bytes again
-        # instead of trapping it in ``already_read`` -> retry -> edit-from-an-old-
-        # copy loops.  Within one turn the guard still applies.
-        visible_messages = resolved_ctx.messages
-        for boundary, message in enumerate(visible_messages):
-            if message.role == "user" and not getattr(message, "synthetic", False):
-                visible_messages = visible_messages[boundary:]
-        if (
-            ledger is not None
-            and page_end > offset
-            and not credential
-            and (covering := ledger().covering_read(
-                self._sandbox.key(target), offset + 1, page_end, version
-            )) is not None
-            and covering.call_id
-            and covering.call_id in visible_tool_call_ids(visible_messages)
-        ):
-            return ToolResult(
-                success=False,
-                output=(
-                    f"error: lines {offset + 1}-{page_end} of '{path_str}' are already "
-                    f"in the current context (call {covering.call_id}); reuse that "
-                    "result instead of reading the same range again"
-                ),
-                error="already_read",
-                data={
-                    "path": path_str,
-                    "call_id": covering.call_id,
-                    "start": offset + 1,
-                    "end": page_end,
-                },
-            )
-
         # line-numbered output, right-aligned 6-wide like `cat -n`
         numbered = [f"{i + 1:>6}  {line}" for i, line in enumerate(view, start=offset)]
         output = "\n".join(numbered)
