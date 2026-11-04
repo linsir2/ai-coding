@@ -396,7 +396,8 @@ plan_verify_items: bool = False
   路径不注入这个块（它们仍用 `present_plan`）：
   ```
   <plan-mode>Plan mode: read-only research. Do not edit files or run mutating commands.
-  Ask the user with ask_user when a decision is required. When the spec is complete,
+  Use ask_user only for missing spec details; never use it for plan approval or
+  to ask whether to proceed. When the spec is complete,
   output exactly one <proposed_plan> ... </proposed_plan> block and stop. Do not
   execute the plan, and do not ask "should I proceed".</plan-mode>
   ```

@@ -164,6 +164,14 @@ class ReadTool(BaseTool):
 
         resolved_ctx = resolve_ctx(ctx)
         ledger = resolved_ctx.effects
+        # A result from a *previous* human turn is still in the transcript, but
+        # the model has started a new request: let it pull the exact bytes again
+        # instead of trapping it in ``already_read`` -> retry -> edit-from-an-old-
+        # copy loops.  Within one turn the guard still applies.
+        visible_messages = resolved_ctx.messages
+        for boundary, message in enumerate(visible_messages):
+            if message.role == "user" and not getattr(message, "synthetic", False):
+                visible_messages = visible_messages[boundary:]
         if (
             ledger is not None
             and page_end > offset
@@ -172,7 +180,7 @@ class ReadTool(BaseTool):
                 self._sandbox.key(target), offset + 1, page_end, version
             )) is not None
             and covering.call_id
-            and covering.call_id in visible_tool_call_ids(resolved_ctx.messages)
+            and covering.call_id in visible_tool_call_ids(visible_messages)
         ):
             return ToolResult(
                 success=False,

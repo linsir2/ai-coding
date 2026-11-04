@@ -35,6 +35,97 @@ _DECIDE_ANYWAY = (
 _NO_ANSWER = (
     "没有人给出回答（输入为空或已被关闭）。请自行决定，并明确写出你的假设后收尾。"
 )
+_PLAN_APPROVAL = (
+    "ask_user 不能批准计划。当前仍在 Plan 模式；请直接输出 "
+    "<proposed_plan> ... </proposed_plan> 文本块，系统会弹出 "
+    "“Implement this plan?” 卡片。只有那张卡片的 Yes 会退出 Plan 模式。"
+)
+_PLAN_APPROVAL_WHOLE = frozenset(
+    {
+        "计划可以吗",
+        "计划可以执行吗",
+        "这个计划可以执行吗",
+        "是否同意这个计划",
+        "同意这个计划",
+        "是否批准这个计划",
+        "批准这个计划",
+        "确认执行吗",
+        "确认执行计划吗",
+        "可以开始了吗",
+        "按这个计划做吗",
+        "现在开始执行吗",
+        "可以执行了吗",
+        "准备好了吗",
+        "shall we proceed",
+        "should i proceed",
+        "shall i proceed",
+    }
+)
+_PLAN_APPROVAL_ACTIONS = (
+    "执行计划",
+    "开始执行",
+    "按计划执行",
+    "按这个计划做",
+    "批准计划",
+    "同意执行",
+    "确认执行",
+    "开始了吗",
+    "准备好了",
+    "implement this plan",
+    "proceed",
+    "go ahead",
+    "start executing",
+)
+_PLAN_APPROVAL_OPTIONS = (
+    "同意",
+    "批准",
+    "按计划执行",
+    "yes",
+    "implement this plan",
+)
+# A question with a choice is a spec question even when it contains an approval
+# word ("Should I proceed with Postgres or SQLite?").  The same goes for a
+# question about what must happen *before* executing the plan.
+_PLAN_SPEC_BLOCKERS = (
+    "之前",
+    "前要",
+    "前先",
+    "前需要",
+    "要不要",
+    "需不需要",
+    "还是",
+    "哪个",
+    "谁",
+    " or ",
+    "which",
+)
+
+
+def _normalized_question(text: str) -> str:
+    return " ".join(text.strip().lower().rstrip("？?！!。. ").split())
+
+
+def _looks_like_plan_approval(question: str, options: tuple[str, ...]) -> bool:
+    """Whether a plan-mode question is asking for whole-plan approval.
+
+    This is deliberately narrow: asking which implementation detail to use is a
+    material question and must still reach the human.  Asking "do I execute the
+    plan?" is not; the only approval channel is the harness card.  A choice
+    marker or a "before the plan" question is never treated as approval.
+    """
+    q = _normalized_question(question)
+    if q in _PLAN_APPROVAL_WHOLE:
+        return True
+    normalized_options = tuple(_normalized_question(option) for option in options)
+    if any(
+        option.startswith(_PLAN_APPROVAL_OPTIONS) for option in normalized_options
+    ) and any(word in q for word in ("计划", "plan", "执行")):
+        return True
+    if any(blocker in q for blocker in _PLAN_SPEC_BLOCKERS):
+        return False
+    asks = question.strip().endswith(("?", "？", "吗", "么"))
+    return asks and any(action in q for action in _PLAN_APPROVAL_ACTIONS)
+
 
 
 class AskUserTool(BaseTool):
@@ -108,6 +199,18 @@ class AskUserTool(BaseTool):
             if isinstance(raw_options, (list, tuple))
             else ()
         )
+        # Observed: the model asked "同意按计划执行?" through ask_user, the human
+        # said yes, and then nothing happened because only the plan_implement
+        # card flips the posture.  Refuse that channel before it reaches a human.
+        if getattr(ctx, "mode", "normal") == "plan" and _looks_like_plan_approval(
+            question, options
+        ):
+            return ToolResult(
+                success=False,
+                output=_PLAN_APPROVAL,
+                error="plan_approval_not_ask_user",
+                data={"tool": "ask_user", "mode": "plan"},
+            )
         try:
             answer = await self._prompt.ask(question, options)
         except Exception as exc:  # noqa: BLE001 — a tool boundary must not leak

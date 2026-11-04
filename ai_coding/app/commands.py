@@ -707,8 +707,18 @@ async def run_human_turn(
     # human wants to see; asking the model to "write it as text" a third time
     # is not progress.
     plan_tool = _plan_from_unknown_tool(session)
-    if plan_tool and not extract_proposed_plan(answer):
-        answer = plan_tool
+    outcome_reason = str(
+        getattr(getattr(loop, "last_outcome", None), "reason", "") or ""
+    )
+    if (
+        plan_tool
+        and outcome_reason == "plan text submitted"
+        and not extract_proposed_plan(answer)
+    ):
+        # ``plan_for_review`` only treats a real ``<proposed_plan>`` block as a
+        # plan.  Re-wrap the salvaged body so the approval path sees it; passing
+        # the bare body made ``_maybe_offer_plan_implementation`` return early.
+        answer = f"<proposed_plan>\n{plan_tool}\n</proposed_plan>"
     ran = await _maybe_offer_plan_implementation(
         loop,
         session,

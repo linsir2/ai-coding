@@ -158,3 +158,35 @@ async def test_symlink_spellings_share_one_effect_key(tmp_path):
 
     assert second.success is False
     assert second.error == "already_read"
+
+
+def _user(content: str = "next turn") -> ChatMessage:
+    return ChatMessage(role="user", content=content, timestamp="t")
+
+
+@pytest.mark.asyncio
+async def test_a_new_human_turn_may_re_read_a_visible_range(tmp_path):
+    r"""The previous turn's result is still in history, but the model may need
+    the exact bytes again for an edit.  Returning ``already_read`` forever made
+    the model retry the same read and then edit from a stale copy."""
+    path = tmp_path / "a.py"
+    path.write_text("\n".join(f"line {i}" for i in range(1, 101)), encoding="utf-8")
+    session = _session()
+    tool = _tool(tmp_path)
+
+    await tool.execute(
+        {"path": "a.py", "offset": 0, "limit": 100},
+        _ctx(tmp_path, session, call_id="c1"),
+    )
+    second = await tool.execute(
+        {"path": "a.py", "offset": 0, "limit": 100},
+        _ctx(
+            tmp_path,
+            session,
+            messages=(_visible("c1"), _user("continue")),
+            call_id="c2",
+        ),
+    )
+
+    assert second.success is True
+    assert "line 1" in second.output

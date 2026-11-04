@@ -56,7 +56,11 @@ from ai_coding.config.models import DEFAULT_CONTEXT_TOKENS, AIConfig
 from ai_coding.core import interventions
 from ai_coding.core.acceptance import verify_items
 from ai_coding.core.compaction import Compactor
-from ai_coding.core.dispatch import DispatchOutcome, ToolDispatcher
+from ai_coding.core.dispatch import (
+    DispatchOutcome,
+    ToolDispatcher,
+    plan_text_from_unknown_call,
+)
 from ai_coding.core.events import (
     AgentSwitched,
     AssistantMessage,
@@ -1410,6 +1414,29 @@ class AgentLoop:
                         note=PLAN_RESEARCH_NOTE,
                     )
                     break
+                # The plan is a text block, not a tool.  A model that put the
+                # body in an invented ``proposed_plan`` call has still produced
+                # the plan the human asked for; close the turn here so the
+                # command layer can salvage the body and offer the approval card.
+                # Leaving this as an ordinary unknown-tool failure is a loop:
+                # the model retries the same call until the user presses Esc.
+                if session.mode == "plan":
+                    plan_body = ""
+                    for item in outcomes:
+                        plan_body = plan_text_from_unknown_call(item.call, item.result)
+                        if plan_body:
+                            break
+                    if plan_body:
+                        outcome = TurnOutcome(
+                            status=TurnStatus.COMPLETED,
+                            # Put the body in the outcome too: callers that
+                            # read ``process_input``'s return get the plan
+                            # without rescanning the tool call.
+                            text=f"<proposed_plan>\n{plan_body}\n</proposed_plan>",
+                            iterations=books.total_iterations,
+                            reason="plan text submitted",
+                        )
+                        break
         except asyncio.CancelledError:
             # Record what happened, persist the partial transcript, then let the
             # cancellation propagate — swallowing it is an asyncio anti-pattern.

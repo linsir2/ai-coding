@@ -62,7 +62,8 @@ PLAN_ENTER_REMINDER = (
     "no implementation, close it with finish_research instead. You remain in "
     "Plan mode until the user switches agents. "
     "Only the user's approval of that plan starts execution; a conversational "
-    "yes does not."
+    "yes does not. Do not use ask_user to ask for plan approval; the harness "
+    "owns that question."
     "</system-reminder>"
 )
 

@@ -363,3 +363,181 @@ async def test_plan_run_writes_the_build_posture_through_before_the_run():
     assert loop.events[0][1] == ("build", False, "/plan run")
     assert (session.mode, session.readonly) == ("normal", False)
     assert loop.events[1] == ("process_input", "Implement the plan.")
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_plan_tool_ends_the_turn_and_offers_approval(tmp_path):
+    """A weak model can put the plan body in a nonexistent ``proposed_plan``
+    tool call.  The loop must treat that body as the plan exit, not as a
+    retryable tool error that burns the turn."""
+    import json
+
+    from ai_coding.app.commands import handle_input
+    from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.security.user_prompt import UserAnswer
+    from ai_coding.service.session_service import SessionService
+    from tests.test_agent_loop_react import (
+        ScriptedEngine,
+        _calls,
+        _loop,
+        _ref,
+        _text,
+    )
+
+    class _Console:
+        def info(self, message: str) -> None:
+            pass
+
+        def error(self, message: str) -> None:
+            pass
+
+        def rule(self, title: str = "") -> None:
+            pass
+
+        def delta(self, token: str) -> None:
+            pass
+
+    class _Prompt:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def ask(self, question, options=(), *, detail="", intent="", data=None):
+            self.calls.append({"intent": intent, "detail": detail, "data": data})
+            return UserAnswer(answered=True, text="Yes, implement this plan")
+
+    plan = "## Plan\n1. add a health endpoint"
+    engine = ScriptedEngine(
+        [
+            _calls(_ref("p1", "proposed_plan", json.dumps({"plan": plan}))),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        workspace=str(tmp_path),
+        approval=AutoApproveCallback(),
+    )
+    session = sessions.create()
+    session.agent, session.readonly = "plan", True
+    prompt = _Prompt()
+
+    await handle_input(loop, "make a plan", session, sessions, _Console(), user_prompt=prompt)
+
+    assert prompt.calls and prompt.calls[0]["intent"] == "plan_implement"
+    assert prompt.calls[0]["detail"] == plan
+    assert session.approved_plan == plan
+    assert session.agent == "build" and session.readonly is False
+    assert any(
+        message.content == "Implement the plan."
+        for message in engine.requests[-1]["messages"]
+    )
+    assert not engine._steps
+
+
+def test_plan_prompts_forbid_using_ask_user_as_plan_approval():
+    from ai_coding.core.plan_reminders import PLAN_ENTER_REMINDER
+    from ai_coding.core.request_assembly import PLAN_MODE_BLOCK
+
+    assert "never use it for plan approval" in PLAN_MODE_BLOCK
+    assert "Do not use ask_user to ask for plan approval" in PLAN_ENTER_REMINDER
+
+
+@pytest.mark.asyncio
+async def test_a_research_exit_does_not_offer_a_salvaged_plan():
+    """A batch that already concluded research must not be reinterpreted as a
+    plan submission just because it also carried an unknown plan tool call."""
+    import json
+    from types import SimpleNamespace
+
+    from ai_coding.app.commands import run_human_turn
+    from ai_coding.domain.message import ChatMessage, ToolCallRef
+    from ai_coding.security.user_prompt import UserAnswer
+
+    class _Console:
+        def info(self, message: str) -> None:
+            pass
+
+        def error(self, message: str) -> None:
+            pass
+
+        def rule(self, title: str = "") -> None:
+            pass
+
+        def delta(self, token: str) -> None:
+            pass
+
+    class _Prompt:
+        def __init__(self) -> None:
+            self.calls: list = []
+
+        async def ask(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return UserAnswer(answered=True, text="Yes, implement this plan")
+
+    class _Loop:
+        last_outcome = SimpleNamespace(reason="research finished")
+
+        async def process_input(self, *args, **kwargs):
+            return ""
+
+    session = SessionData(
+        session_id="s1", title="", created_time="", last_access_time=""
+    )
+    session.agent, session.readonly = "plan", True
+    session.messages = [
+        ChatMessage(role="user", content="research", timestamp="t"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            timestamp="t",
+            tool_calls=[
+                ToolCallRef(
+                    id="p1",
+                    name="proposed_plan",
+                    arguments=json.dumps({"plan": "## Plan\n1. x"}),
+                )
+            ],
+        ),
+    ]
+    prompt = _Prompt()
+
+    await run_human_turn(_Loop(), session, "x", console=_Console(), user_prompt=prompt)
+
+    assert prompt.calls == []
+    assert session.agent == "plan"
+
+
+@pytest.mark.asyncio
+async def test_the_loop_outcome_carries_the_salvaged_plan_text(tmp_path):
+    """Resume and /review do not go through run_human_turn's rewrap helper."""
+    import json
+
+    from ai_coding.security.approval import AutoApproveCallback
+    from ai_coding.service.session_service import SessionService
+    from tests.test_agent_loop_react import (
+        ScriptedEngine,
+        _calls,
+        _loop,
+        _ref,
+    )
+
+    plan = "## Plan\n1. add a health endpoint"
+    engine = ScriptedEngine(
+        [_calls(_ref("p1", "proposed_plan", json.dumps({"plan": plan})))]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        workspace=str(tmp_path),
+        approval=AutoApproveCallback(),
+    )
+    session = sessions.create()
+    session.agent, session.readonly = "plan", True
+
+    answer = await loop.process_input(session, "make a plan")
+
+    assert answer == f"<proposed_plan>\n{plan}\n</proposed_plan>"
+    assert not engine._steps

@@ -198,6 +198,20 @@ def _ask_budget(deadline: Deadline | None, approval_timeout: float | None) -> fl
 _PLAN_TEXT_NAMES = frozenset({"propose_plan", "proposed_plan", "present_plan"})
 
 
+def plan_text_from_unknown_call(call: ToolCall, result: ToolResult) -> str:
+    """The plan body a failed plan-text tool call carried, if any.
+
+    A weak model sometimes submits the plan through a nonexistent
+    ``proposed_plan`` tool.  The dispatcher's refusal names the correct text
+    shape, but the model keeps retrying; the loop uses this body to close the
+    turn instead of spending the budget on the same unknown tool.
+    """
+    if result.error != "unknown_tool" or call.name not in _PLAN_TEXT_NAMES:
+        return ""
+    plan = call.params.get("plan") if isinstance(call.params, dict) else None
+    return str(plan or "").strip()
+
+
 class ApprovalVerdict(enum.Enum):
     """What came back from asking a human (R7c)."""
 

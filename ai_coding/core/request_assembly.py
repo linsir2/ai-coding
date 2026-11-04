@@ -80,7 +80,8 @@ _DIR_ENTRIES = 200
 #: instruction -- never in the history (compaction could eat it).
 PLAN_MODE_BLOCK = (
     "<plan-mode>Plan mode: read-only research. Do not edit files or run mutating "
-    "commands. Ask the user with ask_user when a decision is required. "
+    "commands. Use ask_user only for missing spec details; never use it for plan "
+    "approval or to ask whether to proceed. "
     f"{PLAN_TEXT_RULE} "
     "When the spec is complete, output exactly one <proposed_plan> ... </proposed_plan> "
     "block and stop. The closing </proposed_plan> tag is mandatory, and the plan "
