@@ -319,21 +319,16 @@ class TodoWriteTool(BaseTool):
                             f"{verdict.reason}. Use files with a successful write/edit, "
                             "a verify command, or override=true with a reason."
                         ),
-                        error="completion_unverified",
-                        data={"id": item_id, "reason": verdict.reason},
+                        error=verdict.code or "completion_unverified",
+                        data={
+                            "id": item_id,
+                            "reason": verdict.reason,
+                            "code": verdict.code,
+                        },
                     )
                 override_verdict = await CompletionGate.override(probe, resolved, reason)
                 if not override_verdict.ok:
-                    error = (
-                        "missing_override_reason"
-                        if "reason" in override_verdict.reason and not reason
-                        else "override_denied"
-                    )
-                    if (
-                        "no approval" in override_verdict.reason
-                        or "needs operator" in override_verdict.reason
-                    ):
-                        error = "override_unavailable"
+                    error = override_verdict.code or "override_denied"
                     return ToolResult(
                         success=False,
                         output=f"error: {override_verdict.reason}",

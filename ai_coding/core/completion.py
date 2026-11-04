@@ -20,6 +20,8 @@ class CompletionVerdict:
     ok: bool
     reason: str = ""
     evidence: str = ""
+    #: Stable diagnostic code for the tool layer/UI.  Reason is prose.
+    code: str = ""
 
 
 class CompletionGate:
@@ -59,6 +61,12 @@ class CompletionGate:
                     missing.append(f"{raw}（工作区外）")
                     continue
                 key, path = resolved
+                if path.is_dir():
+                    return CompletionVerdict(
+                        False,
+                        f"directory_unsupported: '{raw}' 是目录；目录请用 verify",
+                        code="directory_unsupported",
+                    )
                 receipt = (
                     ledger.receipt_for(key, min_seq=item.started_seq)
                     if ledger is not None
@@ -111,20 +119,30 @@ class CompletionGate:
                 False,
                 "completion_unverified: 该条目没有 files 或 verify，"
                 "不能只凭 evidence 标 completed",
+                code="completion_unverified",
             )
         # An explicit verify that ran and failed must never be hidden by a
         # file receipt: receipts say "the file is current", not "the proof ran".
         if verify_error:
-            return CompletionVerdict(False, verify_error)
+            return CompletionVerdict(False, verify_error, code="verify_failed")
         if file_evidence and not file_error:
-            return CompletionVerdict(True, evidence="receipt: " + ", ".join(file_evidence))
+            return CompletionVerdict(
+                True, evidence="receipt: " + ", ".join(file_evidence)
+            )
         if verify_evidence:
             return CompletionVerdict(True, evidence=verify_evidence)
         if file_error:
-            return CompletionVerdict(False, file_error)
+            code = (
+                "legacy_session_unverified"
+                if getattr(ctx, "effects_legacy", False)
+                else "completion_unverified"
+            )
+            return CompletionVerdict(False, file_error, code=code)
         if verify_unavailable:
-            return CompletionVerdict(False, "verify 未接线，无法证明完成")
-        return CompletionVerdict(False, "completion_unverified")
+            return CompletionVerdict(
+                False, "verify 未接线，无法证明完成", code="verify_unavailable"
+            )
+        return CompletionVerdict(False, "completion_unverified", code="completion_unverified")
 
     @classmethod
     async def override(
@@ -133,7 +151,9 @@ class CompletionGate:
         """Authorise one explicit override; the first one asks the operator."""
         reason = str(reason or "").strip()
         if not reason:
-            return CompletionVerdict(False, "override_reason is required")
+            return CompletionVerdict(
+                False, "override_reason is required", code="missing_override_reason"
+            )
         provider = getattr(ctx, "completion_override_provider", None)
         granted = bool(provider()) if callable(provider) else bool(
             getattr(ctx, "completion_override_approved", False)
@@ -141,7 +161,9 @@ class CompletionGate:
         if not granted:
             approval = getattr(ctx, "approval", None)
             if approval is None or not getattr(approval, "is_human", False):
-                return CompletionVerdict(False, "override needs operator approval")
+                return CompletionVerdict(
+                    False, "override needs operator approval", code="override_unavailable"
+                )
             note = getattr(ctx, "note_approval", None)
             if note is not None:
                 note(
@@ -159,9 +181,15 @@ class CompletionGate:
             if note is not None:
                 note(None)
             if answer not in (ApprovalResult.YES, ApprovalResult.ALWAYS):
-                return CompletionVerdict(False, "operator denied the completion override")
+                return CompletionVerdict(
+                    False,
+                    "operator denied the completion override",
+                    code="override_denied",
+                )
             grant = getattr(ctx, "note_completion_override", None)
             if grant is not None:
                 grant()
             ctx.completion_override_approved = True
-        return CompletionVerdict(True, evidence=f"override: {reason}")
+        return CompletionVerdict(
+            True, evidence=f"override: {reason}", code="override"
+        )

@@ -93,6 +93,7 @@ def tool_context(
     # claims it read.
     note_read: Callable[..., None] | None = None,
     effects: Callable[[], Any] | None = None,
+    effects_legacy: bool = False,
     note_effect: Callable[..., None] | None = None,
     approval: Any = None,
     completion_override_approved: bool = False,
@@ -147,6 +148,7 @@ def tool_context(
         note_checkpoint=note_checkpoint,
         note_read=note_read,
         effects=effects,
+        effects_legacy=effects_legacy,
         note_effect=note_effect,
         approval=approval,
         completion_override_approved=completion_override_approved,

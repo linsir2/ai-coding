@@ -177,6 +177,13 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   // read the code to learn what happened.
   verify_failed: { label: "验证失败", tone: "failed" },
   verify_unavailable: { label: "验证不可用", tone: "failed" },
+  completion_unverified: { label: "完成缺少回执", tone: "failed" },
+  completion_blocked: { label: "完成被阻断", tone: "denied" },
+  directory_unsupported: { label: "目录需用 verify", tone: "failed" },
+  legacy_session_unverified: { label: "旧会话需重新验证", tone: "failed" },
+  missing_override_reason: { label: "缺少 override 原因", tone: "failed" },
+  override_unavailable: { label: "override 需人工批准", tone: "denied" },
+  override_denied: { label: "override 被拒绝", tone: "denied" },
   not_settled: { label: "子代理未收敛", tone: "denied" },
   commit_failed: { label: "提交失败", tone: "failed" },
   branch_moved: { label: "分支已变化", tone: "denied" },

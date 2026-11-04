@@ -1,9 +1,8 @@
 """C-1: ``update_plan`` — Codex's plan tool, byte-compatible.
 
-Defaults (``plan_verify_items=False``) must match Codex exactly: the schema is
-``{explanation?, plan[{step,status}]}``, the whole list is replaced with ids
-1..N, and the tool result is the fixed text ``"Plan updated"``.  The opt-in
-verify switch is the one documented deviation.
+The result text is Codex's fixed ``"Plan updated"``.  This project deliberately
+adds stable step ids, files/override proof, and the opt-in verify switch; the
+schema assertions below pin that documented deviation.
 """
 
 from __future__ import annotations
@@ -51,6 +50,7 @@ def test_schema_matches_codex_exactly() -> None:
     step = plan["items"]
     assert set(step) == {"type", "properties", "required"}
     assert set(step["properties"]) == {
+        "id",
         "step",
         "status",
         "files",

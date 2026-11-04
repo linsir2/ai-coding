@@ -375,6 +375,10 @@ class SessionData:
     # block -- a volatile block, so compaction cannot reach it.  The checkpoint
     # stores conclusions; this stores evidence.
     effects: EffectLedger = field(default_factory=EffectLedger)
+    #: 0 = loaded from a session written before effectsVersion existed, 2 =
+    #: written by the EffectLedger-era code.  This is the persisted discriminator
+    #: that an empty receipts list alone cannot provide.
+    effects_version: int = 2
     #: The operator allowed the first completion override in this session;
     #: later overrides do not ask again.  Persisted so a resume keeps it.
     completion_override_approved: bool = False
@@ -563,6 +567,10 @@ class SessionData:
     def read_ledger(self) -> tuple[ReadMark, ...]:
         """Merged display/citation view; raw provenance lives in ``effects``."""
         return self.effects.merged_reads()
+
+    @property
+    def effects_legacy(self) -> bool:
+        return self.effects_version == 0
 
     def note_read(
         self,
@@ -833,6 +841,7 @@ class SessionData:
             data["effectSeq"] = int(self.effects.sequence)
         if self.completion_override_approved:
             data["completionOverrideApproved"] = True
+        data["effectsVersion"] = int(self.effects_version)
         if self.seen_paths:
             data["seenPaths"] = list(self.seen_paths)
         # Deferred tool schemas: only a session that loaded some writes the key.
@@ -949,6 +958,18 @@ class SessionData:
             files=tuple(receipts_list),
             sequence=max(effect_seq, max_receipt_seq),
         )
+        raw_effects_version = data.get("effectsVersion")
+        try:
+            effects_version = int(raw_effects_version or 0)
+        except (TypeError, ValueError):
+            effects_version = 0
+        if raw_effects_version is None and any(
+            key in data for key in ("fileReceipts", "effectSeq", "readCalls")
+        ):
+            # HEAD-era EffectLedger sessions predate effectsVersion; they are
+            # not pre-EffectLedger legacy, even though the marker is missing.
+            # An *explicit* 0 is a persisted legacy marker and must stay 0.
+            effects_version = 2
         raw_seen = data.get("seenPaths")
         seen_rows = raw_seen if isinstance(raw_seen, list) else []
         seen_paths = tuple(
@@ -993,6 +1014,7 @@ class SessionData:
             compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
             effects=effects,
+            effects_version=effects_version,
             completion_override_approved=(
                 data.get("completionOverrideApproved") is True
             ),

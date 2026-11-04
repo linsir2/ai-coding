@@ -120,6 +120,7 @@ class ToolContext:
     #: write earlier in the same tool batch must be visible to a later
     #: todo_write/read check.  ``None`` outside a loop that owns the ledger.
     effects: Callable[[], Any] | None = None
+    effects_legacy: bool = False
     #: A successful write/edit/bash reports its file effect here immediately;
     #: a later call in the same batch can then see it.  ``call_id`` is passed
     #: as a keyword so a tool never has to reach into the dispatcher.

@@ -194,6 +194,9 @@ R1 新增/变更的契约集中在四处。
 | `ReadMark.version: str = ""` | 读取时的轻量文件版本（`mtime_ns:size:inode`）；`request_assembly` 在每次组装时用当前 stat 对比。渲染只有一个版本感知路径：当前完整文件 compact 列出；当前部分文件列出总行数、已读段与缺口；未知/过期/文件不存在只列已读段，不再发布旧总行数或旧缺口（避免模型把“读取时 150 行”当成当前文件长度）；总行数未知也不声称完整。`write`/`edit` 成功 artifacts 会显式失效对应路径（同批 read 只保留 read 在 write 之后的证据）。旧 session 没有 version 的行按 unknown 处理；空 version 不落盘，读取时忽略未知键与坏行 |
 | `ReadMark.callId: str = ""` | 产生该范围的 tool call id；raw `readCalls` 保留它，`readLedger` 仍是 merged 展示投影。读取覆盖守卫只在同 canonical key、同当前版本、请求范围被覆盖，且该 call 的 tool result 仍在请求 history 中时拒绝 |
 | `SessionData.effects: EffectLedger` | 会话级单一效果账本：raw reads、`FileReceipt(path,version,tool,call_id,seq,kind,confidence)`、单调 `sequence`。`readLedger` 是兼容投影，`readCalls`/`fileReceipts` 是原始 provenance；旧 session 缺失时按空 receipts / `callId=""` fail-open。`write`/`edit`/foreground `bash`/subagent `changed_paths` 成功后立即入账并失效该路径旧 read |
+| `SessionData.effectsVersion` | 新代码写 `2`，读取缺失时为 `0`（legacy）。它是“旧 session”的持久 discriminator：空 session 与 pre-EffectLedger session 不能只靠 `fileReceipts` 是否为空区分。legacy session 缺 proof 时 `CompletionGate` 返回 `legacy_session_unverified` |
+| `TodoItem.files` 目录契约 | 只接受常规文件；目录返回 `directory_unsupported`，要求改用 `verify`。不使用目录 mtime 作为 receipt |
+| `update_plan` step `id` | 可选稳定 id；匹配优先级 id > 完全相同 content；禁止位置兜底。未匹配的 completed step 必须重新过 CompletionGate；只有 matched prior 且 proof 被机器识别（files/verify/`receipt:`/`verify:`/`override:`）才允许继承 |
 | `SessionData.completionOverrideApproved` | 本 session 已获准过一次显式 completion override；后续 override 不再弹用户确认。仅非空写入 |
 | `TodoItem.startedSeq/completionFailures` | `startedSeq` 是进入 in_progress 时的 effect sequence；receipt 必须不早于它。`completionFailures >= 2` 时完成门禁把条目置 `blocked`。均可选落盘 |
 | `todo_write` 完成门禁 | `status=completed` 必须有 `files` 的 current receipt、`verify` 通过，或显式 `override=true` + reason（首次 override 需用户批准，session 记住）。`update_plan` 的 step 同样支持 `files/verify/override`；`update_goal complete` 只把未完成项标 dropped，不绕过 item completion |

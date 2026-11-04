@@ -165,7 +165,7 @@ plan_verify_items: bool = False   # 仅 codex 路径读取；session 路径始�
 
 ### C-1 `update_plan` 工具（照抄 `plan.rs` / `plan_spec.rs`）
 
-> **2026-11-04 EffectLedger 偏差**：`update_plan` 的 step 现在额外接受 `files`、`override`、`override_reason`；`status=completed` 必须由 `CompletionGate` 验证 receipt/verify，缺证明时只能显式 override。这是为修复“模型自报 completed”的必要偏离；默认 schema 的 `verify` 仍只由 `plan_verify_items` 开启。
+> **2026-11-04 EffectLedger 偏差**：`update_plan` 的 step 现在额外接受 `files`、`override`、`override_reason`、可选稳定 `id`；`status=completed` 必须由 `CompletionGate` 验证 receipt/verify，缺证明时只能显式 override。`id` 用于跨 reorder/rephrase 保持证明；禁止位置兜底。这是为修复“模型自报 completed”的必要偏离；默认 schema 的 `verify` 仍只由 `plan_verify_items` 开启。
 
 新文件 `ai_coding/tools/update_plan_tool.py`：
 
@@ -194,7 +194,7 @@ plan_verify_items: bool = False   # 仅 codex 路径读取；session 路径始�
 行为（逐条对齐 Codex）：
 
 - 成功回灌**固定文本** `"Plan updated"`，`success=True`；不回 `task.render()`。
-- 全量替换 `TaskState.items`：id 按 1..N 重新分配，`content ← step`，`status` 直接映射；
+- 全量替换 `TaskState.items`：匹配旧 step 时保留 `id`（可显式 `id`，否则 exact content），未匹配的新 step 分配新 id；`content ← step`，`status` 直接映射；
   除 `depends_on`（空）与 `verify`（仅 `plan_verify_items=True` 时可带）外不写别的字段。
 - `session.mode == "plan"`（即 `is_plan_agent(session.agent)`，`domain/session.py:482-491`）
   时返回错误，文本对齐 Codex 的意图：`"update_plan is unavailable in Plan mode; present the plan as text."`。
@@ -380,7 +380,7 @@ plan_verify_items: bool = False
 - `session.mode=="plan"` → `success=False, error="plan_mode"`，输出
   `"update_plan is unavailable in Plan mode; present the plan as text."`。
 - 正常路径：`ctx.task.items.clear()` → 逐条 `add(step)` → 按参数置 status → 回灌 **`"Plan updated"`**。
-  id 由 `add` 生成（1..N）；`blocked/dropped/skipped` 不接受，只在内部保留。
+  `id` 优先复用显式 id 或 exact-content 命中的旧 item，否则由 `add` 生成；`blocked/dropped/skipped` 不接受，只在内部保留。
 - `plan_verify_items=True` 时额外接受 `verify`，并对"status=completed 且有 verify"的条目调用
   `ctx.verify_item`；失败 → 该条回 `in_progress`，返回 `success=False, error="verify_failed"`
   （这是开关开启后的已知偏差）。
@@ -532,7 +532,7 @@ C-5b 未完成前这三个名字**不注册**，避免模型调用幽灵工具�
 | 2 | `CodexPlanRunner.run` | `session.plan_implementing=True`；`plan_verify_items=设置值` |
 | 3 | `process_input("Implement the plan.")` | turn_count+1；append user（synthetic）；task 仍为空 |
 | 4 | 工具面 | `update_plan` 在；`todo_write` 不在（`plan_implementing`）；`present_plan` 不在 |
-| 5 | 第 1 次 `update_plan` | `TaskState.items` 1..N；回灌 `"Plan updated"`；`TaskUpdated` 事件 |
+| 5 | 第 1 次 `update_plan` | `TaskState.items` 获得稳定/新 id；回灌 `"Plan updated"`；`TaskUpdated` 事件 |
 | 6 | 下一轮 assemble | implementation turn 注入 `<task-state>` 作为当前 step；history 有正文时不重复 plan block |
 | 7 | 工具调用持续 | `books.note_outcomes` → `continue`（既有结构性续跑） |
 | 8 | 无工具停步 | `decide_after_step`：`plan_implementing` → FINISH（无 task gate） |
@@ -708,7 +708,7 @@ for index in ...:
 | 项 | 落点 | 状态 |
 |---|---|---|
 | C-0 配置档位 | `config/models.py`：`plan_orchestrator` 支持 `codex/session/legacy`；新增 `plan_verify_items=False`。默认值已在本批末尾翻转为 **`codex`**（builder 的 duck-typed 回退同步为 `codex`）。 | 完成 |
-| C-1 `update_plan` | `tools/update_plan_tool.py`：schema 与 Codex 逐键一致；固定回灌 `"Plan updated"`；Plan 模式返回 `plan_mode`；全量替换 1..N；`plan_verify_items=True` 时接受/执行 `verify`。 | 完成 |
+| C-1 `update_plan` | `tools/update_plan_tool.py`：结果仍是 `"Plan updated"`；Plan 模式返回 `plan_mode`；全量替换并保留稳定 id；接受 files/override；`plan_verify_items=True` 时接受/执行 `verify`。 | 完成（含 2026-11-04 的 EffectLedger 偏差） |
 | 工具注册 | `tools/builder.py`：`codex` 注册 `update_plan`、不注册 `present_plan`；子代理两者都没有。 | 完成 |
 | C-2 计划模式 | `<plan-mode>` 易失尾块（仅 codex + `mode=="plan"`）；`<proposed_plan>` 解析与展示剥离；`run_human_turn` 增加 `user_prompt`，回合结束询问 `intent="plan_implement"`。 | 完成 |
 | C-3 执行 | `core/plan_codex.py`：`CodexPlanRunner` 只提交一次 `"Implement the plan."`；`session.plan_implementing/plan_verify_items`（不落盘）；`decide_after_step`/ceiling/deadline/`todo_write` 隐藏；verify 接线。 | 完成 |

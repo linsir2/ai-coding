@@ -2216,6 +2216,7 @@ class AgentLoop:
                 # one file would make every citation look uncovered.
                 note_read=_note_read,
                 effects=lambda: session.effects,
+                effects_legacy=session.effects_legacy,
                 note_effect=_note_effect,
                 approval=self.dispatcher.approval,
                 completion_override_approved=session.completion_override_approved,
