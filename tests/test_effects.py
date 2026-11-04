@@ -111,3 +111,16 @@ def test_an_unknown_child_receipt_does_not_erase_a_local_exact_receipt():
     )
 
     assert after.receipt_for("a.py") == ledger.receipt_for("a.py")
+
+
+def test_a_late_observed_receipt_does_not_downgrade_a_newer_exact_one():
+    ledger = EffectLedger().record_effect(
+        "a.py", "v1", tool="write", call_id="c1", confidence="exact", seq=6
+    )
+
+    after = ledger.record_effect(
+        "a.py", "v2", tool="bash", call_id="b1", confidence="observed", seq=5
+    )
+
+    assert after.receipt_for("a.py") == ledger.receipt_for("a.py")
+    assert after.sequence == 6

@@ -54,14 +54,17 @@ class EffectLedger:
         call_id: str,
         kind: str = "write",
         confidence: str = "exact",
+        seq: int | None = None,
     ) -> EffectLedger:
-        seq = self.sequence + 1
+        assigned_seq = int(seq) if seq is not None else self.sequence + 1
+        if assigned_seq <= 0:
+            assigned_seq = self.sequence + 1
         receipt = FileReceipt(
             path=path,
             version=version,
             tool=tool,
             call_id=call_id,
-            seq=seq,
+            seq=assigned_seq,
             kind=kind,
             confidence=confidence,
         )
@@ -70,8 +73,16 @@ class EffectLedger:
             # An unknown child/worktree effect must not erase a stronger local
             # receipt for the same path.
             return self
+        if (
+            confidence == "observed"
+            and existing is not None
+            and existing.seq > assigned_seq
+        ):
+            # A late job must not overwrite a newer exact/observed write for
+            # the same path with its older, launch-time sequence.
+            return self
         files = tuple(r for r in self.files if r.path != path) + (receipt,)
-        return replace(self, files=files, sequence=seq)
+        return replace(self, files=files, sequence=max(self.sequence, assigned_seq))
 
     def clear_files(self) -> EffectLedger:
         """Drop file receipts (a new plan must not inherit old work)."""

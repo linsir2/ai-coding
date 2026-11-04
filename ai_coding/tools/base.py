@@ -132,6 +132,9 @@ class ToolContext:
     #: Live session flag.  A batch context is copied per call; without this a
     #: second override in the same batch would ask again.
     completion_override_provider: Callable[[], bool] | None = None
+    #: Late background effects: receipts go to a session by id through the loop's
+    #: resolver, not through the captured note_effect closure.
+    settle_effect: Callable[..., None] | None = None
     note_completion_override: Callable[[], None] | None = None
     # P3 (补充式方案 06): how the dispatcher tells the running turn that an
     # approval question is about to be asked (or has been answered).  The loop

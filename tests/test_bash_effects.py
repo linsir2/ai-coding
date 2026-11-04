@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from ai_coding.domain.effects import EffectLedger
@@ -216,3 +218,53 @@ def test_ambiguous_or_branch_does_not_guess(tmp_path):
     )
     assert str(tmp_path / "sub" / "c") not in paths
     assert str(tmp_path / "other" / "c") not in paths
+
+
+@pytest.mark.asyncio
+async def test_a_background_bash_write_settles_into_the_ledger(tmp_path):
+    from ai_coding.core.jobs import JobRegistry
+    from ai_coding.domain.session import SessionData
+
+    session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
+    jobs = JobRegistry(tmp_path / "jobs")
+    seen = []
+
+    def settle(session_id, rows):
+        for row in rows:
+            session.record_effect(
+                row["path"],
+                row["version"],
+                tool="bash",
+                call_id=row["call_id"],
+                kind=row["kind"],
+                confidence="observed",
+                seq=row["seq"],
+            )
+            seen.append(row)
+
+    tool = BashTool(timeout_seconds=5)
+    ctx = ToolContext(
+        workspace=str(tmp_path),
+        session_id="s",
+        jobs=jobs,
+        effects=lambda: session.effects,
+        settle_effect=settle,
+        note_effect=lambda *row, **kw: None,
+        call_id="c1",
+    )
+    result = await tool.execute(
+        {"command": "printf 'hello\\n' > bg.txt", "run_in_background": True},
+        ctx,
+    )
+    assert result.success is True
+    job_id = result.data["job_id"]
+    job = jobs.get(job_id)
+    await jobs.wait(job, timeout=10)
+    await asyncio.sleep(0.05)
+
+    assert seen
+    assert seen[0]["path"] == "bg.txt"
+    assert seen[0]["kind"] == "write"
+    receipt = session.effects.receipt_for("bg.txt")
+    assert receipt is not None
+    assert receipt.confidence == "observed"

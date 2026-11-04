@@ -127,6 +127,131 @@ class _LogTail:
             pass
 
 
+class _EffectSettlement:
+    """A bash job's file-effect capture/apply boundary.
+
+    The probe is captured before the job starts.  The same object captures the
+    end state on settle and either applies synchronously (foreground) or hands
+    the receipts to the loop thread (background/promotion).  Exactly-once is
+    enforced locally as well as by Job._settle, because a watcher and a kill
+    can race.
+    """
+
+    def __init__(
+        self,
+        probe: list[tuple[str, Path, str]],
+        context: ToolContext,
+        *,
+        async_delivery: bool = False,
+    ):
+        self._probe = list(probe)
+        self._context = context
+        self._async = bool(async_delivery)
+        self._loop: asyncio.AbstractEventLoop | None
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+        self._lock = threading.Lock()
+        self._rows: list[dict[str, Any]] | None = None
+        self._delivered = False
+        sequence = context.effects().sequence if context.effects is not None else 0
+        self._seq = sequence + 1
+
+    def abandon(self) -> None:
+        with self._lock:
+            self._delivered = True
+
+    def capture(self) -> list[dict[str, Any]]:
+        with self._lock:
+            if self._rows is not None:
+                return self._rows
+            rows: list[dict[str, Any]] = []
+            for key, path, before in self._probe:
+                after = file_version(path)
+                if after == before:
+                    continue
+                if after and path.is_file():
+                    rows.append(
+                        {
+                            "path": key,
+                            "version": after,
+                            "kind": "write",
+                            "call_id": self._context.call_id,
+                            "seq": self._seq,
+                        }
+                    )
+                elif before and not path.exists():
+                    rows.append(
+                        {
+                            "path": key,
+                            "version": "",
+                            "kind": "delete",
+                            "call_id": self._context.call_id,
+                            "seq": self._seq,
+                        }
+                    )
+            self._rows = rows
+            return rows
+
+    def _valid(self, row: dict[str, Any]) -> bool:
+        path = Path(str(row.get("path") or ""))
+        if not path.is_absolute():
+            path = Path(self._context.workspace or ".") / path
+        if row.get("kind") == "write":
+            return bool(row.get("version")) and file_version(path) == row.get("version")
+        return not path.exists() and not path.is_symlink()
+
+    def _deliver(self, rows: list[dict[str, Any]]) -> None:
+        rows = [row for row in rows if self._valid(row)]
+        with self._lock:
+            if self._delivered:
+                return
+            self._delivered = True
+        settle = self._context.settle_effect
+        if settle is not None:
+            settle(self._context.session_id, rows)
+            return
+        note = self._context.note_effect
+        if note is None:
+            return
+        for row in rows:
+            note(
+                row["path"],
+                row["version"],
+                "bash",
+                row["kind"],
+                call_id=row["call_id"],
+                confidence="observed",
+                seq=row["seq"],
+            )
+
+    def _schedule(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        if self._loop is None or self._loop.is_closed():
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._deliver, rows)
+        except RuntimeError:  # loop already closed
+            return
+
+    def settle(self) -> None:
+        rows = self.capture()
+        if self._async:
+            self._schedule(rows)
+
+    def enable_async(self) -> None:
+        with self._lock:
+            self._async = True
+            rows = self._rows
+        if rows is not None:
+            self._schedule(rows)
+
+    def apply_sync(self) -> None:
+        self._deliver(self.capture())
+
+
 class BashTool(BaseTool):
     """Execute shell commands and return stdout+stderr as output."""
 
@@ -457,6 +582,16 @@ class BashTool(BaseTool):
         coordinator, hold = self._take_hold(context)
         if coordinator is not None and hold is None:
             return self._hold_conflict(context)
+        probe = self._effect_probe(command, context)
+        settlement = _EffectSettlement(probe, context, async_delivery=True)
+
+        def _on_settle() -> None:
+            try:
+                settlement.settle()
+            finally:
+                if coordinator is not None:
+                    coordinator.release_hold(hold)
+
         network = self._requested_network(params)
         try:
             job = registry.start(
@@ -465,24 +600,23 @@ class BashTool(BaseTool):
                 session_id=context.session_id,
                 emit=context.emit,
                 network=network,
-                on_settle=(
-                    (lambda: coordinator.release_hold(hold))
-                    if coordinator is not None and hold is not None
-                    else None
-                ),
+                on_settle=_on_settle,
             )
         except JobLimitReached as exc:
+            settlement.abandon()
             self._release_hold(coordinator, hold)
             return ToolResult(success=False, output=f"error: {exc}", error="job_limit")
         except Exception:
             # No job exists to call on_settle; the refusal must not leave the
             # workspace locked.
+            settlement.abandon()
             self._release_hold(coordinator, hold)
             raise
         denied = getattr(job, "denied_reason", "")
         if denied:
             # The job never spawned and ``start`` settled it directly (no
             # ``_settle`` call, so no ``on_settle``).
+            settlement.abandon()
             self._release_hold(coordinator, hold)
             return ToolResult(
                 success=False,
@@ -541,6 +675,16 @@ class BashTool(BaseTool):
         coordinator, hold = self._take_hold(context)
         if coordinator is not None and hold is None:
             return self._hold_conflict(context)
+        probe = self._effect_probe(command, context)
+        settlement = _EffectSettlement(probe, context)
+
+        def _on_settle() -> None:
+            try:
+                settlement.settle()
+            finally:
+                if coordinator is not None:
+                    coordinator.release_hold(hold)
+
         from ai_coding.core.jobs import JobLimitReached
 
         try:
@@ -554,20 +698,19 @@ class BashTool(BaseTool):
                 # the outcome.  Promotion turns it on, because from that moment the
                 # result has nobody but a notice to reach the model through.
                 announce=False,
-                on_settle=(
-                    (lambda: coordinator.release_hold(hold))
-                    if coordinator is not None and hold is not None
-                    else None
-                ),
+                on_settle=_on_settle,
             )
         except JobLimitReached:
+            settlement.abandon()
             self._release_hold(coordinator, hold)
             raise
         except Exception:
+            settlement.abandon()
             self._release_hold(coordinator, hold)
             raise
         denied = getattr(job, "denied_reason", "")
         if denied:
+            settlement.abandon()
             self._release_hold(coordinator, hold)
             return ToolResult(
                 success=False,
@@ -586,6 +729,7 @@ class BashTool(BaseTool):
             # user cancelled.
             registry.kill(job.id, reason="cancelled by the user")
             pump.stop()
+            settlement.apply_sync()
             raise
         duration = time.monotonic() - started
         text, size = registry.read_head(job, self._max_output)
@@ -593,12 +737,14 @@ class BashTool(BaseTool):
         # reporting a timeout here would promote a dead command.
         if outcome in (WAIT_SETTLED, WAIT_CANCELLED):
             pump.stop()
+            settlement.apply_sync()
             # The result is in hand and the model's answer is about to be built;
             # a record of a command that already answered would be litter.
             registry.discard(job.id)
             return self._settled_result(job, text, size, effective, duration, command, network)
         # Promotion: the pump keeps reading, because the model may still be
         # watching this command in the UI when it finally ends.
+        settlement.enable_async()
         registry.announce(job.id, emit=context.emit)
         return ToolResult(
             success=True,
@@ -691,15 +837,9 @@ class BashTool(BaseTool):
         context = resolve_ctx(ctx)
         workspace = context.workspace or "."
         raw: list[str] = effect_path_candidates(command, workspace=workspace)
-        ledger = context.effects() if context.effects is not None else None
-        if ledger is not None:
-            raw.extend(mark.path for mark in ledger.reads)
-        if context.task is not None:
-            raw.extend(
-                path
-                for item in context.task.items
-                for path in item.files
-            )
+        # Only command-named write candidates.  Read-ledger/task files change
+        # for reasons unrelated to this command; crediting those as bash
+        # observed writes would let another writer satisfy completion.
         found: list[tuple[str, Path]] = []
         seen: set[str] = set()
         for value in raw:
@@ -803,11 +943,7 @@ class BashTool(BaseTool):
         # registry the tool is foreground-only").
         registry = getattr(resolve_ctx(ctx), "jobs", None)
         if registry is not None:
-            probe = self._effect_probe(command, ctx)
-            try:
-                return await self._run_as_job(command, effective, ctx, registry, network)
-            finally:
-                self._apply_effect_probe(probe, ctx)
+            return await self._run_as_job(command, effective, ctx, registry, network)
 
         # R8c: stream what the command says while it says it.  Chunks are
         # observation only - the ToolResult below is what the model ever sees.

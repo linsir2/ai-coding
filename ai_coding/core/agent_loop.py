@@ -137,6 +137,7 @@ from ai_coding.infra.deadline import (
     remaining_of,
     run_with_deadline,
 )
+from ai_coding.infra.file_utils import file_version
 from ai_coding.infra.time_utils import now_utc
 from ai_coding.infra.vcs import git_branch
 from ai_coding.security.approval import ApprovalCallback
@@ -550,6 +551,8 @@ class AgentLoop:
         self._harvest_task: asyncio.Task[None] | None = None
         # R5: history compaction (budget-driven for turns, forced for /compact).
         self.compactor = Compactor(context, emit=self._emit)
+        self._active_session: SessionData | None = None
+        self._late_effects_dirty = False
         # R7a: one request per iteration, assembled in its own unit (the
         # volatile blocks, in their declared order).
         from ai_coding.core.sop_router import ToolObserver
@@ -920,9 +923,15 @@ class AgentLoop:
         "what did the human say" stop guessing from a prefix.
         """
         async with self._turn_lock:
-            return await self._run_turn(
-                session, user_input, on_delta, observer, images, synthetic=synthetic
-            )
+            self._active_session = session
+            try:
+                return await self._run_turn(
+                    session, user_input, on_delta, observer, images, synthetic=synthetic
+                )
+            finally:
+                if self._late_effects_dirty:
+                    self.closer.save(session)
+                    self._late_effects_dirty = False
 
     async def resume_turn(
         self,
@@ -943,6 +952,7 @@ class AgentLoop:
         if session.open_turn is None:
             raise ValueError("nothing to resume")
         async with self._turn_lock:
+            self._active_session = session
             # Q3 (08): the dead turn's question dies with it.  A live turn that
             # meets the call again writes a fresh marker; carrying the stale one
             # along would report a question nobody is asking any more.
@@ -985,6 +995,9 @@ class AgentLoop:
                 )
             finally:
                 self._replay_scope = None
+                if self._late_effects_dirty:
+                    self.closer.save(session)
+                    self._late_effects_dirty = False
 
     async def _run_turn(
         self,
@@ -2158,6 +2171,7 @@ class AgentLoop:
             call_id: str = "",
             canonical: bool = False,
             confidence: str = "exact",
+            seq: int | None = None,
         ) -> None:
             session.record_effect(
                 path,
@@ -2166,7 +2180,52 @@ class AgentLoop:
                 call_id=call_id,
                 kind=kind,
                 confidence=confidence,
+                seq=seq,
             )
+
+        def _deliver_effects(
+            session_id: str, receipts: list[dict[str, Any]]
+        ) -> None:
+            """Apply late job receipts on the loop thread, by session id."""
+
+            def apply(target: SessionData) -> None:
+                for receipt in receipts:
+                    path = str(receipt.get("path") or "")
+                    version = str(receipt.get("version") or "")
+                    kind = str(receipt.get("kind") or "write")
+                    seq = receipt.get("seq")
+                    if not path:
+                        continue
+                    absolute = Path(path)
+                    if not absolute.is_absolute():
+                        absolute = Path(self.workspace) / absolute
+                    if kind == "write":
+                        if not version or file_version(absolute) != version:
+                            continue
+                    elif absolute.exists() or absolute.is_symlink():
+                        continue
+                    target.record_effect(
+                        path,
+                        version,
+                        tool="bash",
+                        call_id=str(receipt.get("call_id") or ""),
+                        kind=kind,
+                        confidence="observed",
+                        seq=int(seq) if isinstance(seq, int) else None,
+                    )
+
+            active = self._active_session
+            if (
+                active is not None
+                and active.session_id == session_id
+                and self._turn_lock.locked()
+            ):
+                apply(active)
+                self._late_effects_dirty = True
+                return
+            # Disk is the authority outside the turn (and for a reloaded or
+            # deleted session).
+            self.sessions.mutate(session_id, apply)
 
         def _note_read(
             path: str,
@@ -2223,6 +2282,7 @@ class AgentLoop:
                 approval=self.dispatcher.approval,
                 completion_override_approved=session.completion_override_approved,
                 completion_override_provider=lambda: session.completion_override_approved,
+                settle_effect=_deliver_effects,
                 note_completion_override=lambda: setattr(
                     session, "completion_override_approved", True
                 ),

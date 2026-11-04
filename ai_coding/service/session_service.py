@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -121,6 +122,9 @@ class SessionService:
         self.root = Path(root)
         self._default_agent = str(default_agent or "build")
         self._default_readonly = bool(default_readonly)
+        # Mutations that arrive from a job watcher thread and the normal turn
+        # save share this RLock; re-entrant because mutate() calls load/save.
+        self._lock = threading.RLock()
 
     def _path(self, session_id: str) -> Path:
         _check_id(session_id)
@@ -322,6 +326,10 @@ class SessionService:
         )
 
     def save(self, session: SessionData) -> None:
+        with self._lock:
+            self._save_unlocked(session)
+
+    def _save_unlocked(self, session: SessionData) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         # R07: a save is an access.  Only ``create`` used to stamp this field,
         # so boot's "newest armed" scan and the /resume list sorted by
@@ -332,6 +340,24 @@ class SessionService:
         tmp = target.with_suffix(".tmp")
         tmp.write_text(to_json_pretty(session.to_dict()), encoding="utf-8")
         os.replace(tmp, target)  # atomic on POSIX
+
+    def mutate(self, session_id: str, fn: Any) -> SessionData | None:
+        """Load, mutate and save one session under the service lock.
+
+        Used by late job settlements: the session may have been reloaded or
+        switched since capture, so mutating a captured object would risk a
+        stale save.  A missing session is a miss, never a resurrection.
+        """
+        with self._lock:
+            try:
+                session = self.load(session_id)
+            except FileNotFoundError:
+                return None
+            if session is None:
+                return None
+            fn(session)
+            self._save_unlocked(session)
+            return session
 
     def load(self, session_id: str) -> SessionData | None:
         target = self._path(session_id)
@@ -409,6 +435,10 @@ class SessionService:
         return valid + broken
 
     def delete(self, session_id: str) -> bool:
+        with self._lock:
+            return self._delete_unlocked(session_id)
+
+    def _delete_unlocked(self, session_id: str) -> bool:
         target = self._path(session_id)
         # M1b: drop the posture marker even when the session file is gone --
         # a session that crashed before its first save leaves only the marker,

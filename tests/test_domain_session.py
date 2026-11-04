@@ -504,3 +504,27 @@ def test_approved_plan_backfill_ignores_a_plan_that_never_ran():
         ],
     })
     assert s.approved_plan == ""
+
+
+def test_session_service_mutate_missing_session_does_not_resurrect(tmp_path):
+    from ai_coding.service.session_service import SessionService
+
+    service = SessionService(tmp_path / "sessions")
+    assert service.mutate("missing", lambda session: None) is None
+    assert not (tmp_path / "sessions" / "missing.json").exists()
+
+
+def test_session_service_mutate_saves_the_mutation(tmp_path):
+    from ai_coding.service.session_service import SessionService
+
+    service = SessionService(tmp_path / "sessions")
+    session = service.create()
+    service.save(session)
+
+    def mutate(target):
+        target.note_read("a.py", 1, 10, 10, version="v1", call_id="c1")
+
+    service.mutate(session.session_id, mutate)
+    loaded = service.load(session.session_id)
+    assert loaded is not None
+    assert loaded.effects.reads[0].call_id == "c1"

@@ -607,6 +607,7 @@ class SessionData:
         call_id: str = "",
         kind: str = "write",
         confidence: str = "exact",
+        seq: int | None = None,
     ) -> None:
         """Record one file effect and invalidate older reads of that path."""
         key = str(path)
@@ -619,6 +620,7 @@ class SessionData:
             call_id=call_id,
             kind=kind,
             confidence=confidence,
+            seq=seq,
         )
 
     def invalidate_reads(self, paths: Iterable[str], *, workspace: str = "") -> None:
