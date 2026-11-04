@@ -48,7 +48,7 @@
 | 工具 | `write_paths_for(params, ctx)` | claim |
 |---|---|---|
 | `write` / `edit` | `(规范路径,)`，用 `self._sandbox.resolve`（吞 `SandboxViolation`→`None`） | 路径级 |
-| `bash`（前台/后台/超时 promotion） | `()` = 未知 | 工作区级 `*`；工具另拿 job 生命周期 hold（同 owner 可重入） |
+| `bash`（前台/后台/超时 promotion） | `()` = 未知 | dispatcher 前台 claim `*`；后台/晋升 job 不拿 lifetime hold |
 | `mcp_call` | `()` | 工作区级 `*` |
 | `subAgent` / `spawn_agent` / `send_message` / `todo_write` / plan / memory / job_kill | `None` | 不 claim（显式返回 None） |
 
@@ -64,15 +64,16 @@
   `{paths, owner, wait_ms}`；不执行。`WriteAheadLog` 新增 `abandon(call)`，冲突时
   删除已落下的 `running` intent（`core/write_ahead.py:113-118`），不留残影。
 - 释放：`try/finally`；异常/取消都释放。
-- **bash 超时 promotion 的漏洞**：前台命令超时后 job 继续运行，dispatcher 的
-  `finally` 已释放 `*`；因此 `_start_background` 与 `_run_as_job` 在
-  `registry.start` 之前都调用**同步** `acquire_hold(owner, root)`（同 owner 重入
-  计数，不与 dispatcher 的 claim 冲突），把 `on_settle=release_hold` 传给 job；
-  `denied_reason`/启动异常立即 release。settle-in-time 时 job 回调先减 1，dispatcher
-  再减 1；promotion 时 hold 留到 job 结束。`job_kill` 同样走 `_settle` 回调。
+- **2026-11-05 修订：后台 job 不持有 workspace 锁。** 原方案让
+  `_start_background`/`_run_as_job` 在 `registry.start` 前 `acquire_hold(owner, root)`，
+  由 `on_settle` 释放。实测一个长期 dev server（`npx vite`）会让整个 workspace
+  永久不可写，跨 session 连 `job_kill` 前的诊断 bash 都被 `write_conflict` 挡住。
+  现在后台/晋升 job 只受 dispatcher 启动 claim 保护，不再持 lifetime hold；
+  需要写串行时把 install/build 放前台。`job_kill` 本身不取 claim。
+
 - `acquire_hold` 是同步的（可能从 job watcher 线程释放）；异步 `claim` 用
   `threading.Lock` 保护的同一份占用表 + 50ms 轮询等待，跨线程安全。
-- 不做 lease/fence：前台 claim 不跨调用；后台 job 持有由单进程回调释放。
+- 不做 lease/fence：前台 claim 不跨调用；后台 job 不持 lifetime hold。
 
 ### 2.2 完成时重叠（子代理之间）
 
@@ -149,7 +150,7 @@
 |---|---|
 | `tools/base.py` | `write_paths_for(params, ctx) -> tuple[str,...] \| None`，默认 `None` |
 | `tools/write_tool.py`/`edit_tool.py` | 覆写：`self._sandbox.resolve` → `(str(target),)`；`SandboxViolation`→`None` |
-| `tools/bash_tool.py` | 覆写：一律 `()`；`_start_background`/`_run_as_job` 用 `acquire_hold` + `on_settle`（含超时 promotion） |
+| `tools/bash_tool.py` | 覆写：一律 `()`；后台/晋升 job **不** `acquire_hold`（2026-11-05 修订） |
 | `tools/mcp_call.py` | 覆写：`()` |
 | `core/write_coordinator.py`（新） | 异步 `claim`（路径/`*`、等待/超时/取消）、同步 `acquire_hold`、`release_hold`、`register_run/overlap` |
 | `core/dispatch.py` | 构造收 `write_coordinator`；replay 后 claim、finally release；`_write_conflict` |
@@ -179,7 +180,7 @@ Dispatcher._decide_inner
   try: _execute
   finally: claim.release()
 bash(run_in_background)
-  coordinator.acquire_hold(owner, root) → job.start(on_settle=release)
+  dispatcher launch claim only；job.start() 不取 lifetime hold
 子代理结算
   _run_turn → changed_paths
   coordinator.register_run(session_id, changed_paths)
@@ -202,13 +203,13 @@ AgentLoop._take_notices
 | | `acquire_hold` 与异步 claim 互斥 | hold 期间 claim 等待；release 后通过 |
 | | overlap 只报别人/10 分钟外不报 | — |
 | `tests/test_tool_dispatch.py`（既有） | write 路径 claim | fake coordinator 收到 resolve 后的路径 |
-| | bash 前台/后台都 `*` | 工具 acquire_hold 可重入 |
+| | bash 前台 claim `*`；后台不持 lifetime hold | 后台运行期间另一个 writer 可 claim |
 | | mcp `*` | — |
 | | 超时 → `write_conflict` | 错误码/data；工具未执行；`write_ahead` intent 已 abandon |
 | | 异常/取消释放 | finally 生效 |
 | `tests/test_write_ahead.py`（既有） | `abandon` 删除 running 记录 | settle 不再写回；重放不命中 |
 | `tests/test_jobs.py` | `on_settle` 只回调一次 | kill/正常结算各不重复 |
-| | 超时 promotion 仍持 hold | job 结束前第二个写者被挡；结束后放行 |
+| | 超时 promotion 不持 hold | 后台运行期间另一个 writer 可 claim |
 | `tests/test_subagent_runner.py` | sync 占槽、spawn 被拒 | `_active`；`SubAgentPoolFull` |
 | | 启动失败回滚 | 两处失败路径后 `_active` 归零 |
 | | follow-up 占槽/中断释放 | +1/-1；不泄漏 |
@@ -237,7 +238,7 @@ AgentLoop._take_notices
 
 1. bash 一律 `*` 会降低并发；只读 shell 用 `shell_read`（它不 claim）。
 2. 前台 claim 30s 超时 fail-closed；长命令会占 `*`，文案明确。
-3. 后台 bash 持有 `*` 到 job settle；`job_kill` 也会释放（回调幂等）。
+3. 后台 bash 不持 `*`；`job_kill` 也不取 claim。
 4. 完成重叠只有后完成者能看到；不回溯通知（如实文案）。
 5. 通知 at-least-once；`deliver` 在 checkpoint 之后，崩溃只会重复不会丢。
 6. `_active` 的释放必须幂等，且覆盖 sync/spawn/follow-up/interrupt/close/reap/
@@ -261,7 +262,7 @@ AgentLoop._take_notices
 ## 8. 实施顺序
 
 1. **B1 写协调**：`WriteCoordinator` + `write_paths_for` + dispatcher claim +
-   后台 bash hold + job `on_settle` + `write_conflict`。
+   前台 dispatcher claim + `write_conflict`；后台 job 不持 lifetime hold。
 2. **B2 重叠与容量**：`conflicts`、`_active` admit/release、所有终态路径。
 3. **B3 持久通知**：`NoticeStore`、loop 合并/去重/只清已投递、`wake=True`。
 4. **B4 复核**：独立子智能体评审 → 修 → 全量校验 → tmux 真机。
@@ -271,7 +272,7 @@ AgentLoop._take_notices
 - **B1 写协调**：`core/write_coordinator.py`（`(root, rel)` 占用表、`*`/路径冲突、
   同 owner 重入、异步 claim 20ms/50ms 轮询、同步 hold）、`write_paths_for`、
   dispatcher claim（replay 后、execute 前，超时 `write_conflict` + `write_ahead.abandon`）、
-  bash job 生命周期 hold（含超时 promotion）、`JobRegistry.on_settle`。
+  前台 claim；后台/晋升 job 不持 lifetime hold（2026-11-05 修订）。
 - **B2 重叠与容量**：`SubagentResult.conflicts`（ledger/data/render/notice/details/
   bridge/前端）；`_run_turn` 注册 + 比对；`_active` 集合准入与幂等释放，覆盖
   run/spawn 两处失败/`_schedule_turn` 失败/中断/close/reap。

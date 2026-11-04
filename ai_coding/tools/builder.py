@@ -332,7 +332,9 @@ def _assemble_registry(
         # E.1/E.2: the process layer's writable face is the path layer's, read
         # **live** -- the same roots, so a directory the file tools may write is
         # a directory a bash command may write, and never one or the other.
-        # P2-B1: a background/job command holds the workspace until it settles.
+        # P2-B1: foreground calls are claimed by the dispatcher.  Background
+        # jobs take no lifetime hold (2026-11-05), so a server cannot own the
+        # workspace forever.
         registry.register(
             BashTool(
                 timeout_seconds=tools_cfg.bash.timeout_seconds,

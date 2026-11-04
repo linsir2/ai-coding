@@ -184,9 +184,8 @@ class Job:
     #: turn that started it, and the panel has to hear about it settling after
     #: that turn is over -- the same reason sub-agents keep their parent's emit.
     emit: Callable[[Any], None] | None = None
-    #: P2-B1: called exactly once at settlement.  ``bash`` uses it to release
-    #: the workspace-wide write hold it took before starting this job, so a
-    #: promoted command keeps the workspace until it really ends.
+    #: Called exactly once at settlement.  Background jobs take no write hold
+    #: since 2026-11-05; this remains a generic idempotent settlement hook.
     on_settle: Callable[[], None] | None = None
 
     def view(self) -> dict[str, Any]:
@@ -249,7 +248,11 @@ class JobRegistry:
         backend: SandboxBackend | None = None,
         roots: Sequence[Path] | Callable[[], Sequence[Path]] = (),
     ) -> None:
-        self._root = Path(root)
+        # The log path is handed back to the model and to the UI.  A relative
+        # root becomes relative to the process CWD, which is not the cwd of the
+        # command that started the job (measured: the model cat'ed
+        # ``frontend/.ai-coding/jobs`` after starting ``cd frontend && ...``).
+        self._root = Path(root).expanduser().resolve()
         self._notices = notices
         # M-D1: the process sandbox.  ``start`` is the one wrap point for a job
         # (``bash_tool`` does not wrap a job-class call), and it shares the
@@ -424,11 +427,10 @@ class JobRegistry:
         if job.settled:
             return
         job.settled = True
-        # P2-B1: exactly once, for the same reason every other effect here is
+        # Exactly once, for the same reason every other effect here is
         # idempotent.  A watcher thread and a kill can both reach settlement;
-        # the callback releases a write hold and a second release would be a
-        # claim belonging to nobody.  A broken callback must not cost the
-        # notice, the ledger row, or the waiter's wake-up.
+        # a duplicate callback would repeat whatever cleanup it owns.  A broken
+        # callback must not cost the notice, the ledger row, or the waiter.
         if job.on_settle is not None:
             try:
                 job.on_settle()
@@ -686,9 +688,11 @@ class JobRegistry:
                 if kill_on_cancel:
                     self.kill(job.id, reason="cancelled by the user")
                 return WAIT_CANCELLED
-            if job.done.wait(timeout=min(tick, remaining)):
-                return WAIT_SETTLED
-            await asyncio.sleep(0)
+            # Do not block the event loop on a threading.Event: under host
+            # starvation that wait can overshoot the deadline by seconds, and a
+            # one-second promotion test then reads a long-finished job as if it
+            # had settled in time.  Sleep async; the loop re-checks done/deadline.
+            await asyncio.sleep(min(tick, max(0.0, remaining)))
 
     def announce(self, job_id: str, *, emit: Callable[[Any], None] | None = None) -> None:
         """Start announcing ``job_id``: from now on nobody holds its result.
@@ -769,11 +773,24 @@ class JobRegistry:
                 # still not keep the product from starting.
                 _log.warning("ignoring unreadable job ledger %s", path.name)
                 continue
+            raw_log = Path(str(row.get("log_path", ""))).expanduser()
+            if not raw_log.is_absolute():
+                # Old ledgers stored ``<root>/x.log`` relative to the process
+                # CWD; the row always lives in this root, so rebase by basename.
+                raw_log = self._root / raw_log.name
+            elif self._root not in raw_log.parents:
+                # The workspace was moved/copied; the ledger's absolute path
+                # is stale, but the log basename still lives beside this row.
+                raw_log = self._root / raw_log.name
             job = Job(
                 id=str(row.get("id", path.stem)),
                 command=str(row.get("command", "")),
                 pid=int(row.get("pid", 0)),
-                log_path=str(row.get("log_path", path.with_suffix(".log").name)),
+                log_path=str(
+                    raw_log
+                    if raw_log.name.endswith(".log")
+                    else path.with_suffix(".log")
+                ),
                 started_at=str(row.get("started_at", "")),
                 origin_session=str(row.get("origin_session", "")),
                 status=str(row.get("status", STATUS_UNKNOWN)),

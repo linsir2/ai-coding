@@ -65,6 +65,7 @@ _NETWORK_FAILURE_RE = re.compile(
 )
 
 
+
 class _LogTail:
     """Replays a running job's log as ``tool.chunk`` events.
 
@@ -286,8 +287,9 @@ class BashTool(BaseTool):
         # assertions and debugging (tests read it directly).
         self._roots_source = roots
         self._roots = self._snapshot_roots()
-        #: P2-B1: the write table a background/job command holds until the
-        #: command settles.  ``None`` keeps direct/test stacks uncoordinated.
+        #: Kept for composition/test compatibility.  Background jobs no longer
+        #: hold the workspace (2026-11-05); the dispatcher owns foreground
+        #: claims, and a long-lived server must not block every writer.
         self._write_coordinator = write_coordinator
 
     def _snapshot_roots(self) -> tuple[Path, ...]:
@@ -563,31 +565,6 @@ class BashTool(BaseTool):
             )
         return None
 
-    def _take_hold(self, ctx: ToolContext) -> tuple[Any | None, str | None]:
-        """Take the job-lifetime hold; return ``(coordinator, token)``."""
-        coordinator = self._write_coordinator
-        if coordinator is None:
-            return None, None
-        return coordinator, coordinator.acquire_hold(ctx.session_id, ctx.workspace or ".")
-
-    @staticmethod
-    def _release_hold(coordinator: Any | None, token: str | None) -> None:
-        if coordinator is not None and token is not None:
-            coordinator.release_hold(token)
-
-    @staticmethod
-    def _hold_conflict(ctx: ToolContext) -> ToolResult:
-        """The synchronous hold could not be taken: nothing was started."""
-        return ToolResult(
-            success=False,
-            output=(
-                "error: 写冲突——工作区正被另一个写者占用，后台命令未启动。"
-                "请等它完成或改用前台/其他工作区后重试。"
-            ),
-            error="write_conflict",
-            data={"paths": ["*"], "owner": ctx.session_id, "wait_ms": 0},
-        )
-
     def _start_background(
         self, command: str, params: dict[str, Any], ctx: ToolContext | None
     ) -> ToolResult:
@@ -611,22 +588,16 @@ class BashTool(BaseTool):
             )
         from ai_coding.core.jobs import JobLimitReached
 
-        # P2-B1: the dispatcher's claim ends when ``execute`` returns, but this
-        # command keeps writing.  The job takes a synchronous hold on the same
-        # owner (re-entrant with the dispatcher's claim) and releases it when
-        # the job settles.
-        coordinator, hold = self._take_hold(context)
-        if coordinator is not None and hold is None:
-            return self._hold_conflict(context)
+        # 2026-11-05: a background job does NOT take a workspace hold.  A
+        # long-lived dev server would otherwise own ``*`` until it is killed,
+        # blocking every later edit/bash in every session (including the
+        # diagnosis that could stop it).  The dispatcher claim still covers
+        # launch; background writes are explicitly asynchronous.
         probe = self._effect_probe(command, context)
         settlement = _EffectSettlement(probe, context, async_delivery=True)
 
         def _on_settle() -> None:
-            try:
-                settlement.settle()
-            finally:
-                if coordinator is not None:
-                    coordinator.release_hold(hold)
+            settlement.settle()
 
         network = self._requested_network(params)
         try:
@@ -641,20 +612,15 @@ class BashTool(BaseTool):
             )
         except JobLimitReached as exc:
             settlement.abandon()
-            self._release_hold(coordinator, hold)
             return ToolResult(success=False, output=f"error: {exc}", error="job_limit")
         except Exception:
-            # No job exists to call on_settle; the refusal must not leave the
-            # workspace locked.
             settlement.abandon()
-            self._release_hold(coordinator, hold)
             raise
         denied = getattr(job, "denied_reason", "")
         if denied:
             # The job never spawned and ``start`` settled it directly (no
             # ``_settle`` call, so no ``on_settle``).
             settlement.abandon()
-            self._release_hold(coordinator, hold)
             return ToolResult(
                 success=False,
                 output=f"error: {denied}",
@@ -666,7 +632,8 @@ class BashTool(BaseTool):
             f"job {job.id} started in the background (pid {job.pid}). "
             f"You will be notified when it finishes -- do not poll and do "
             f"not sleep waiting for it; keep working on independent steps. "
-            f"Its output streams to: {job.log_path}"
+            f"Its output streams to: {job.log_path}; inspect it with job_output "
+            f"{job.id}, stop it with job_kill."
         )
         data: dict[str, Any] = {"job_id": job.id, "pid": job.pid, "log": job.log_path}
         if network_mode in ("deny", "proxy"):
@@ -705,22 +672,12 @@ class BashTool(BaseTool):
           None").
         """
         context = resolve_ctx(ctx)
-        # P2-B1: same hold as the background path.  Here it matters most: a
-        # command that outlives its wait is promoted, the dispatcher's claim is
-        # already released, and only this job callback keeps the workspace
-        # locked until the command really ends.
-        coordinator, hold = self._take_hold(context)
-        if coordinator is not None and hold is None:
-            return self._hold_conflict(context)
+        # 2026-11-05: no job-lifetime hold (same reason as the background path).
         probe = self._effect_probe(command, context)
         settlement = _EffectSettlement(probe, context)
 
         def _on_settle() -> None:
-            try:
-                settlement.settle()
-            finally:
-                if coordinator is not None:
-                    coordinator.release_hold(hold)
+            settlement.settle()
 
         from ai_coding.core.jobs import JobLimitReached
 
@@ -740,16 +697,13 @@ class BashTool(BaseTool):
             )
         except JobLimitReached:
             settlement.abandon()
-            self._release_hold(coordinator, hold)
             raise
         except Exception:
             settlement.abandon()
-            self._release_hold(coordinator, hold)
             raise
         denied = getattr(job, "denied_reason", "")
         if denied:
             settlement.abandon()
-            self._release_hold(coordinator, hold)
             return ToolResult(
                 success=False,
                 output=f"error: {denied}",
@@ -789,9 +743,9 @@ class BashTool(BaseTool):
             output=(
                 f"still running after {effective}s as job {job.id} "
                 f"(pid {job.pid}); it was NOT killed. Its output so far is at "
-                f"{job.log_path} and keeps growing. You will be notified when "
-                f"it finishes -- do not poll, do not sleep, and do not start it "
-                f"again; carry on with independent work or stop it with job_kill."
+                f"{job.log_path} and keeps growing. Inspect it with job_output "
+                f"{job.id}; do not poll, do not sleep, and do not start it again; "
+                f"carry on with independent work or stop it with job_kill."
             ),
             data={
                 "promoted": True,

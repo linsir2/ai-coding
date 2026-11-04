@@ -1,10 +1,10 @@
 """P2-B1: who is allowed to write what, right now.
 
 The dispatcher asks for a :class:`Claim` before running a call that can touch
-the workspace; a background ``bash`` job takes a :class:`Hold` that survives
-the call and is released by the job's settlement.  Both live in one occupancy
-table protected by :class:`threading.Lock`, because claims are awaited on the
-event-loop thread while holds are released from job watcher threads.
+the workspace.  Background jobs do **not** take a lifetime hold (2026-11-05);
+the synchronous :class:`Hold` API remains for a possible strict mode, but the
+production bash path no longer calls it.  Claims and legacy holds share one
+occupancy table protected by :class:`threading.Lock`.
 
 The key is ``(root, relative-path)``.  ``root`` is the workspace the call was
 made against, so an isolated sub-agent's worktree never conflicts with the
@@ -12,10 +12,12 @@ main tree.  A ``*`` entry (an opaque ``bash`` command, ``mcp_call``) excludes
 every path in the same root; a path only excludes that path in the same root.
 
 Nothing here is a lease or a fence: a foreground claim is released in the
-dispatcher's ``finally`` (cancellation included), and the one long-held case —
-a promoted background command — is released by the job table's own
-``on_settle`` callback.  That is enough for one process, which is the contract
-this batch has.
+dispatcher's ``finally`` (cancellation included).  A background job does **not**
+take a job-lifetime hold: it can outlive every useful operation, and one stuck
+server would block every writer in the workspace, including the ``job_kill``
+diagnosis that could stop it.  Its launch is covered by the dispatcher's claim;
+its later writes are explicitly asynchronous and are not serialized with other
+tools.  Run an install/build in the foreground when serialization matters.
 """
 
 from __future__ import annotations
@@ -136,6 +138,33 @@ class WriteCoordinator:
                 return None
             await asyncio.sleep(min(POLL_SECONDS, remaining))
 
+    def blockers(
+        self,
+        owner: str,
+        root: str | os.PathLike[str],
+        paths: Sequence[str] | Iterable[str],
+    ) -> tuple[str, ...]:
+        """The other owners currently blocking this scope (for diagnostics)."""
+        root_s = _norm_root(root)
+        keys = self._keys(root_s, paths)
+        with self._lock:
+            names: set[str] = set()
+            for key in keys:
+                held_root, held_relative = key
+                for (key_root, key_relative), owners in self._held.items():
+                    if key_root != held_root or not owners:
+                        continue
+                    if (
+                        held_relative != "*"
+                        and key_relative != "*"
+                        and held_relative != key_relative
+                    ):
+                        continue
+                    names.update(
+                        name for name, count in owners.items() if name != owner and count > 0
+                    )
+            return tuple(sorted(names))
+
     # ---- synchronous holds ------------------------------------------------
 
     def acquire_hold(
@@ -143,9 +172,9 @@ class WriteCoordinator:
     ) -> str | None:
         """Take the whole root synchronously; return a token, or ``None``.
 
-        Called before ``JobRegistry.start`` (which is itself synchronous) and
-        released by the job's ``on_settle`` callback.  Re-entrant for the same
-        owner, exactly like :meth:`claim`.
+        Legacy/strict-mode hook: the production bash path no longer calls this
+        (background jobs must not own the workspace for their lifetime).
+        Re-entrant for the same owner, exactly like :meth:`claim`.
         """
         key = (_norm_root(root), "*")
         with self._lock:

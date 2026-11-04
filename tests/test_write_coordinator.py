@@ -294,3 +294,14 @@ def test_the_subagent_runner_uses_the_injected_coordinator(tmp_path):
     )
     assert runner._write_coordinator is coord  # noqa: SLF001
     assert runner._active == set()  # noqa: SLF001
+
+
+def test_blockers_names_the_other_owner_for_a_conflict(tmp_path):
+    coord = _coord(tmp_path)
+    root = _root(tmp_path)
+    hold = coord.acquire_hold("job-session", root)
+    assert hold is not None
+    assert coord.blockers("other", root, ()) == ("job-session",)
+    assert coord.blockers("job-session", root, ()) == ()
+    coord.release_hold(hold)
+    assert coord.blockers("other", root, ()) == ()

@@ -805,8 +805,16 @@ class ToolDispatcher:
                         # The call never runs, so its ``running`` intent must
                         # not survive into the next turn.
                         log.abandon(call)
+                    blockers = ()
+                    finder = getattr(self.write_coordinator, "blockers", None)
+                    if finder is not None:
+                        blockers = tuple(
+                            finder(ctx.session_id, ctx.workspace, paths)
+                        )
                     return (
-                        self._write_conflict(call, paths, wait_ms, ctx.session_id),
+                        self._write_conflict(
+                            call, paths, wait_ms, ctx.session_id, blockers
+                        ),
                         True,
                         False,
                     )
@@ -827,7 +835,8 @@ class ToolDispatcher:
             return result, result.error == "credential_approval_required", False
         finally:
             # Every exit -- success, tool error, cancellation, a raising guard
-            # or hook -- releases.  A background bash job keeps its own hold.
+            # or hook -- releases.  Background jobs take no lifetime hold (see
+            # WriteCoordinator); only foreground calls are serialized here.
             if claim is not None:
                 claim.release()
 
@@ -1155,25 +1164,32 @@ class ToolDispatcher:
         paths: tuple[str, ...],
         wait_ms: int,
         owner: str,
+        blockers: tuple[str, ...] = (),
     ) -> ToolResult:
         """Another writer held the same scope for the whole bounded wait.
 
-        The call did not run, so the model must see a distinct code it can act
-        on: wait, pick another file, or ask for less concurrency -- not "the
-        tool failed".
+        The holder is a foreground writer: background jobs no longer take a
+        lifetime hold (2026-11-05), so pointing at a running job would be a
+        false lead.  Name the blocking session(s) when the coordinator can.
         """
+        detail = (
+            f" 阻塞会话：{', '.join(blockers)}；等它完成或换一个工作区。"
+            if blockers
+            else " 持有者已释放或来自前台调用；先重试，不要并发写同一范围。"
+        )
         return ToolResult(
             success=False,
             output=(
                 f"error: 写冲突——另一个写者正在修改同一范围，等待 {wait_ms}ms "
                 "后仍未释放；本次调用未执行。请等它完成或换一条路径后重试，"
-                "不要并发写同一个文件。"
+                "不要并发写同一个文件。" + detail
             ),
             error="write_conflict",
             data={
                 "paths": list(paths) if paths else ["*"],
                 "owner": owner,
                 "wait_ms": wait_ms,
+                "blockers": list(blockers),
             },
         )
 

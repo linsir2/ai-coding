@@ -885,12 +885,16 @@ class _Coordinator:
         self.grant = grant
         self.claims: list[dict] = []
         self.releases: list[_Claim] = []
+        self.blockers_owners: tuple[str, ...] = ()
 
     async def claim(self, owner, root, paths, timeout):
         self.claims.append(
             {"owner": owner, "root": root, "paths": tuple(paths), "timeout": timeout}
         )
         return _Claim(self) if self.grant else None
+
+    def blockers(self, owner, root, paths):
+        return self.blockers_owners
 
     def acquire_hold(self, owner, root):
         return f"hold-{owner}"
@@ -1315,3 +1319,51 @@ async def test_without_a_pool_the_old_semaphore_still_bounds_a_group():
     assert probe.peak == 1
     assert all(outcome.result.success for outcome in outcomes)
 
+
+
+@pytest.mark.asyncio
+async def test_a_write_conflict_names_the_blocking_session_not_a_job():
+    tool = _PathTool("read", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator(grant=False)
+    coordinator.blockers_owners = ("s2",)
+
+    outcomes = await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], _ctx()
+    )
+
+    result = outcomes[0].result
+    assert result.error == "write_conflict"
+    assert "s2" in result.output
+    assert "job_kill" not in result.output
+    assert result.data is not None
+    assert result.data["blockers"] == ["s2"]
+
+
+@pytest.mark.asyncio
+async def test_a_write_conflict_without_an_owner_does_not_name_a_job():
+    tool = _PathTool("read", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator(grant=False)
+    outcomes = await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], _ctx()
+    )
+
+    result = outcomes[0].result
+    assert result.error == "write_conflict"
+    assert "job_kill" not in result.output
+    assert result.data is not None
+    assert result.data["blockers"] == []
+
+@pytest.mark.asyncio
+async def test_a_conflict_with_a_blocker_does_not_mention_killing_a_job():
+    tool = _PathTool("read", ("/tmp/ws/a.py",))
+    coordinator = _Coordinator(grant=False)
+    coordinator.blockers_owners = ("s2",)
+
+    outcomes = await _dispatcher([tool], write_coordinator=coordinator).dispatch_batch(
+        [_ref("c1", "read")], _ctx()
+    )
+
+    result = outcomes[0].result
+    assert result.error == "write_conflict"
+    assert "阻塞会话：s2" in result.output
+    assert "job_kill" not in result.output

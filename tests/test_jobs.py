@@ -403,14 +403,17 @@ def test_a_corrupt_ledger_row_does_not_stop_the_next_run(tmp_path):
     assert registry.list() == []
 
 
-# ---- P2-B1: a bash job holds the workspace until it settles -----------------
+# ---- P2-B1 (revised 2026-11-05): background jobs do not hold the workspace ----
 
 
 @pytest.mark.asyncio
-async def test_a_background_bash_job_holds_the_workspace_until_it_settles(tmp_path):
-    """The dispatcher's own claim ends when ``execute`` returns, but a
-    background command keeps writing after that.  The job takes a synchronous
-    hold on the same owner and settles it through ``on_settle``."""
+async def test_a_background_bash_job_does_not_hold_the_workspace(tmp_path):
+    """2026-11-05: a background job is asynchronous, not a workspace owner.
+
+    A long-lived dev server used to hold ``*`` until it settled, which blocked
+    every later edit/bash in every session.  The dispatcher claim still covers
+    launch; the job itself takes no lifetime hold.
+    """
     from ai_coding.core.write_coordinator import WriteCoordinator
     from ai_coding.tools.base import ToolContext
     from ai_coding.tools.bash_tool import BashTool
@@ -425,9 +428,9 @@ async def test_a_background_bash_job_holds_the_workspace_until_it_settles(tmp_pa
     )
 
     assert result.success is True and result.data is not None
-    assert await coordinator.claim("other", str(tmp_path), (), timeout=0.1) is None, (
-        "the running job still owns the workspace"
-    )
+    claimed = await coordinator.claim("other", str(tmp_path), (), timeout=0.1)
+    assert claimed is not None, "a background job must not own the workspace"
+    claimed.release()
     job = registry.get(result.data["job_id"])
     assert job is not None
     _wait_until(lambda: job.done.is_set(), what="the job to settle")
@@ -437,10 +440,8 @@ async def test_a_background_bash_job_holds_the_workspace_until_it_settles(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_a_promoted_foreground_job_keeps_its_hold_until_it_settles(tmp_path):
-    """The documented hole: a foreground command that outlives its wait is
-    promoted, and the dispatcher's ``finally`` has already run.  The job's
-    hold has to survive promotion."""
+async def test_a_promoted_foreground_job_does_not_hold_the_workspace(tmp_path):
+    """A promoted command is asynchronous too: it must not lock the workspace."""
     from ai_coding.core.write_coordinator import WriteCoordinator
     from ai_coding.tools.base import ToolContext
     from ai_coding.tools.bash_tool import BashTool
@@ -455,7 +456,9 @@ async def test_a_promoted_foreground_job_keeps_its_hold_until_it_settles(tmp_pat
     )
 
     assert result.data is not None and result.data.get("promoted") is True
-    assert await coordinator.claim("other", str(tmp_path), (), timeout=0.3) is None
+    claimed = await coordinator.claim("other", str(tmp_path), (), timeout=0.3)
+    assert claimed is not None, "a promoted job must not own the workspace"
+    claimed.release()
     job = registry.get(result.data["job_id"])
     assert job is not None
     _wait_until(lambda: job.done.is_set(), what="the promoted job to settle")
@@ -465,7 +468,7 @@ async def test_a_promoted_foreground_job_keeps_its_hold_until_it_settles(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_job_that_was_never_started_releases_the_hold(tmp_path):
+async def test_a_job_that_was_never_started_does_not_lock_the_workspace(tmp_path):
     """A refused start must not leave the workspace locked."""
     from ai_coding.core.write_coordinator import WriteCoordinator
     from ai_coding.tools.base import ToolContext
@@ -493,7 +496,7 @@ async def test_a_job_that_was_never_started_releases_the_hold(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_background_start_that_raises_releases_the_hold(tmp_path):
+async def test_a_background_start_that_raises_does_not_lock_the_workspace(tmp_path):
     from ai_coding.core.write_coordinator import WriteCoordinator
     from ai_coding.tools.base import ToolContext
     from ai_coding.tools.bash_tool import BashTool
@@ -721,3 +724,27 @@ def test_a_capped_log_must_not_cap_the_commands_own_files(tmp_path, monkeypatch)
 
     assert job.status == "completed"
     assert payload.stat().st_size == 100 * 1024
+
+
+def test_rescan_rebases_an_old_relative_log_path(tmp_path):
+    import json
+
+    root = tmp_path / "frontend" / ".ai-coding" / "jobs"
+    root.mkdir(parents=True)
+    (root / "job_old.log").write_text("old\n", encoding="utf-8")
+    (root / "job_old.json").write_text(
+        json.dumps(
+            {
+                "id": "job_old",
+                "command": "echo old",
+                "pid": 0,
+                "log_path": "frontend/.ai-coding/jobs/job_old.log",
+                "status": "completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    job = JobRegistry(root=root).get("job_old")
+    assert job is not None
+    assert job.log_path == str(root / "job_old.log")

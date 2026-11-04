@@ -863,3 +863,35 @@ def test_a_chinese_read_only_package_store_failure_is_diagnosed():
     assert note is not None
     assert "pnpm_config_store_dir" in note
     assert "PNPM_STORE_DIR 不是" in note
+
+
+@pytest.mark.asyncio
+async def test_a_background_job_does_not_block_another_writer(tmp_path: Path):
+    """The old deadlock: a background job held ``*`` until it settled, so the
+    next session's write/edit/bash never got a chance.  Run a real long-lived
+    job and claim the workspace while it is live."""
+    import sys
+
+    from ai_coding.core.jobs import JobRegistry
+    from ai_coding.core.write_coordinator import WriteCoordinator
+    from ai_coding.tools.base import ToolContext
+
+    coordinator = WriteCoordinator(tmp_path)
+    registry = JobRegistry(tmp_path / "jobs")
+    tool = BashTool(write_coordinator=coordinator)
+    result = await tool.execute(
+        {
+            "command": f"{sys.executable} -m http.server 0",
+            "run_in_background": True,
+        },
+        ToolContext(workspace=str(tmp_path), session_id="s1", jobs=registry),
+    )
+    assert result.success is True and result.data is not None
+    job = registry.get(str(result.data["job_id"]))
+    assert job is not None and job.status == "running"
+    try:
+        claimed = await coordinator.claim("other", str(tmp_path), (), timeout=0.3)
+        assert claimed is not None, "a background job must not hold the workspace"
+        claimed.release()
+    finally:
+        registry.kill(job.id, reason="test cleanup")
