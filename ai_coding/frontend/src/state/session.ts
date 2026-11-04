@@ -209,6 +209,7 @@ export type Action =
   | { kind: "queued-loaded"; rows: QueuedLine[] }
   | { kind: "queued-edited"; id: string; text: string }
   | { kind: "queued-deleted"; id: string }
+  | { kind: "turn-refused" }
   | { kind: "submit-failed"; reason: string }
   // r20/F5: a paste the backend refused.  Not a failed submit -- the turn runs,
   // just without the picture -- so `busy` is left alone and the notice lands on
@@ -1049,6 +1050,10 @@ export function reduce(state: SessionState, action: Action): SessionState {
       return { ...state, queued: state.queued.filter((row) => row.id !== action.id) }
     case "jobs":
       return { ...state, jobs: action.jobs }
+    case "turn-refused":
+      // The request named no turn (it was refused, or the live turn ended
+      // before its ack): the busy latch belongs to nothing.
+      return { ...state, busy: false, turnId: undefined, orphanTurnId: undefined }
     case "submit-failed": {
       const quiet = { ...state, busy: false }
       return {

@@ -1041,7 +1041,7 @@ async def test_a_prompt_while_running_steers_text_instead_of_opening_a_turn(ipc)
     second = client.request("session.prompt", {"text": "先看测试"})
 
     assert second == {
-        "turnId": 0,
+        "turnId": first["turnId"],
         "sessionId": first["sessionId"],
         "steered": True,
         "pending": 1,
@@ -1071,7 +1071,7 @@ async def test_a_prompt_with_an_image_while_running_is_rejected_not_saved(ipc, t
     world, _service, client = ipc
     client.request("initialize")
     world.loop = _GateLoop()
-    client.request("session.prompt", {"text": "slow"})
+    first = client.request("session.prompt", {"text": "slow"})
     assert await client.wait_for(lambda: bool(world.loop.calls))
     png = base64.b64encode(PNG_1PX).decode()
 
@@ -1083,7 +1083,7 @@ async def test_a_prompt_with_an_image_while_running_is_rejected_not_saved(ipc, t
         },
     )
 
-    assert ack["turnId"] == 0
+    assert ack["turnId"] == first["turnId"]
     assert ack["steered"] is False
     assert ack["pending"] == 0
     assert len(ack["rejected"]) == 1
@@ -1102,12 +1102,12 @@ async def test_a_command_while_running_is_rejected_not_queued(ipc):
     world, _service, client = ipc
     client.request("initialize")
     world.loop = _GateLoop()
-    client.request("session.prompt", {"text": "slow"})
+    first = client.request("session.prompt", {"text": "slow"})
     assert await client.wait_for(lambda: bool(world.loop.calls))
 
     ack = client.request("session.prompt", {"text": "/help"})
 
-    assert ack["turnId"] == 0
+    assert ack["turnId"] == first["turnId"]
     assert ack["steered"] is False
     assert ack["pending"] == 0
     assert len(ack["rejected"]) == 1

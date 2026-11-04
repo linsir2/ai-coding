@@ -784,7 +784,10 @@ def make_handlers(
                         name = str(item["name"])
                         break
                 return {
-                    "turnId": 0,
+                    # The prompt did not open a turn, but a turn IS running:
+                    # name it so the client can keep its busy latch attached
+                    # instead of orphaning the running turn's later finish.
+                    "turnId": _live_turn_id(),
                     "sessionId": session_id,
                     "steered": False,
                     "pending": _next_step_count(session),
@@ -799,14 +802,14 @@ def make_handlers(
             if stripped and not stripped.startswith("/"):
                 _queue_next_step(session, stripped)
                 return {
-                    "turnId": 0,
+                    "turnId": _live_turn_id(),
                     "sessionId": session_id,
                     "steered": True,
                     "pending": _next_step_count(session),
                     "rejected": [],
                 }
             return {
-                "turnId": 0,
+                "turnId": _live_turn_id(),
                 "sessionId": session_id,
                 "steered": False,
                 "pending": _next_step_count(session),

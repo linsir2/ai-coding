@@ -112,3 +112,41 @@ describe("turn ownership (D7)", () => {
     expect(state.orphanTurnId).toBeUndefined()
   })
 })
+
+describe("a refused prompt owns no turn", () => {
+  test("turn-refused releases a busy latch that named no turn", () => {
+    const submitted = reduce(initialState(), { kind: "submitted", text: "看这个" })
+    expect(submitted.busy).toBe(true)
+    expect(submitted.turnId).toBeUndefined()
+
+    const refused = reduce(submitted, { kind: "turn-refused" })
+    expect(refused.busy).toBe(false)
+    expect(refused.turnId).toBeUndefined()
+    expect(refused.orphanTurnId).toBeUndefined()
+  })
+
+  test("an in-flight ack names the running turn, so its later finish lands", () => {
+    const submitted = reduce(initialState(), { kind: "submitted", text: "看这个" })
+    const owned = reduce(submitted, { kind: "turn-started", turnId: 9 })
+    const done = reduce(owned, wire("turn.finished", { turnId: 9, status: "completed" }))
+    expect(done.busy).toBe(false)
+  })
+})
+
+describe("a nested plan turn keeps its owner across the approval card", () => {
+  test("the planning finish frees, a refused image re-attaches to the live turn, and the final finish frees", () => {
+    let state = reduce(initialState(), { kind: "submitted", text: "看这个" })
+    state = reduce(state, { kind: "turn-started", turnId: 4 })
+    state = reduce(state, wire("turn.finished", { turnId: 4, status: "completed" }))
+    expect(state.busy).toBe(false)
+
+    // The implementation turn is still running.  An image submit sets busy
+    // before the ack; the ack names the live turn, so the final finish lands.
+    state = reduce(state, { kind: "submitted", text: "再发一张图" })
+    state = reduce(state, { kind: "turn-started", turnId: 4 })
+    expect(state.busy).toBe(true)
+    state = reduce(state, wire("turn.finished", { turnId: 4, status: "completed" }))
+    expect(state.busy).toBe(false)
+    expect(state.orphanTurnId).toBeUndefined()
+  })
+})

@@ -200,24 +200,37 @@ export function Session(props: SessionProps) {
     void props.client
       .request(method, payload)
       .then((ack: unknown) => {
-        // A mid-turn prompt is a steer: the line already joined the run and
-        // ``submitted`` drew its echo, so turnId 0 must not register a local
-        // turn (it names no turn) and no queue is started here.
-        if ((ack as { steered?: unknown } | null)?.steered === true) return
-        // D7: the ack names the turn this request started; its terminal event
-        // will name it too.  Registering the id here is what lets the reducer
-        // tell this ending from an older turn's.
-        const turnId = Number((ack as { turnId?: unknown } | null)?.turnId ?? 0)
+        const data = ack as {
+          steered?: unknown
+          turnId?: unknown
+          rejected?: unknown
+        } | null
+        const steered = data?.steered === true
+        // D7: the ack names the turn this request started -- or, for a steer or
+        // an in-flight refusal, the turn that is already running.  Registering
+        // it is what lets the reducer tell this ending from an older turn's.
+        // Without it, a refused image while a nested plan turn was running left
+        // ``busy`` set with no owner: the later finish looked like an orphan.
+        const turnId = Number(data?.turnId ?? 0)
         if (Number.isInteger(turnId) && turnId > 0) apply({ kind: "turn-started", turnId })
+        if (steered) {
+          if (turnId <= 0) apply({ kind: "turn-refused" })
+          return
+        }
         // r20/F5: the backend refuses a paste it cannot store (bad mime, corrupt
         // payload, over the budget) and says so in the ack.  The transcript has
         // already drawn the picture, so without this the user watches an image
         // go out that the model never received.  The rules stay on the backend;
         // the client only relays the verdict.
-        const rejected = Array.isArray((ack as { rejected?: unknown } | null)?.rejected)
-          ? ((ack as { rejected: { name: string; reason: string }[] }).rejected)
+        const rejected = Array.isArray(data?.rejected)
+          ? ((data as { rejected: { name: string; reason: string }[] }).rejected)
           : []
         if (rejected.length > 0) apply({ kind: "attachment-rejected", items: rejected })
+        // A prompt that opened no turn (the live turn ended between the
+        // request and its ack) must not leave the composer busy forever.
+        if (method === "session.prompt" && turnId <= 0) {
+          apply({ kind: "turn-refused" })
+        }
         // A command can rewrite the history. `/compact` moves the context
         // meter's boundary, so without this the sidebar kept reporting the
         // pre-compaction occupancy until the next turn happened to refresh it —
