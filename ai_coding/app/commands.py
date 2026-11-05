@@ -193,6 +193,19 @@ async def handle_input(
             f"[compact] messages {report.get('messages')} → {report.get('after')} "
             f"(removed {report.get('removed')})"
         )
+        reason = str(report.get("reason") or "")
+        if reason == "summary_failed":
+            console.info(
+                "[compact] 历史未缩短：摘要调用失败或超时，原文已保留；可稍后重试"
+            )
+        elif reason == "nothing_to_compact":
+            console.info("[compact] 无需压缩：历史已在预算内或没有可压缩的中间段")
+        elif reason == "busy":
+            console.info("[compact] 另一次压缩仍在进行，本次未执行")
+        elif reason == "error":
+            console.info("[compact] 压缩过程出错，原文已保留")
+        elif reason == "empty":
+            console.info("[compact] 会话还没有消息")
         if getattr(sessions, "save", None) is not None:
             sessions.save(session)
         return REPLAction.CONTINUE, session

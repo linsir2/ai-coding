@@ -891,6 +891,12 @@ class ContextManager:
         self._max_context_tokens = int(
             context_window or getattr(ai_settings, "max_context_tokens", 0) or 48_000
         )
+        #: Input size (estimated tokens) of the last compaction whose output did
+        #: not meaningfully shrink.  A window below the fixed floor (system
+        #: prompt + tool schema + the kept tail) cannot be compacted further;
+        #: without this guard the gate reopened on every iteration (observed as
+        #: a 3-minute first turn with three summaries).
+        self._saturated_at_tokens = 0
         self._max_messages = int(getattr(ai_settings, "max_messages", 50))
         # R3: the window is writable (``/model`` repoints it at the active
         # model), so the L3 threshold is derived by the setter below rather
@@ -1033,6 +1039,7 @@ class ContextManager:
         self.last_summary_usage = None
         self.last_summary_attempted = False
         self.last_layer_stats = None
+        before_tokens = _history_tokens(messages)
         stats: list[LayerStat] = []
         out = list(messages)  # copy — never mutate the caller's history
         # L3: the mid-turn guard.  The stat turns its semantics observable —
@@ -1302,7 +1309,16 @@ class ContextManager:
             out = self._announce_omissions(out, hard_trim(out, HARD_TRIM_KEEP_TAIL))
 
         out = _ensure_pinned(out, pinned)
-        return sanitize_pairs(out)
+        final = sanitize_pairs(out)
+        after_tokens = _history_tokens(final)
+        if before_tokens > 0 and after_tokens >= int(before_tokens * 0.95):
+            # This pass could not shrink the request meaningfully.  Remember the
+            # input size so ``should_compact`` does not reopen on an unchanged
+            # history; growth past this point (new messages) may try again.
+            self._saturated_at_tokens = max(self._saturated_at_tokens, before_tokens)
+        else:
+            self._saturated_at_tokens = 0
+        return final
 
     @staticmethod
     def _delta_by_identity(
@@ -1357,11 +1373,22 @@ class ContextManager:
 
         A first session has no usage yet, and 0 keeps the pre-existing
         estimate-only behaviour there.
+
+        A window below the fixed floor cannot be satisfied by compacting: the
+        kept tail alone already exceeds it.  When the last pass could not shrink
+        the request, this returns False until the history grows past that input
+        size -- otherwise every iteration paid for another summary (the observed
+        "3-minute first turn" with three summaries).
         """
         ceiling = compaction_ceiling(self._max_context_tokens)
-        if observed_tokens > 0:
-            return int(observed_tokens) >= ceiling
-        return _history_tokens(messages) >= ceiling
+        tokens = int(observed_tokens) if observed_tokens > 0 else _history_tokens(messages)
+        if tokens < ceiling:
+            # The request fits again; a later growth may compact once more.
+            self._saturated_at_tokens = 0
+            return False
+        if self._saturated_at_tokens and tokens <= self._saturated_at_tokens:
+            return False
+        return True
 
     def checkpoint_view(
         self,

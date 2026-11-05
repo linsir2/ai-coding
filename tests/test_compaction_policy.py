@@ -34,6 +34,39 @@ def _manager(tmp_path, *, summarizer, **overrides):
     )
 
 
+def test_a_window_below_the_kept_floor_does_not_recompact_an_unchanged_history(
+    tmp_path,
+):
+    """A window smaller than the kept tail cannot be satisfied by compacting.
+
+    Reopening the gate on every iteration paid for another summary each time
+    (measured: a 3-minute first turn and three summary files).  Once a pass has
+    failed to shrink the request, the gate stays shut until the history grows.
+    """
+    from ai_coding.core.context_compression import _history_tokens
+
+    manager = ContextManager(
+        AIConfig(
+            max_context_tokens=3_000,
+            max_messages=10,
+            snip_keep_head=2,
+            snip_keep_tail=20,
+        ),
+        transcripts_root=tmp_path,
+        summarizer=None,
+    )
+    messages = _messages(40, size=200)
+    tokens = _history_tokens(messages)
+
+    assert manager.should_compact(messages) is True
+    # ``compress`` records this when its output did not meaningfully shrink.
+    manager._saturated_at_tokens = tokens
+    assert manager.should_compact(messages) is False
+
+    grown = [*messages, *_messages(5, size=200)]
+    assert manager.should_compact(grown) is True
+
+
 def test_a_snip_that_drops_messages_always_asks_the_model_for_a_summary(tmp_path):
     calls: list[int] = []
 

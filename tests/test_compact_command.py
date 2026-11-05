@@ -135,6 +135,9 @@ async def test_repl_compact_still_reports_when_nothing_changed(tmp_path):
     await handle_input(loop, "/compact", session, sessions, console)  # type: ignore[arg-type]
 
     assert any("compact] messages" in line for line in console.lines), console.lines
+    assert any(
+        "无需压缩" in line or "历史未缩短" in line for line in console.lines
+    ), console.lines
 
 
 @pytest.mark.asyncio

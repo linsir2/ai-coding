@@ -433,8 +433,13 @@ class Compactor:
 
     async def compact_now(
         self, session: Any, *, timeout: float, reason: CompactionReason = "manual"
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         """The user's explicit ``/compact``: force one page, replace the history.
+
+        The report carries ``reason`` so a no-op is honest: ``compacted``,
+        ``nothing_to_compact``, ``summary_failed``, ``busy``, ``empty``,
+        ``no_context`` or ``error``.  Without it ``/compact`` on a stuck history
+        looked successful while nothing changed.
 
         Unlike the budget-driven path this **does** rewrite the session — that is
         what was asked for — but only when the compression succeeded.  L3 persisted
@@ -445,10 +450,17 @@ class Compactor:
         nothing new instead of paying for a second summary.
         """
         if self._context is None:
-            return {"messages": len(session.messages), "after": len(session.messages), "removed": 0}
+            return {
+                "messages": len(session.messages),
+                "after": len(session.messages),
+                "removed": 0,
+                "reason": "no_context",
+            }
         before = len(session.messages)
-        report = {"messages": before, "after": before, "removed": 0}
+        report = {"messages": before, "after": before, "removed": 0,
+                  "reason": "nothing_to_compact"}
         if before == 0:
+            report["reason"] = "empty"
             return report
         # The budget covers **waiting for the lock too**.  It used to start
         # after `async with self._lock`, so a second /compact could wait
@@ -459,6 +471,7 @@ class Compactor:
             await asyncio.wait_for(self._lock.acquire(), timeout=budget)
         except (asyncio.TimeoutError, TimeoutError):
             _log.info("manual compaction skipped: another compaction still holds the lock")
+            report["reason"] = "busy"
             return report
         try:
             try:
@@ -470,9 +483,11 @@ class Compactor:
                     reason=reason,
                 )
             except Exception:  # noqa: BLE001 — a REPL command must never crash
+                report["reason"] = "error"
                 return report
             if result == list(session.messages):
                 if self._summary_attempted():
+                    report["reason"] = "summary_failed"
                     _log.warning(
                         "manual compaction left the history unchanged; "
                         "the summary call may have failed or timed out"
@@ -492,7 +507,8 @@ class Compactor:
         finally:
             self._lock.release()
         after = len(session.messages)
-        return {"messages": before, "after": after, "removed": before - after}
+        return {"messages": before, "after": after, "removed": before - after,
+                "reason": "compacted"}
 
     # ---- internals ---------------------------------------------------------
 
