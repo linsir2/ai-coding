@@ -221,14 +221,92 @@ def self_check(ws: Path) -> dict:
         and ".git" not in p.parts
     )
     out["files"] = files
+    out["fe_evidence"] = _frontend_evidence(ws)
     return out
+
+
+#: Lines the stock ``npm create vite`` template always contains.  A project
+#: whose ``App.tsx`` is byte-for-byte the starter still passes ``npm run build``
+#: -- which is exactly how eval-05's first round "passed" with no features
+#: (docs/eval-05-fullstack-task.md §4.1).  R2-14.
+_VITE_STARTER_MARKERS = (
+    "Edit <code>src/App.tsx</code>",
+    "Count is {count}",
+    "Click on the Vite and React logos",
+)
+
+
+def _frontend_evidence(ws: Path) -> dict[str, object]:
+    """What the frontend actually contains, not just whether it builds.
+
+    ``npm run build`` answers "does this compile", never "was the task done".
+    These are the cheapest structural facts that separate a delivered app from
+    the scaffold: component files beside ``App.tsx``, an ``App.tsx`` that is not
+    the starter, and a README with run steps.
+    """
+    src = ws / "frontend" / "src"
+    app = src / "App.tsx"
+    app_body = ""
+    if app.is_file():
+        try:
+            app_body = app.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            app_body = ""
+    components = sorted(
+        str(path.relative_to(ws))
+        for path in src.rglob("*.tsx")
+        if path.name not in ("App.tsx", "main.tsx")
+    ) if src.is_dir() else []
+    readme = ws / "README.md"
+    readme_body = ""
+    if readme.is_file():
+        try:
+            readme_body = readme.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            readme_body = ""
+    return {
+        "fe_components": components,
+        "fe_starter": not app_body
+        or any(marker in app_body for marker in _VITE_STARTER_MARKERS),
+        "readme": bool(readme_body.strip())
+        and ("npm" in readme_body or "uvicorn" in readme_body or "pytest" in readme_body),
+    }
 
 
 def _verdict(sc: dict) -> tuple[bool, str]:
     be = sc.get("be_pytest")
     fe = sc.get("fe_build")
-    ok = be == 0 and fe == 0
-    return ok, f"be_pytest={be} fe_build={fe} files={len(sc.get('files', []))}"
+    evidence = sc.get("fe_evidence") or {}
+    components = list(evidence.get("fe_components") or [])
+    starter = bool(evidence.get("fe_starter"))
+    readme = bool(evidence.get("readme"))
+    # R2-14: the two gates below are necessary, not sufficient.  A starter
+    # template builds; a delivered app has components and a README.
+    ok = be == 0 and fe == 0 and not starter and len(components) >= 3 and readme
+    return ok, (
+        f"be_pytest={be} fe_build={fe} files={len(sc.get('files', []))} "
+        f"fe_components={len(components)} fe_starter={starter} readme={readme}"
+    )
+
+
+def _missing_structure(sc: dict) -> list[str]:
+    """The structural requirements still unmet, in the words the model needs."""
+    evidence = sc.get("fe_evidence") or {}
+    missing: list[str] = []
+    if evidence.get("fe_starter"):
+        missing.append(
+            "frontend/src/App.tsx 仍是 Vite 脚手架（“Get started”/计数器），"
+            "必须换成真实页面"
+        )
+    components = list(evidence.get("fe_components") or [])
+    if len(components) < 3:
+        missing.append(
+            f"frontend/src 下只有 {len(components)} 个组件文件；"
+            "要求至少 3 个（列表/看板/表单/统计）"
+        )
+    if not evidence.get("readme"):
+        missing.append("根目录 README.md 缺失或不含启动步骤（uvicorn / npm run dev）")
+    return missing
 
 
 async def main(config_path: str, ws: Path, rounds: int, keep: bool = False) -> int:
@@ -309,11 +387,20 @@ async def main(config_path: str, ws: Path, rounds: int, keep: bool = False) -> i
                 + str(sc.get("fe_log", ""))[-2500:]
             )
         else:
-            prompt = (
-                "继续实现 TaskFlow 的剩余部分。每完成一部分就用 bash 自检"
-                "（后端 pytest、前端 npm run build），把失败输出读进来修复。"
-                "全部完成后写根目录 README.md（含后端/前端启动步骤）。"
-            )
+            structure = _missing_structure(sc)
+            if structure:
+                prompt = (
+                    "代码能 build 不等于任务完成。下面这些交付项还没做到：\n- "
+                    + "\n- ".join(structure)
+                    + "\n请实现它们（不要改回脚手架），然后重新跑后端 pytest 与 "
+                    "前端 npm run build 自检。"
+                )
+            else:
+                prompt = (
+                    "继续实现 TaskFlow 的剩余部分。每完成一部分就用 bash 自检"
+                    "（后端 pytest、前端 npm run build），把失败输出读进来修复。"
+                    "全部完成后写根目录 README.md（含后端/前端启动步骤）。"
+                )
     else:
         print(f"\n{SEP}\n  ROUNDS EXHAUSTED")
 
