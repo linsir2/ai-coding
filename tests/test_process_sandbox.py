@@ -30,6 +30,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -1655,3 +1656,18 @@ def test_spawn_argv_legacy_two_arg_backend_still_works(tmp_path):
         "true", ProcessSandboxPolicy(mode="enforce"), _Legacy(), [tmp_path]
     )
     assert argv[-3:] == ["-c", "true"] or argv[-2:] == ["-c", "true"]
+
+
+def test_enforce_without_a_mechanism_warns_at_startup(tmp_path, monkeypatch, caplog):
+    """Fail-closed is silent by default; the operator must hear the cause once."""
+    import logging
+
+    monkeypatch.setattr(BwrapBackend, "available", lambda self: False)
+    monkeypatch.setattr(BwrapBackend, "gap", lambda self: "sandbox.backend.missing")
+    cfg = SimpleNamespace(process_sandbox=ProcessSandboxConfig(mode="enforce"))
+
+    with caplog.at_level(logging.WARNING):
+        build_process_sandbox(cfg, tmp_path)
+
+    assert "every bash/job call will be refused" in caplog.text
+    assert "sandbox.backend.missing" in caplog.text

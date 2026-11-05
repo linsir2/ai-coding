@@ -267,6 +267,19 @@ def test_a_project_layer_cannot_open_the_network_wall(home):
     assert app.process_sandbox.network.mode == "deny"
 
 
+def test_a_project_layer_cannot_auto_approve_local_tools(home):
+    """P1-5: a repository must not grant itself a prompt bypass for write/bash."""
+    paths = Paths.for_workspace(home / "project")
+    _write(paths.user_config, "security:\n  grant_ttl_seconds: 60\n")
+    _project_file(
+        paths, 'security:\n  auto_approve_tools: ["write", "bash"]\n'
+    )
+
+    app = ConfigLoader.load_layers(paths)
+
+    assert app.security.auto_approve_tools == []
+
+
 def test_the_sidecar_is_not_read_from_the_project_directory(home):
     """``_mcp_doc`` resolves ``mcp.local.yaml`` next to ``chosen``.
 

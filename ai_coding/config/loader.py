@@ -53,6 +53,8 @@ EXECUTION_KEYS: frozenset[str] = frozenset({"hooks", "mcp", "process_sandbox"})
 PROJECT_FORBIDDEN_MEMBERS: dict[str, frozenset[str]] = {
     "ai": frozenset({"websearch_api_key"}),
     "tracing": frozenset({"dir"}),
+    # A repository must not grant itself a prompt bypass for local tools.
+    "security": frozenset({"auto_approve_tools"}),
 }
 #: One level deeper: ``memory.embeddings.cache_path``.
 PROJECT_FORBIDDEN_NESTED: dict[str, dict[str, frozenset[str]]] = {

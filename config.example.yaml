@@ -290,3 +290,11 @@ mcp:
   #       execution: 600000       # one remote call (ms); omit = turn deadline only
   #     tools: ["read_file"]      # only register these remote tools (R7d)
   #     auto_approve: true        # this server's tools skip the prompt (R7d)
+
+security:
+  # How long an "always" answer stays in force (seconds; null = permanent).
+  grant_ttl_seconds: 86400
+  # P1-5: the operator's opt-out from per-call prompts for these local tools.
+  # Empty by default. A project layer cannot set it; hard denies/red lines still
+  # win. Useful for long write-heavy tasks, at the cost of reviewing afterwards.
+  # auto_approve_tools: ["write", "edit", "bash"]

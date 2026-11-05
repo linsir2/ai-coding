@@ -127,10 +127,20 @@ class Sandbox:
         # gate is what makes an "always" mean anything to the file tools.
         if self._grantor is not None and self._grantor.path_allowed(resolved):
             return resolved
+        hint = ""
+        if any(part.lower() in ("cache", ".cache") for part in resolved.parts):
+            # The process layer treats ``~/.cache`` as writable, but file tools
+            # are rooted at the workspace.  Naming the workspace cache stops the
+            # model from retrying a write the file sandbox will always refuse.
+            hint = (
+                f" Package-manager caches are redirected to "
+                f"'{self.workspace}/.ai-coding/cache'; write there instead."
+            )
         raise SandboxViolation(
             f"path '{path}' resolves outside workspace '{self.workspace}'"
             " — this needs your approval before a file tool can read it;"
             " grant the directory once, or add it to tools.extra_workspace_roots"
+            f"{hint}"
         )
 
 

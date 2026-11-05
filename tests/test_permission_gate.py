@@ -589,3 +589,29 @@ def test_from_config_reads_the_workspace_network_default():
     }
     assert "host network" not in inherit.check("bash", params).reason
     assert "host network" in deny.check("bash", params).reason
+
+
+def test_auto_approve_tools_allows_configured_local_tools():
+    """P1-5: the operator can stop the per-call prompt for write/edit/bash.
+
+    Empty by default; only the named tools change tier, and an unnamed sibling
+    keeps asking.
+    """
+    from ai_coding.config.models import AppConfig, SecurityConfig
+
+    gate = PermissionGate.from_config(
+        AppConfig(security=SecurityConfig(auto_approve_tools=["write"]))
+    )
+    assert gate.check("write", {"path": "a.txt", "content": "x"}) == (
+        PermissionDecision.ALLOW
+    )
+    assert gate.check("edit", {"path": "a.txt"}) == PermissionDecision.WARN
+
+
+def test_auto_approve_tools_cannot_open_a_red_line():
+    from ai_coding.config.models import AppConfig, SecurityConfig
+
+    gate = PermissionGate.from_config(
+        AppConfig(security=SecurityConfig(auto_approve_tools=["bash"]))
+    )
+    assert gate.check("bash", {"command": "rm -rf /"}) == PermissionDecision.DENY

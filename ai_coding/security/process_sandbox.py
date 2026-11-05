@@ -80,6 +80,7 @@ one backend to both the tool and the job table.
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import platform
 import struct
@@ -96,6 +97,8 @@ from ai_coding.config.models import (
     NetworkConfig,
     ProcessSandboxConfig,
 )
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "BwrapBackend",
@@ -1073,6 +1076,17 @@ def build_process_sandbox(
         bridge_argv=default_bridge_argv(),
         secret_env_names=secret_env_names,
     )
+    if policy.mode == "enforce" and not backend.available():
+        # Fail-closed is the right behaviour, but silence is not: every bash and
+        # job call will answer ``sandbox_unavailable`` and the operator sees
+        # "工具全被拒" without a cause.  Name the mechanism and the two exits.
+        _log.warning(
+            "process_sandbox.mode=enforce but the mechanism is unavailable (%s); "
+            "every bash/job call will be refused with sandbox_unavailable. "
+            "Install bubblewrap (or enable unprivileged user namespaces), or set "
+            "process_sandbox.mode: warn to run commands without the OS sandbox.",
+            backend.gap(),
+        )
     return policy, backend
 
 

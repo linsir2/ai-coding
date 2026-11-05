@@ -325,11 +325,17 @@ class SecurityConfig(BaseModel):
     it on the next write, and the gate stops matching it the moment the clock
     passes the deadline).  ``None`` means a grant is permanent -- the explicit
     "always" of the pre-TTL shape, which every v1 file already is.
+
+    ``auto_approve_tools`` is the operator's opt-in for tools that should not
+    prompt per call (typically ``write``/``edit``/``bash`` in a long task).
+    Empty by default, so an unconfigured run keeps every WARN prompt.  Hard
+    denies and red lines still win, and a project layer may not grant it.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     grant_ttl_seconds: float | None = 86_400.0
+    auto_approve_tools: list[str] = Field(default_factory=list)
 
 
 class StaticCheckConfig(BaseModel):

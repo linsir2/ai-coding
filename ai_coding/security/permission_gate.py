@@ -1114,6 +1114,15 @@ class PermissionGate:
                 denied.append(f"{name}__{remote}")
             for remote in getattr(rules, "allow", None) or []:
                 allowed.append(f"{name}__{remote}")
+        # P1-5: the operator's own opt-out from per-call prompts for local
+        # tools (a long task writing many files otherwise asks for each path).
+        # A project layer cannot grant this (config loader filters it), the
+        # default is empty, and the hard tier (red lines, explicit denies)
+        # is checked before the standing allow.
+        auto_approve = getattr(
+            getattr(app_cfg, "security", None), "auto_approve_tools", None
+        ) or []
+        allowed.extend(str(name) for name in auto_approve if str(name).strip())
         grants, expiry = store.load_with_expiry() if store is not None else ((), {})
         return cls(
             trusted_servers=[

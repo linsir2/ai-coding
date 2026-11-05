@@ -70,3 +70,13 @@ def test_an_extra_root_needs_no_question(tmp_path):
     sb = Sandbox(tmp_path / "ws", extra_roots=(other,))
     assert sb.resolve(str(other / "x.py")) == other / "x.py"
     assert sb.workspace not in sb.roots[1:]
+
+
+def test_a_cache_path_names_the_workspace_cache(tmp_path):
+    """File tools cannot write ~/.cache (the process layer can); say where the
+    workspace cache lives instead of letting the model retry the same path."""
+    sb = Sandbox(tmp_path / "ws")
+    with pytest.raises(SandboxViolation) as exc:
+        sb.resolve(str(tmp_path / "home" / ".cache" / "npm" / "x"))
+    assert ".ai-coding/cache" in str(exc.value)
+    assert "bash" not in str(exc.value)
