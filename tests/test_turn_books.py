@@ -560,3 +560,4 @@ def test_a_successful_plan_update_resets_the_look_only_streak():
     books.note_outcomes([_outcome("read"), _outcome("read")])
     books.note_outcomes([_outcome("update_plan")])
     assert books.search_streak == 0
+    assert books.repeat_streak == 0

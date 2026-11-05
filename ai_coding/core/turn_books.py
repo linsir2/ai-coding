@@ -489,7 +489,16 @@ class TurnBooks:
         # where a command (``find`` through bash) can succeed without changing
         # anything.  Keeping reads out avoids double-arming SEARCH for the
         # ordinary "read two files with identical bodies" turn.
-        action_calls = [item for item in succeeded if _is_action(item)]
+        if any(item.call.name == "update_plan" for item in succeeded):
+            # "Plan updated" is plan bookkeeping, not repeated evidence.  It
+            # must not keep the look-only repeat streak armed after the model
+            # has actually advanced the plan.
+            self.repeat_streak = 0
+        action_calls = [
+            item
+            for item in succeeded
+            if _is_action(item) and item.call.name != "update_plan"
+        ]
         if action_calls:
             last = action_calls[-1]
             digest = _output_digest(last.result.output or "")
