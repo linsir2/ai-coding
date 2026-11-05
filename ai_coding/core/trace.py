@@ -572,6 +572,11 @@ class TraceRecorder:
         # it belongs to the turn that just ended rather than a new one.
         self._turn_open = False
         self._iteration = 0
+        #: R4-3: which C3 continuation batch within this turn file we are in.
+        #: A continuation restarts ``IterationStarted.index`` at 1, so ``i1``
+        #: used to appear once per batch and span-based analysis conflated them
+        #: (measured: four ``i1`` rows in one turn file).
+        self._batch = 1
         self._turn_usage = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         self._turn_steps = 0
         self._turn_by_model: dict[str, dict[str, int]] = {}
@@ -685,6 +690,11 @@ class TraceRecorder:
                     "cached_tokens": 0,
                 }
                 self._turn_steps = 0
+                # R4-3: a new turn file starts a new span namespace.  Without
+                # this reset, the first iteration (index 1) after the previous
+                # turn's 30 would look like a continuation and be labelled b2.
+                self._batch = 1
+                self._iteration = 0
                 self._turn_open = True
             else:
                 # Append to the turn that just ended instead of fabricating a new,
@@ -807,16 +817,45 @@ class TraceRecorder:
             payload = _trim(payload, _PREVIEW_LIMIT)
 
         if isinstance(event, IterationStarted):
+            # R4-3: a continuation restarts at 1; a lower-or-equal index means a
+            # new batch, so the span namespace moves to ``b2-``, ``b3-`` …
+            if self._iteration and event.index <= self._iteration:
+                self._batch += 1
             self._iteration = event.index
-            return name, payload, f"i{event.index}", "turn", event.index, scope
+            return (
+                name,
+                payload,
+                self._span("i", event.index),
+                "turn",
+                event.index,
+                scope,
+            )
         if isinstance(event, ModelStepFinished):
-            return name, payload, f"step{event.index}", f"i{event.index}", event.index, scope
+            return (
+                name,
+                payload,
+                self._span("step", event.index),
+                self._span("i", event.index),
+                event.index,
+                scope,
+            )
         if isinstance(event, ContextAssembled):
             self._iteration = event.iteration
-            return name, payload, f"i{event.iteration}", "turn", event.iteration, scope
+            return (
+                name,
+                payload,
+                self._span("i", event.iteration),
+                "turn",
+                event.iteration,
+                scope,
+            )
         if isinstance(event, (ToolStarted, ToolFinished)):
             iteration = event.iteration or self._iteration
-            return name, payload, event.call_id, f"i{iteration}", iteration, scope
+            return name, payload, event.call_id, self._span("i", iteration), iteration, scope
         if isinstance(event, TurnFinished):
             return name, payload, "turn", "", self._iteration, scope
-        return name, payload, f"i{self._iteration}", "turn", self._iteration, scope
+        return name, payload, self._span("i", self._iteration), "turn", self._iteration, scope
+
+    def _span(self, kind: str, index: int) -> str:
+        """R4-3: ``i3`` in the first batch, ``b2-i3`` in the second."""
+        return f"{kind}{index}" if self._batch <= 1 else f"b{self._batch}-{kind}{index}"

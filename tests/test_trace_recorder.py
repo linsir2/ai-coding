@@ -445,3 +445,23 @@ def test_compaction_deltas_are_live_only_not_written_but_boundaries_are(tmp_path
         "CompactionStarted",
         "CompactionEnded",
     ]
+
+
+def test_a_continuation_batch_gets_its_own_span_namespace(tmp_path):
+    """R4-3: C3 continuation restarts ``IterationStarted.index`` at 1, so a
+    turn file used to contain four identical ``i1`` spans and span-based
+    analysis conflated them."""
+    recorder, _ = _recorder(tmp_path)
+    for index in (1, 2, 3):
+        recorder.on_event(IterationStarted(index=index, max_iterations=3))
+    recorder.on_event(IterationStarted(index=1, max_iterations=3))  # continuation
+    recorder.on_event(ModelStepFinished(index=1, usage={}, latency_ms=1))
+    recorder.on_event(ToolStarted(call_id="c9", tool_name="read", params={}, iteration=1))
+
+    lines = _lines(recorder)
+    spans = [line["span"] for line in lines]
+    assert spans[:3] == ["i1", "i2", "i3"]
+    assert spans[3] == "b2-i1"
+    assert lines[4]["span"] == "b2-step1"
+    assert lines[4]["parent"] == "b2-i1"
+    assert lines[5]["parent"] == "b2-i1"

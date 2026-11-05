@@ -81,7 +81,12 @@ ai:
   # 0 means "not configured": it falls back to max_concurrent_subagents.
   max_execution_slots: 0
   subagent_worktree_isolation: true
-  max_context_tokens: 48000
+  # R4-2: 0 = follow the active model's own context_window (the recommended
+  # value).  A number is a hard cap *below* the window: set it to 48000 for a
+  # 131k model and the turn compacts every ~30 tool calls -- measured 11
+  # summaries in one turn, ~9 minutes of wall time.  Only set a number when the
+  # provider's window is smaller than the model declares.
+  max_context_tokens: 0
   max_messages: 50
   snip_keep_head: 3
   snip_keep_tail: 20
