@@ -150,6 +150,47 @@ def test_unknown_tool_warn():
     assert d == PermissionDecision.WARN
 
 
+def test_tool_search_is_a_lookup_not_an_unknown_tool():
+    """R2-4: the deferred-tool lookup asked the operator for approval.
+
+    ``tool_search`` is local and read-only (``mutates_world = False``); leaving
+    it out of the allow list sent every call through the "unknown tool" branch
+    and put an approval panel in front of a table lookup (measured on three
+    calls in one run).
+    """
+    gate = _gate()
+    assert gate.check("tool_search", {"query": "job"}) == PermissionDecision.ALLOW
+
+
+def test_every_local_read_only_tool_is_allowed_out_of_the_box(tmp_path):
+    """A new read-only tool must not start life behind an approval panel.
+
+    The defect R2-4 found was structural: a tool was added to the registry and
+    nobody remembered this list.  Enumerating the real registry turns that into
+    a test failure instead of a prompt in front of a live operator.
+    """
+    from ai_coding.cli import _build_tool_registry
+    from ai_coding.config.loader import ConfigLoader
+    from ai_coding.skills.registry import SkillRegistry
+
+    app_cfg = ConfigLoader.load_app(None)
+    registry = _build_tool_registry(app_cfg, str(tmp_path), SkillRegistry([]))
+    gate = _gate()
+    guarded = {
+        tool.name
+        for tool in registry.all_tools
+        if not getattr(tool, "mutates_world", True) and tool.origin == "local"
+    }
+    assert guarded, "the registry should own read-only tools"
+    warned = sorted(
+        name for name in guarded if gate.check(name, {}) != PermissionDecision.ALLOW
+    )
+    assert warned == [], (
+        "read-only local tools must not ask for approval by default: "
+        f"{warned}"
+    )
+
+
 def test_todo_write_allow():
     gate = _gate()
     d = gate.check("todo_write", {"action": "add"})

@@ -48,8 +48,11 @@ class _Session:
         if self._raise is not None:
             raise self._raise
         if progress_callback is not None:
+            # The real SDK awaits the callback (mcp/shared/session.py:416).  A
+            # fake that calls it synchronously cannot catch a ``def`` callback
+            # returning None -- which is exactly the R2-6 defect.
             for step in range(1, 4):
-                progress_callback(step, 3, f"step {step}")
+                await progress_callback(step, 3, f"step {step}")
         return self._call_result
 
 

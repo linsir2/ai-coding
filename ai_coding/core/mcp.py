@@ -939,7 +939,14 @@ async def invoke_remote_tool(
     live = resolve_ctx(ctx)
     steps = itertools.count()
 
-    def _progress(progress: float, total: float | None = None, message: str | None = None) -> None:
+    # The SDK does ``await callback(...)`` (mcp/shared/session.py:416), so this
+    # has to be a coroutine.  A plain ``def`` returned None, which the SDK then
+    # tried to await -- every progress notification logged
+    # "'NoneType' object can't be awaited" while the call itself succeeded
+    # (measured: 5 errors for one 5-step slow_task).
+    async def _progress(
+        progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
         body = message or (f"{progress}/{total}" if total else str(progress))
         live.emit(
             ToolChunk(

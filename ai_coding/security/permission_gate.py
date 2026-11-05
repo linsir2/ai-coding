@@ -408,6 +408,15 @@ class PermissionGate:
             # *result* naming the real tools, not as an approval prompt for a
             # call that cannot run (seen in the M3 end-to-end).
             "mcp_call",
+            # R2-4: the deferred-tool lookup is a local, read-only table search
+            # (``mutates_world = False``).  It was missing here, so every call
+            # fell through to the "unknown tool" branch and asked the operator
+            # to approve a pure lookup -- measured on three calls in one run.
+            "tool_search",
+            # R2-4: the plan counterpart of ``todo_write`` (allowed above).  It
+            # replaces the session's own plan and touches nothing else, so the
+            # same reasoning applies: there is nothing for a human to review.
+            "update_plan",
         }
         self._warn_tools = {"write", "edit", "bash"}
 
