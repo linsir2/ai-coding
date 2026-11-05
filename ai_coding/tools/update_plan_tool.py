@@ -184,6 +184,14 @@ class UpdatePlanTool(BaseTool):
                 step, verify=verify, files=files, item_id=assigned_id
             )
             item.status = cast(TodoStatus, status)
+            # Every new plan item gets a boundary when it is created, not when
+            # the model finally flips it to in_progress.  A model often writes
+            # the step's files first and updates status afterwards; moving the
+            # boundary forward then discards the receipts it just earned.
+            if prior is not None and prior.started_seq > 0:
+                item.started_seq = prior.started_seq
+            elif status in ("pending", "in_progress"):
+                item.started_seq = next_seq + 1
             if (
                 status == "completed"
                 and prior is not None
@@ -204,22 +212,26 @@ class UpdatePlanTool(BaseTool):
                 if not getattr(resolved, "effects_legacy", False):
                     settled.add(item.id)
             if status == "in_progress":
-                # Reasserting an in-progress step must not move the proof
-                # boundary past receipts produced while it was running; a
-                # reopen (completed -> in_progress) starts a new boundary.
-                item.started_seq = (
-                    prior.started_seq
-                    if prior is not None
-                    and prior.status == "in_progress"
-                    and prior.started_seq > 0
-                    else next_seq + 1
-                )
+                if item.started_seq == 0:
+                    # A legacy pending item had no creation boundary; start one
+                    # now.  A boundary already carried from creation stays put.
+                    item.started_seq = next_seq + 1
+                floor = _receipt_floor(item, resolved)
+                if floor is not None and floor < item.started_seq:
+                    # Work was done before the status flip.  The receipts name
+                    # the exact file version, so lowering the boundary is safe
+                    # for this item and prevents the "complete but no receipt"
+                    # loop seen in real plan runs.
+                    item.started_seq = floor
             elif status == "completed" and item.id not in settled:
                 item.started_seq = (
                     prior.started_seq
                     if prior is not None and prior.started_seq > 0
                     else next_seq
                 )
+                floor = _receipt_floor(item, resolved)
+                if floor is not None and floor < item.started_seq:
+                    item.started_seq = floor
             written.append(item)
 
         for item, entry in zip(written, parsed, strict=True):
@@ -261,6 +273,19 @@ class UpdatePlanTool(BaseTool):
 
         task.items = written
         return ToolResult(success=True, output="Plan updated")
+
+
+def _receipt_floor(item: TodoItem, resolved: Any) -> int | None:
+    """Earliest receipt for an item's declared files, if one exists."""
+    if not item.files or getattr(resolved, "effects", None) is None:
+        return None
+    ledger = resolved.effects()
+    seqs: list[int] = []
+    for raw in item.files:
+        receipt = ledger.receipt_for(str(raw))
+        if receipt is not None and receipt.seq > 0:
+            seqs.append(int(receipt.seq))
+    return min(seqs) if seqs else None
 
 
 def _has_proof(item: TodoItem) -> bool:

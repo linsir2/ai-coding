@@ -205,3 +205,110 @@ async def test_a_proven_completed_step_ignores_redundant_override(tmp_path):
 
     assert result.success is True
     assert session.task.items[0].evidence == "receipt: a.py@v1"
+
+
+@pytest.mark.asyncio
+async def test_work_done_before_in_progress_still_counts_for_completion(tmp_path):
+    from ai_coding.infra.file_utils import file_version
+
+    session = SessionData(
+        session_id="s", title="", created_time="t", last_access_time="t"
+    )
+    session.task = TaskState(goal="g")
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    ctx = ToolContext(
+        task=session.task,
+        workspace=str(tmp_path),
+        effects=lambda: session.effects,
+    )
+
+    initial = await UpdatePlanTool().execute(
+        {
+            "plan": [
+                {
+                    "id": "s",
+                    "step": "create a.py",
+                    "status": "pending",
+                    "files": ["a.py"],
+                }
+            ]
+        },
+        ctx,
+    )
+    assert initial.success is True
+
+    # The model writes before flipping the step to in_progress.
+    session.effects = session.effects.record_effect(
+        "a.py", file_version(target), tool="write", call_id="c1"
+    )
+    started = await UpdatePlanTool().execute(
+        {
+            "plan": [
+                {
+                    "id": "s",
+                    "step": "create a.py",
+                    "status": "in_progress",
+                    "files": ["a.py"],
+                }
+            ]
+        },
+        ctx,
+    )
+    assert started.success is True
+
+    completed = await UpdatePlanTool().execute(
+        {
+            "plan": [
+                {
+                    "id": "s",
+                    "step": "create a.py",
+                    "status": "completed",
+                    "files": ["a.py"],
+                }
+            ]
+        },
+        ctx,
+    )
+    assert completed.success is True, completed.output
+    assert session.task.items[0].started_seq <= 1
+
+
+@pytest.mark.asyncio
+async def test_an_old_started_boundary_can_be_lowered_to_a_real_receipt(tmp_path):
+    from ai_coding.infra.file_utils import file_version
+
+    session = SessionData(
+        session_id="s", title="", created_time="t", last_access_time="t"
+    )
+    session.task = TaskState(goal="g")
+    item = session.task.add(
+        "create a.py", files=["a.py"], item_id="s"
+    )
+    item.started_seq = 5
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    session.effects = session.effects.record_effect(
+        "a.py", file_version(target), tool="write", call_id="c1", seq=3
+    )
+    ctx = ToolContext(
+        task=session.task,
+        workspace=str(tmp_path),
+        effects=lambda: session.effects,
+    )
+
+    result = await UpdatePlanTool().execute(
+        {
+            "plan": [
+                {
+                    "id": "s",
+                    "step": "create a.py",
+                    "status": "completed",
+                    "files": ["a.py"],
+                }
+            ]
+        },
+        ctx,
+    )
+
+    assert result.success is True, result.output
