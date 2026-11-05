@@ -139,7 +139,7 @@ export function Session(props: SessionProps) {
     if (next !== state) setState(next)
   }
 
-  const refreshPosture = async () => {
+  const refreshPosture = async (clearIfIdle = false) => {
     // T7: stats and the agent list land together (one mount, one retry).
     // stats.agent hydrates SessionState.agent; the list feeds picker/cycle.
     try {
@@ -166,6 +166,16 @@ export function Session(props: SessionProps) {
           running: true,
           ...(typeof turnId === "number" && turnId > 0 ? { turnId } : {}),
         })
+      } else if (
+        running === false &&
+        clearIfIdle &&
+        state.turnId === undefined &&
+        state.queued.length === 0
+      ) {
+        // The finish event may have been the only thing holding the local
+        // busy latch; once the server says it is idle, release it too.  A
+        // queued/new turn owns the latch now, so do not race it.
+        apply({ kind: "turn-refused" })
       }
     } catch {
       /* the sidebar keeps the last known numbers; the next turn retries */
@@ -639,7 +649,7 @@ export function Session(props: SessionProps) {
       apply({ kind: "wire", event })
       if (event.type === "turn.finished") {
         disarmInterrupt()
-        void refreshPosture()
+        void refreshPosture(true)
         props.onTurnFinished()
         // /clear and /resume <id> end with the REPL's NEW_SESSION action; the
         // backend has already switched the live session, so the tabs follow.

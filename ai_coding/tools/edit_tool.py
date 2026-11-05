@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,29 @@ from ai_coding.security.sandbox import (
     relative_to_root,
 )
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
+
+
+def _trim_read_display_indent(old: str) -> str:
+    """Undo the two-space display separator models copy from ``read`` output.
+
+    The read tool prints ``<line>  <content>``.  A model that copies a block
+    from that display often keeps the separator spaces, so the exact edit misses
+    by two columns on every line.  Try the de-indented body only after the exact
+    match failed; the caller still requires a unique match.
+    """
+    if "\n" not in old:
+        return ""
+    lines = old.splitlines(keepends=True)
+    if any(re.match(r"^\s*\d+\s{2}", line) for line in lines):
+        return ""
+    out: list[str] = []
+    changed = False
+    for line in lines:
+        if line.startswith("  "):
+            line = line[2:]
+            changed = True
+        out.append(line)
+    return "".join(out) if changed else ""
 
 
 class EditTool(BaseTool):
@@ -142,6 +166,12 @@ class EditTool(BaseTool):
             return ToolResult(success=False, output=f"read error: {exc}")
 
         count = text.count(old)
+        adjusted = False
+        if count == 0:
+            candidate = _trim_read_display_indent(old)
+            candidate_count = text.count(candidate) if candidate else 0
+            if candidate_count == 1:
+                old, count, adjusted = candidate, candidate_count, True
         if count == 0:
             return ToolResult(success=False, output=f"old_string not found in {path_str}")
         if not replace_all and count > 1:
@@ -171,7 +201,10 @@ class EditTool(BaseTool):
         replaced = count if replace_all else 1
         return ToolResult(
             success=True,
-            output=f"replaced {replaced} occurrence(s) in {path_str}",
+            output=(
+                f"replaced {replaced} occurrence(s) in {path_str}"
+                + (" (trimmed read-display indentation)" if adjusted else "")
+            ),
             artifacts=(  # r18/F4: see write_tool -- undo replays this list
                 ToolArtifact(path=target.relative_to(self._sandbox.workspace).as_posix()),
             ),
@@ -233,6 +266,12 @@ class EditTool(BaseTool):
                 chunks.append(chunk)
             text = b"".join(chunks).decode("utf-8")
             count = text.count(old)
+            adjusted = False
+            if count == 0:
+                candidate = _trim_read_display_indent(old)
+                candidate_count = text.count(candidate) if candidate else 0
+                if candidate_count == 1:
+                    old, count, adjusted = candidate, candidate_count, True
             if count == 0:
                 return ToolResult(
                     success=False,
@@ -263,7 +302,10 @@ class EditTool(BaseTool):
         replaced = count if replace_all else 1
         return ToolResult(
             success=True,
-            output=f"replaced {replaced} occurrence(s) in {path_str}",
+            output=(
+                f"replaced {replaced} occurrence(s) in {path_str}"
+                + (" (trimmed read-display indentation)" if adjusted else "")
+            ),
             artifacts=(
                 ToolArtifact(
                     path=opened.path.relative_to(self._sandbox.workspace).as_posix()

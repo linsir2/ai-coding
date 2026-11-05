@@ -83,3 +83,55 @@ async def test_edit_stale_denied(setup):
     result = await tool.execute({"path": "f.txt", "old_string": "v2", "new_string": "v3"})
     assert result.success is False
     assert "stale" in result.output.lower() or "modified" in result.output.lower()
+
+
+@pytest.mark.asyncio
+async def test_edit_trims_the_two_space_read_display_prefix(setup):
+    tmp_path, sb, fst, tool = setup
+    p = tmp_path / "f.txt"
+    _write_and_record(
+        p,
+        "          areaStyle: {\n"
+        "            color: color,\n"
+        "          },",
+        fst,
+    )
+    result = await tool.execute(
+        {
+            "path": "f.txt",
+            "old_string": (
+                "            areaStyle: {\n"
+                "              color: color,\n"
+                "            },"
+            ),
+            "new_string": (
+                "          areaStyle: {\n"
+                "            color: other,\n"
+                "          },"
+            ),
+        }
+    )
+    assert result.success is True
+    assert "trimmed read-display" in result.output
+    assert "color: other" in p.read_text()
+
+
+@pytest.mark.asyncio
+async def test_edit_does_not_trim_when_the_candidate_is_ambiguous(setup):
+    tmp_path, sb, fst, tool = setup
+    p = tmp_path / "f.txt"
+    _write_and_record(
+        p,
+        "          x\n          y\n"
+        "          x\n          y\n",
+        fst,
+    )
+    result = await tool.execute(
+        {
+            "path": "f.txt",
+            "old_string": "            x\n            y\n",
+            "new_string": "          z\n",
+        }
+    )
+    assert result.success is False
+    assert "not found" in result.output.lower()
