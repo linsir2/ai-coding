@@ -159,6 +159,8 @@ async def test_two_rejections_block_the_item(tmp_path):
     assert first.success is False
     assert second.success is False
     assert second.error == "completion_blocked"
+    assert second.data["recoverable"] is True
+    assert "complete it again" in second.output
     assert session.task.items[0].status == "blocked"
 
 

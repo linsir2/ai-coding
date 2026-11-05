@@ -68,6 +68,7 @@ async def test_write_without_prior_read_denied(setup):
     assert result.error == "must_read_first"
     out = result.output.lower()
     assert "read" in out or "stale" in out or "never" in out
+    assert "edit" in out, "the hint must name the targeted alternative"
 
 
 @pytest.mark.asyncio
@@ -81,3 +82,4 @@ async def test_write_stale_after_external_modification(setup):
     assert result.success is False
     assert result.error == "stale_read", "the card must say why, not a bare '?'"
     assert "stale" in result.output.lower() or "modified" in result.output.lower()
+    assert "older version" in result.output, "name why the context copy is useless"

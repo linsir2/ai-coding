@@ -349,10 +349,17 @@ class TodoWriteTool(BaseTool):
                             output=(
                                 f"error: todo #{item_id} completion blocked after "
                                 f"two unverified attempts: {verdict.reason}. "
-                                "Add a receipt/verify, or use override with a reason."
+                                "It stays visible as blocked, not abandoned: add "
+                                "the receipt/verify (or override with a reason) "
+                                "and complete it again."
                             ),
                             error="completion_blocked",
-                            data={"id": item_id, "reason": verdict.reason},
+                            data={
+                                "id": item_id,
+                                "reason": verdict.reason,
+                                "code": "completion_blocked",
+                                "recoverable": True,
+                            },
                         )
                     return ToolResult(
                         success=False,

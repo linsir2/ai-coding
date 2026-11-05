@@ -16,6 +16,7 @@ from ai_coding.security.sandbox import (
     relative_to_root,
 )
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
+from ai_coding.tools.stale_read import must_read_message, stale_message
 
 _DEFAULT_MAX_CHARS = 2_000_000  # 2M chars
 #: One call's content cap.  Measured (trace 2026-10-31, session f1d881ee):
@@ -163,17 +164,17 @@ class WriteTool(BaseTool):
         if target.exists():
             state = self._tracker.check(target)
             if state == FileState.NEVER_READ:
-                msg = (
-                    f"cannot write to '{path_str}': you must read the file first "
-                    "(stale-read protection)"
+                return ToolResult(
+                    success=False,
+                    output=must_read_message("write", path_str),
+                    error="must_read_first",
                 )
-                return ToolResult(success=False, output=msg, error="must_read_first")
             if state == FileState.STALE:
-                msg = (
-                    f"cannot write to '{path_str}': file has been modified externally; "
-                    "re-read it first"
+                return ToolResult(
+                    success=False,
+                    output=stale_message("write", path_str),
+                    error="stale_read",
                 )
-                return ToolResult(success=False, output=msg, error="stale_read")
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -254,18 +255,14 @@ class WriteTool(BaseTool):
                 if state == FileState.NEVER_READ:
                     return ToolResult(
                         success=False,
-                        output=(
-                            f"cannot write to '{path_str}': you must read the file first "
-                            "(stale-read protection)"
-                        ),
+                        output=must_read_message("write", path_str),
+                        error="must_read_first",
                     )
                 if state == FileState.STALE:
                     return ToolResult(
                         success=False,
-                        output=(
-                            f"cannot write to '{path_str}': file has been modified "
-                            "externally; re-read it first"
-                        ),
+                        output=stale_message("write", path_str),
+                        error="stale_read",
                     )
             data = content.encode("utf-8")
             if append:
