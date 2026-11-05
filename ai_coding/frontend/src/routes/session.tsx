@@ -182,6 +182,43 @@ export function Session(props: SessionProps) {
     }
   }
 
+  // A missed/mismatched ``turn.finished`` used to leave the composer busy
+  // forever even though the server was idle (the operator's only recovery was
+  // pressing Esc twice).  Poll only while busy; two consecutive idle readings
+  // make the server the authority, but the second one avoids racing a submit
+  // whose ack has not launched its turn yet.
+  let idlePolls = 0
+  const reconcileBusy = async () => {
+    if (!state.busy) {
+      idlePolls = 0
+      return
+    }
+    try {
+      const fetched = (await props.client.request("session.stats")) as {
+        running?: unknown
+      } | null
+      if (fetched?.running !== false) {
+        idlePolls = 0
+        return
+      }
+      idlePolls += 1
+      if (idlePolls < 2) return
+      idlePolls = 0
+      apply({ kind: "turn-refused" })
+      const next = state.queued[0]
+      if (next === undefined) return
+      apply({ kind: "queued-dispatched" })
+      void props.client
+        .request("session.inbox", { op: "delete", id: next.id })
+        .catch(() => {
+          /* the row is already out of local state */
+        })
+      dispatch(next.text, [], false)
+    } catch {
+      /* the next tick retries once the socket is back */
+    }
+  }
+
   // A-12: submissions made while the shell is switching sessions wait here.
   // Each keeps the id it was typed under, so the flush can tell "the switch
   // landed" (send under the new id) from "it failed" (put the line back).
@@ -779,6 +816,8 @@ export function Session(props: SessionProps) {
       }
     })
     onCleanup(unsubscribe)
+    const busyWatchdog = setInterval(() => void reconcileBusy(), 5_000)
+    onCleanup(() => clearInterval(busyWatchdog))
     if (props.initialPrompt) {
       const prompt = props.initialPrompt
       // T7: the Home draft selects first, then the old prelude, then the
