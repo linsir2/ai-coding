@@ -120,7 +120,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | **已修复**：`ContextManager` 记录"压缩后没有实质变短"的输入规模；`should_compact` 在该规模以下不再重开，直到历史继续增长（滞回） |
+| 状态 | **已修复**：`ContextManager` 记录"压缩后没有实质变短"的输入规模；`should_compact` 在该规模以下不再重开，直到历史继续增长（滞回）。真机复验：同样的 3000 预算从 3 分钟未结束变为正常完成，压缩 40→3（`reason=compacted`），压缩后回合 7.5s |
 | 症状 | 把 `ai.max_context_tokens` 设成 3000（低于 system prompt + 工具 schema 的固定开销）后，第一轮 3 分钟仍未结束；工作区在几分钟内出现 3 个 `summary_*.txt`，进程持续做压缩 |
 | 证据 | `/tmp/aic-live/compact.log`；进程被手动停止；同样任务在 `max_context_tokens=0`、`max_messages=12` 下压缩 40→3、正常完成（`/tmp/aic-live/diag.log`） |
 | 根因 | 预算按"整个请求"估算，固定开销已超过预算，`_should_run` 每步都为真；启动日志只有一条 warning（"far below model's declared window"），不会拒绝该配置 |

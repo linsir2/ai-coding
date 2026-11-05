@@ -73,9 +73,9 @@
 ### 4.3 audit 文档列的后续（`docs/agent-runtime-audit-2026-11-05.md`）
 
 > 另有本轮长任务审计：`docs/agent-runtime-audit-longtask-2026-11-05.md`。
-> 已确认 P0：`todo_write` 先写后建时完成被误拒；`add` 静默忽略 `status`。
-> 已确认 P1：文件工具不能写 `process_sandbox.writable_paths`、默认 enforce 无 bwrap
-> 时 bash 全不可用、write/edit/bash 默认为 WARN 审批。
+> P0-1/P0-2 与 P1-1..P1-6、P2-1..P2-3 均已修复（含低预算压缩滞回、沙箱启动
+> 诊断、`security.auto_approve_tools`、缓存路径提示、stale-read 恢复提示）；
+> 仍未验证的是 bwrap 下的网络墙与交互式 TUI 审批面板（本机无 bwrap/tmux）。
 
 1. 用真实超大上下文压压缩，记录 `CompactionFailed`/breaker 行为。
 2. `job_kill` 不可用时给冲突一个 UI 出路（子代理栈没有 job 工具）。
