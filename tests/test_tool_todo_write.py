@@ -132,9 +132,14 @@ async def test_update_returns_error_on_bad_status(tool, ctx):
 
 @pytest.mark.asyncio
 async def test_update_returns_error_on_unknown_id(tool, ctx):
+    ctx.task.add("do the thing")
     r = await tool.execute({"action": "update", "id": "99", "status": "completed"}, ctx)
     assert r.success is False
     assert r.error == "unknown_id"
+    # R4-5: the error names the ids that do exist, so a model that guessed
+    # ``t1`` does not have to guess again.
+    assert "现有 id" in r.output
+    assert ctx.task.items[0].id in r.output
 
 
 @pytest.mark.asyncio

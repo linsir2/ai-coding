@@ -299,12 +299,7 @@ class TodoWriteTool(BaseTool):
         resolved = resolve_ctx(ctx)
         item = task.get(item_id)
         if item is None:
-            return ToolResult(
-                success=False,
-                output=f"error: todo #{item_id} not found",
-                error="unknown_id",
-                data={"action": "update", "id": item_id},
-            )
+            return self._unknown_id(task, item_id)
         completion_evidence = None if evidence is None else str(evidence)
         sequence = resolved.effects().sequence if resolved.effects is not None else 0
         new_start = sequence + 1
@@ -400,12 +395,7 @@ class TodoWriteTool(BaseTool):
                 started_seq=started_seq if normalised == "in_progress" else None,
             )
         except KeyError:
-            return ToolResult(
-                success=False,
-                output=f"error: todo #{item_id} not found",
-                error="unknown_id",
-                data={"action": "update", "id": item_id},
-            )
+            return self._unknown_id(task, item_id)
         except ValueError as exc:
             return ToolResult(
                 success=False,
@@ -414,6 +404,25 @@ class TodoWriteTool(BaseTool):
                 data={"action": "update", "id": item_id},
             )
         return self._ok(task, "update", item_id=item_id)
+
+    @staticmethod
+    def _unknown_id(task: TaskState, item_id: str) -> ToolResult:
+        """R4-5: say which ids exist; "not found" alone makes the model guess.
+
+        Measured: a live round spent 20 todo_write calls, two of them retrying
+        ``id=t1`` while the list actually used ``1``/``2``.
+        """
+        ids = [item.id for item in task.items]
+        valid = ", ".join(ids[:10]) + (" …" if len(ids) > 10 else "") if ids else "（清单为空）"
+        return ToolResult(
+            success=False,
+            output=(
+                f"error: todo #{item_id} not found. 现有 id：{valid}。"
+                "用 `action=list` 查看完整清单；新条目用 `action=add` 创建。"
+            ),
+            error="unknown_id",
+            data={"action": "update", "id": item_id, "valid_ids": ids},
+        )
 
     @staticmethod
     def _blocked_result(item_id: str, blockers: Blockers) -> ToolResult:

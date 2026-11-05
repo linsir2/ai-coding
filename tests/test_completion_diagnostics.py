@@ -139,3 +139,21 @@ def test_legacy_marker_survives_new_effects_and_round_trip():
 
     assert restored.effects_version == 0
     assert restored.effects_legacy is True
+
+
+@pytest.mark.asyncio
+async def test_a_headless_override_names_the_receipts_that_work(tmp_path):
+    """R4-5: a headless run has no operator to grant an override.  Measured:
+    the model retried `override=true` three times instead of adding `files`."""
+    session = _session()
+    ctx = ToolContext(
+        task=session.task,
+        workspace=str(tmp_path),
+        effects=lambda: session.effects,
+    )
+
+    verdict = await CompletionGate.override(session.task.items[0], ctx, "because")
+
+    assert verdict.ok is False
+    assert verdict.code == "override_unavailable"
+    assert "files" in verdict.reason and "verify" in verdict.reason

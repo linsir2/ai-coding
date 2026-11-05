@@ -185,8 +185,16 @@ class CompletionGate:
         if not granted:
             approval = getattr(ctx, "approval", None)
             if approval is None or not getattr(approval, "is_human", False):
+                # R4-5: headless runs auto-approve WARN calls but have no
+                # operator to grant an override, so a model that retries it
+                # three times spends three steps learning nothing.  Name the
+                # two receipts that do work instead.
                 return CompletionVerdict(
-                    False, "override needs operator approval", code="override_unavailable"
+                    False,
+                    "override needs operator approval; no operator is available "
+                    "here -- supply `files` naming a successful write/edit, or a "
+                    "`verify` command, then complete the item again",
+                    code="override_unavailable",
                 )
             note = getattr(ctx, "note_approval", None)
             if note is not None:
