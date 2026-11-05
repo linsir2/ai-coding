@@ -1595,13 +1595,14 @@ async def test_a_repeated_read_inside_one_turn_does_not_send_the_same_lines(tmp_
     from ai_coding.tools.read_tool import ReadTool
 
     (tmp_path / "big.jsonl").write_text(
-        "\n".join(f'{{"n":{index}}}' for index in range(1, 41)) + "\n"
+        "\n".join(f'{{"n":{index}}}' for index in range(1, 121)) + "\n"
     )
     tool = ReadTool(Sandbox(tmp_path), FileStateTracker())
     engine = ScriptedEngine(
         [
             _calls(_ref("c1", "read", '{"path": "big.jsonl"}')),
             _calls(_ref("c2", "read", '{"path": "big.jsonl"}')),
+            _calls(_ref("c3", "read", '{"path": "big.jsonl"}')),
             _text("done"),
         ]
     )
@@ -1617,9 +1618,13 @@ async def test_a_repeated_read_inside_one_turn_does_not_send_the_same_lines(tmp_
     )
     session = sessions.create()
 
-    await loop.process_input(session, "读两次")
+    await loop.process_input(session, "读三次")
 
     results = [m.content or "" for m in session.messages if m.role == "tool"]
     assert '"n":1' in results[0], "the first read must return the body"
     assert '"n":1' not in results[1], "the repeat must not re-send the same lines"
     assert "未返回正文" in results[1]
+    # R3-1: the pointer promises "ask again and you get the body"; the third
+    # read must honour it instead of pointing forever (18 in a row live).
+    assert "未返回正文" not in results[2]
+    assert '"n":1' in results[2]

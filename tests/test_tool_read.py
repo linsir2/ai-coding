@@ -270,13 +270,16 @@ async def test_a_read_records_the_file_version(setup):
 async def test_a_fully_covered_reread_returns_a_pointer(setup):
     """A model that reads its own growing trace re-sent the same lines every
     step (22 retrievals, 262k prompt tokens, one 300s timeout).  Coverage comes
-    from the loop, so the checks below install a fake marker source."""
+    from the loop, so the checks below install a fake marker source.
+
+    R3-1: the page must be larger than ``_SMALL_READ_LINES`` -- a small file is
+    deliberately answered with the body instead of a pointer."""
     tmp_path, sb, fst, tool = setup
     (tmp_path / "trace.jsonl").write_text(
-        "\n".join(f'{{"line":{index}}}' for index in range(1, 21)) + "\n"
+        "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
     )
     key = sb.key(tmp_path / "trace.jsonl")
-    marks = [(1, 20, "v1")]
+    marks = [(1, 100, "v1")]
 
     from ai_coding.tools.base import ToolContext
 
@@ -293,12 +296,65 @@ async def test_a_fully_covered_reread_returns_a_pointer(setup):
 
 
 @pytest.mark.asyncio
+async def test_the_second_pointer_returns_the_body(setup):
+    """R3-1: the pointer tells the model to ask again; that promise must hold.
+
+    Measured live: 18 identical reads of one 22-line file, each answered with
+    the same pointer, because the advice ("use limit=N") never worked.
+    """
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "trace.jsonl").write_text(
+        "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
+    )
+    marks = [(1, 100, "v1")]
+    seen: list[int] = []
+
+    def _count(key, start, end, version):
+        seen.append(1)
+        return len(seen)
+
+    from ai_coding.tools.base import ToolContext
+
+    ctx = ToolContext(
+        workspace=str(tmp_path),
+        read_marks=lambda _key: tuple(marks),
+        count_repeat_read=_count,
+    )
+    first = await tool.execute({"path": "trace.jsonl"}, ctx)
+    second = await tool.execute({"path": "trace.jsonl"}, ctx)
+
+    assert "未返回正文" in first.output
+    assert "未返回正文" not in second.output
+    assert '"line":1' in second.output
+
+
+@pytest.mark.asyncio
+async def test_a_small_file_is_never_answered_with_a_pointer(setup):
+    """R3-1: pointing at a 22-line config costs more than re-sending it."""
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "package.json").write_text(
+        "\n".join(f'"key{index}": {index},' for index in range(1, 21)) + "\n"
+    )
+    marks = [(1, 20, "v1")]
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "package.json"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert "未返回正文" not in result.output
+    assert '"key1"' in result.output
+
+
+@pytest.mark.asyncio
 async def test_a_repeat_read_returns_only_the_gap(setup):
     tmp_path, sb, fst, tool = setup
     (tmp_path / "trace.jsonl").write_text(
-        "\n".join(f'{{"line":{index}}}' for index in range(1, 21)) + "\n"
+        "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
     )
-    marks = [(1, 15, "v1")]
+    marks = [(1, 95, "v1")]
 
     from ai_coding.tools.base import ToolContext
 
@@ -308,8 +364,8 @@ async def test_a_repeat_read_returns_only_the_gap(setup):
     )
 
     assert result.success is True
-    assert '"line":16' in result.output
-    assert '"line":17' in result.output
+    assert '"line":96' in result.output
+    assert '"line":97' in result.output
     assert '"line":5' not in result.output
     assert "只返回未读过的行" in result.output
 
@@ -317,8 +373,10 @@ async def test_a_repeat_read_returns_only_the_gap(setup):
 @pytest.mark.asyncio
 async def test_a_changed_file_still_reports_the_reason(setup):
     tmp_path, sb, fst, tool = setup
-    (tmp_path / "g.txt").write_text("new\ncontent\n")
-    marks = [(1, 2, "old-version")]
+    (tmp_path / "g.txt").write_text(
+        "\n".join(f"content{index}" for index in range(1, 101)) + "\n"
+    )
+    marks = [(1, 100, "old-version")]
 
     from ai_coding.tools.base import ToolContext
 

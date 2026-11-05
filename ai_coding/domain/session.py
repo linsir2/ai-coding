@@ -337,6 +337,12 @@ class SessionData:
     # ``turn_usages`` row it also feeds).  ``_observed_prompt_tokens`` returns
     # the working view while this is set; the next model step clears it.
     context_measure_invalid: bool = False
+    # NOT persisted.  R3-1: how many times this turn has already answered a
+    # fully covered read with a pointer, keyed by ``path:start:end:version``.
+    # The pointer tells the model "ask again and you get the body"; without
+    # this counter the same answer repeated forever (measured: 18 identical
+    # reads of one 22-line file in 75 seconds).  Cleared at every turn start.
+    read_repeats: dict[str, int] = field(default_factory=dict)
     # NOT persisted.  C-2/C-3 (codex path): this turn is the one Codex sends for
     # an approved plan (the literal "Implement the plan." prompt).  In-process
     # only -- ``to_dict`` is a whitelist, so a crash during it resumes as an

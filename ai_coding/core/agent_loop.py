@@ -1619,6 +1619,9 @@ class AgentLoop:
         session.compaction_failures = 0
         # R20/RC-7: one correction chance per turn's answer.
         session.claim_retries = 0
+        # R3-1: the "already read" pointer may only be repeated once per range
+        # per turn; a new turn starts the count over.
+        session.read_repeats.clear()
         self.reporter.begin_turn(self.observer)
         self._warn_tools_chars_once()
         # P2 (补充式方案 06) mark this turn open; 11-spec §7.1 makes it
@@ -2327,6 +2330,13 @@ class AgentLoop:
             if getattr(message, "role", "") == "tool"
         }
 
+        def _count_repeat_read(key: str, start: int, end: int, version: str) -> int:
+            """R3-1: how many times this turn already pointed at this range."""
+            token = f"{key}:{start}:{end}:{version}"
+            count = int(session.read_repeats.get(token, 0)) + 1
+            session.read_repeats[token] = count
+            return count
+
         def _note_read(
             path: str,
             start: int,
@@ -2392,6 +2402,12 @@ class AgentLoop:
                     for mark in session.effects.reads
                     if mark.path == key and mark.call_id in _visible_call_ids
                 ),
+                # R3-1: the pointer's own promise.  The first fully covered
+                # repeat answers "already read"; the second one returns the
+                # body, because a model that asks twice has demonstrably lost
+                # it (or never had it after a compaction) and repeating the
+                # pointer only burns iterations (measured: 18 in a row).
+                count_repeat_read=_count_repeat_read,
                 effects=lambda: session.effects,
                 effects_legacy=session.effects_legacy,
                 note_effect=_note_effect,

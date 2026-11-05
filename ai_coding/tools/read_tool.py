@@ -21,6 +21,12 @@ _DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 #: now arrives in one call instead of eleven.
 _DEFAULT_MAX_LINES = 500
 
+#: R3-1: below this many lines the dedup saves almost nothing and costs a model
+#: step.  Measured: a 22-line ``package.json`` was pointed at 18 times in a row
+#: (~450 characters saved, ~500k prompt tokens spent).  Large reads still
+#: answer with a pointer; a small one is simply returned again.
+_SMALL_READ_LINES = 60
+
 
 class ReadTool(BaseTool):
     """Read a text file with line numbers; supports offset/limit pagination."""
@@ -168,26 +174,46 @@ class ReadTool(BaseTool):
         # growing trace until the turn clock ran out (22 retrievals, 262k
         # prompt tokens, one 300s timeout).  Only the *uncovered* lines travel;
         # a fully covered request answers with a pointer.
-        marks = resolved_ctx.read_marks(key) if resolved_ctx.read_marks else ()
+        # R3-1: a small page opts out of the whole mechanism -- the pointer
+        # saves a few hundred characters and can cost a whole iteration.
+        small = page_end - offset <= _SMALL_READ_LINES
+        marks = (
+            resolved_ctx.read_marks(key)
+            if resolved_ctx.read_marks is not None and not small
+            else ()
+        )
         gaps = _uncovered(offset + 1, page_end, marks) if marks else [(offset + 1, page_end)]
         repeated = bool(marks) and gaps != [(offset + 1, page_end)]
         changed = bool(marks) and any(mark_version != version for _, _, mark_version in marks)
 
         if not gaps:
-            # Nothing new: say which lines were already in the context and how
-            # to ask for them again.  A silent empty answer would look broken.
-            asked = limit if limit is not None else page_end - offset
-            again = f"offset={offset} " if offset else ""
-            hint = "文件已变化；若已读行有改动，请带 offset 重读" if changed else "文件未变化"
-            return ToolResult(
-                success=True,
-                output=(
-                    f"[未返回正文：第 {offset + 1}-{page_end} 行在本会话已经读过"
-                    f"（共请求 {asked} 行，{hint}）。需要原样再看一遍请用 "
-                    f"{again}limit={asked} 重新指定；需要新内容请读未覆盖的行。]"
-                ),
-                data={"repeated_read": True, "changed": changed},
+            # Nothing new: say which lines were already in the context.  R3-1:
+            # the pointer is only the *first* answer -- if the model asks for
+            # the same range again, it has lost the body (or a compaction took
+            # it), so the second request returns the lines themselves instead
+            # of repeating a promise the harness would not keep.
+            count = (
+                resolved_ctx.count_repeat_read(
+                    key, offset + 1, page_end, version
+                )
+                if resolved_ctx.count_repeat_read is not None
+                else 0
             )
+            if count < 2:
+                asked = limit if limit is not None else page_end - offset
+                hint = "文件已变化；若已读行有改动，请带 offset 重读" if changed else "文件未变化"
+                return ToolResult(
+                    success=True,
+                    output=(
+                        f"[未返回正文：第 {offset + 1}-{page_end} 行在本会话已经读过"
+                        f"（共请求 {asked} 行，{hint}）。再次请求相同范围会直接返回"
+                        f"正文；需要新内容请读未覆盖的行。]"
+                    ),
+                    data={"repeated_read": True, "changed": changed},
+                )
+            gaps = [(offset + 1, page_end)]
+            repeated = False
+            changed = False
 
         view_numbers = {
             number

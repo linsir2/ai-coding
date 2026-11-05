@@ -122,6 +122,12 @@ class ToolContext:
     #: instead of re-sending bytes the context already paid for.  ``None``
     #: outside a loop that owns a ledger, which keeps direct tool calls whole.
     read_marks: Callable[[str], tuple[tuple[int, int, str], ...]] | None = None
+    #: R3-1: how many times this turn has already been told "already read" for
+    #: one ``(key, start, end, version)``.  The pointer promises "ask again and
+    #: you get the body", so the second suppression must actually return it --
+    #: measured: a model re-read a 22-line file 18 times because the promise
+    #: was never kept.  ``None`` means the tool keeps its first-answer behaviour.
+    count_repeat_read: Callable[[str, int, int, str], int] | None = None
     #: Live view of the session effect ledger.  A callback, not a snapshot: a
     #: write earlier in the same tool batch must be visible to a later
     #: todo_write/read check.  ``None`` outside a loop that owns the ledger.

@@ -95,6 +95,9 @@ def tool_context(
     #: R2-13: what the session already returned for a key, so a repeat read can
     #: answer with a pointer instead of re-sending the same bytes.
     read_marks: Callable[[str], tuple[tuple[int, int, str], ...]] | None = None,
+    #: R3-1: how often this turn has already answered the same covered range
+    #: with a pointer; the second suppression returns the body instead.
+    count_repeat_read: Callable[[str, int, int, str], int] | None = None,
     effects: Callable[[], Any] | None = None,
     effects_legacy: bool = False,
     note_effect: Callable[..., None] | None = None,
@@ -152,6 +155,7 @@ def tool_context(
         note_checkpoint=note_checkpoint,
         note_read=note_read,
         read_marks=read_marks,
+        count_repeat_read=count_repeat_read,
         effects=effects,
         effects_legacy=effects_legacy,
         note_effect=note_effect,
