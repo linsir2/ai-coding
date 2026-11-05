@@ -719,3 +719,94 @@ ERROR: Failed building wheel for pydantic-core
 R3-1 与 R3-2 都是“状态比模型看得见的上下文活得更久”，可以放在同一批：
 改完后用 `eval_fullstack_task.py --rounds 4` 复跑，看 `dedup` 与
 `guard_deny` 两个计数是否降到个位数。
+
+---
+
+# 第四轮真机复跑（R4，从零开始的全栈长任务）
+
+配置不变（`config-fullstack.yaml`，`max_context_tokens=48000`、
+`max_iterations=30`、`max_auto_continuations=4`），**全新工作区**
+`/tmp/aic-r2/ws-fullstack5`，日志 `/tmp/aic-r2/logs/fullstack5.log`，
+trace `ws-fullstack5/.ai-coding/traces/`。
+
+## 结果：4 轮完成
+
+| 轮次 | 耗时 | 工具 | 门禁 |
+|---|---|---|---|
+| 1 | 156s | 26 | `be_pytest=1`（依赖 pin） |
+| 2 | 279s | 32 | `be_pytest=0` |
+| 3 | **1258s** | 253 | `fe_build=2`、4 组件、非脚手架、README |
+| 4 | 239s | 22 | 全绿 → `TASK COMPLETE` |
+
+总计 1959s（33 分钟）、195 次模型调用、275 次工具调用、
+4.83M prompt tokens（缓存 51%）。
+
+**修复项全部生效**：read 去重指针共 4 次（修前 57）、`duplicate_call`
+拒绝 3 次（修前 25）、`tools_chars` 恒定 13,507（修前 27,181）、
+第 2 轮后端门即通过（修前 8 轮都不过）。
+
+## R4-1（P1）“只核验不推进”的循环吃掉了 21 分钟
+
+### 证据
+
+第 3 轮（`turn-3.jsonl`）：116 次迭代、195 次工具调用，其中
+
+- `read frontend/src/App.tsx` **47 次**（同一参数、同一文件）；
+- `bash` 61 条同族命令（`cd ws && echo "=== … ===" && find/ls/cat`，
+  只有 echo 标签不同）；
+- 15 次 write（写完了全部交付物）、2 次 edit、9 次 todo_write；
+- 11 次自动压缩（每次 6–18k prompt tokens、40–60s，合计约 9 分钟）。
+
+最终交付物是完整的（前端 4 组件、非脚手架、README、build 通过），
+但绝大部分预算是“核实当前状态”而不是实现。
+
+### 根因
+
+1. `DuplicateCallGuard` 在 `build_guards` 里是 `advisory=True`：
+   非写工具的重复**只提醒不拒绝**（read 第 3/5/8 次各提醒一次，47 次照跑）。
+2. `search_streak` 只在“只读工具连续”时累积；模型把 read 和 bash 交替
+   使用，streak 永远到不了 `search_streak_l3=20`（源码注释里已承认这个
+   盲区：“the 61-call survey it targets interleaves bash and never builds
+   a streak at all”）。
+3. bash 的重复检测按参数指纹，echo 标签一变就视为不同命令。
+
+### 方案（两选一或组合）
+
+1. **硬上限**：同一 `(tool, params)` 在一次回合里成功 8 次后拒绝
+   （`reusable=False` 措辞，说明“参数完全相同、自上次成功以来工作区
+   没有变化”）。写工具的严格路径不变；读/bash 在 8 次以内继续提醒。
+   需要按“自上次成功以来有无 write/edit/bash 变更”放行，避免把
+   改完再验证的正当循环也拒掉。
+2. **无变更 streak**：单独统计“连续多少步没有任何写操作（write/edit 或
+   改了文件的 bash）”，达到 8 步注入“你已经连续 N 步只读，直接改或用
+   ask_user”，达到 20 步按 L3 收尾。它不受 read/bash 交替影响。
+
+## R4-2（P2）压缩配置让单回合付出 9 分钟摘要
+
+`max_context_tokens: 48000` 对 131k 窗口的模型来说过低，启动日志已经在
+警告。第 3 轮 11 次压缩，每次都是一次完整 summary 调用。把配置改成 0
+（跟随模型窗口）或 96k，同一任务的压缩次数会降到 2–3 次。
+这是 eval 配置问题，但 `docs/how-to-run.md` 的例子也用了偏小的值，
+值得在文档里说明取值原则。
+
+## R4-3（P3）自动续跑后 trace span 重复
+
+一次用户回合里的 auto-continuation 会把 iteration index 重置为 1，
+而 trace 的 span 就是 `i{index}`，所以 `turn-3.jsonl` 里 `i1` 出现了
+4 次（每批一次），按 span 关联事件会串。建议 span 带上批次号
+（`b2-i1`）或使用单调序号。
+
+## R4-4（P3）小文件豁免阈值偏大
+
+`_SMALL_READ_LINES = 60` 让 59 行的 `App.tsx` 永远返回全文：47 次读取
+≈ 118KB 重复正文。建议降到 30 行（或同时限制字符数 ≤1,200），
+让这类文件仍走“第 1 次指针、第 2 次正文”的路径。
+
+## 建议的实施顺序
+
+1. **R4-1**（P1）—— 唯一真正影响“流畅度”的一条；
+2. **R4-2**（P2，配置/文档）—— 零代码风险，直接改示例与告警文案；
+3. **R4-3 / R4-4**（P3）—— 观测与阈值微调。
+
+R4-1 改完后按同配置从零复跑 4 轮，目标：第 3 轮的耗时 < 400s、
+`read` 重复 ≤ 8 次、压缩 ≤ 3 次。
