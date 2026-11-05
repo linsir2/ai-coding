@@ -159,6 +159,49 @@ def _tail_at_line(text: str, limit: int) -> str:
     return body
 
 
+def _wheel_missing_hint(py: str, be: Path) -> str:
+    """R3-4: name the pin that has no wheel for this interpreter.
+
+    The pip log the model receives is mostly ``maturin``/Cargo noise.  A model
+    spent six of eight rounds calling the venv "broken" and running the suite
+    with the system interpreter instead of bumping ``pydantic==2.10.4`` -- the
+    one line that says which package has no cp314 wheel was buried.  A dry run
+    with ``--only-binary=:all:`` produces exactly that line.
+    """
+    if not (be / "requirements.txt").exists():
+        return ""
+    rc, log = _run(
+        [
+            py,
+            "-m",
+            "pip",
+            "install",
+            "--dry-run",
+            "--only-binary=:all:",
+            "-r",
+            "requirements.txt",
+        ],
+        be,
+        180,
+    )
+    if rc == 0:
+        return ""
+    picked = [
+        line.strip()
+        for line in log.splitlines()
+        if "No matching distribution" in line
+        or "Could not find a version" in line
+        or "no available binary" in line.lower()
+    ]
+    detail = "\n".join(picked[-6:]) or _tail_at_line(log, 600)
+    return (
+        f"[无可用 wheel] 下面这些 pin 在 {py} 上没有预编译包。"
+        "请放宽版本或换成有该 Python 版本 wheel 的版本；"
+        "不要改用系统 Python 绕过这道门，门量的是项目自己的环境。\n"
+        f"{detail}"
+    )
+
+
 def self_check(ws: Path) -> dict:
     """Run the two hard gates the task itself demands."""
     out: dict[str, object] = {}
@@ -193,10 +236,13 @@ def self_check(ws: Path) -> dict:
         out["be_pytest"] = rc2
         body = _pytest_digest(log2) if rc2 not in (0, None) else log2[-1200:]
         if rc != 0:
+            hint = _wheel_missing_hint(py, be)
             body = (
                 f"[依赖安装失败] pip install 返回 {rc}（测试仍然照常运行）：\n"
                 f"{_tail_at_line(log, 1200)}\n\n{body}"
             )
+            if hint:
+                body = f"{hint}\n\n{body}"
         out["be_log"] = body
     else:
         out["be_pytest"] = None
