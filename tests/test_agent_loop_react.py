@@ -1579,3 +1579,47 @@ async def test_a_trivial_goal_is_still_replaced_by_the_first_real_task(tmp_path)
 
     assert session.task is not None
     assert session.task.goal.startswith("构建一个可运行的全栈项目")
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_read_inside_one_turn_does_not_send_the_same_lines(tmp_path):
+    """R2-13, end to end: the marker source is wired through the real context.
+
+    The unit test in ``test_tool_read`` installs the marker source by hand, so
+    it cannot catch a plumbing mistake between the loop and the tool -- and one
+    was there: ``session.read_ledger`` is the display projection and strips
+    ``call_id``, which made every mark look invisible.
+    """
+    from ai_coding.security.file_state_tracker import FileStateTracker
+    from ai_coding.security.sandbox import Sandbox
+    from ai_coding.tools.read_tool import ReadTool
+
+    (tmp_path / "big.jsonl").write_text(
+        "\n".join(f'{{"n":{index}}}' for index in range(1, 41)) + "\n"
+    )
+    tool = ReadTool(Sandbox(tmp_path), FileStateTracker())
+    engine = ScriptedEngine(
+        [
+            _calls(_ref("c1", "read", '{"path": "big.jsonl"}')),
+            _calls(_ref("c2", "read", '{"path": "big.jsonl"}')),
+            _text("done"),
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(tool)
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        workspace=str(tmp_path),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "读两次")
+
+    results = [m.content or "" for m in session.messages if m.role == "tool"]
+    assert '"n":1' in results[0], "the first read must return the body"
+    assert '"n":1' not in results[1], "the repeat must not re-send the same lines"
+    assert "未返回正文" in results[1]

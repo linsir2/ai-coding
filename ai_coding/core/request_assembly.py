@@ -245,6 +245,11 @@ def _observed_prompt_tokens(session: SessionData) -> int:
     live = int(getattr(session, "live_context_tokens", 0) or 0)
     if live > 0:
         return live
+    # R2-2r: a checkpoint installed after that reading makes it describe a
+    # request nobody will send again.  The working view is the honest measure
+    # until a new step reports (the loop clears the flag when it does).
+    if getattr(session, "context_measure_invalid", False):
+        return working_history_tokens(session)
     # A turn row is written only when a turn closes, so before this turn's
     # first step the newest row belongs to an older request.  Reading it here
     # was how 956c45cb sent 2.45M tokens (the poisoned synthetic-message loop

@@ -160,11 +160,46 @@ class ReadTool(BaseTool):
         end = min(offset + limit, len(lines)) if limit is not None else len(lines)
         end = max(end, offset)
         page_end = min(end, offset + self._max_lines)
-        view = lines[offset:page_end]
 
         resolved_ctx = resolve_ctx(ctx)
+        key = self._sandbox.key(target)
+        # R2-13: a re-read of lines this session already returned is not new
+        # information, and sending them again is what let a model read its own
+        # growing trace until the turn clock ran out (22 retrievals, 262k
+        # prompt tokens, one 300s timeout).  Only the *uncovered* lines travel;
+        # a fully covered request answers with a pointer.
+        marks = resolved_ctx.read_marks(key) if resolved_ctx.read_marks else ()
+        gaps = _uncovered(offset + 1, page_end, marks) if marks else [(offset + 1, page_end)]
+        repeated = bool(marks) and gaps != [(offset + 1, page_end)]
+        changed = bool(marks) and any(mark_version != version for _, _, mark_version in marks)
+
+        if not gaps:
+            # Nothing new: say which lines were already in the context and how
+            # to ask for them again.  A silent empty answer would look broken.
+            asked = limit if limit is not None else page_end - offset
+            again = f"offset={offset} " if offset else ""
+            hint = "文件已变化；若已读行有改动，请带 offset 重读" if changed else "文件未变化"
+            return ToolResult(
+                success=True,
+                output=(
+                    f"[未返回正文：第 {offset + 1}-{page_end} 行在本会话已经读过"
+                    f"（共请求 {asked} 行，{hint}）。需要原样再看一遍请用 "
+                    f"{again}limit={asked} 重新指定；需要新内容请读未覆盖的行。]"
+                ),
+                data={"repeated_read": True, "changed": changed},
+            )
+
+        view_numbers = {
+            number
+            for start, stop in gaps
+            for number in range(start, stop + 1)
+        }
         # line-numbered output, right-aligned 6-wide like `cat -n`
-        numbered = [f"{i + 1:>6}  {line}" for i, line in enumerate(view, start=offset)]
+        numbered = [
+            f"{number:>6}  {line}"
+            for number, line in enumerate(lines, start=1)
+            if number in view_numbers
+        ]
         output = "\n".join(numbered)
         # Two different truncations, two different messages.  The cap is the
         # harness's doing and the model must be told where to resume; an explicit
@@ -181,6 +216,13 @@ class ReadTool(BaseTool):
                 f"\n[没有返回任何行：请求第 {offset + 1} 行起共 {asked} 行，"
                 f"文件共 {len(lines)} 行]"
             )
+        elif repeated:
+            skipped = (page_end - offset) - len(view_numbers)
+            where = "文件已变化" if changed else "文件未变化"
+            output += (
+                f"\n[只返回未读过的行：{where}，跳过本会话已读过的 {skipped} 行；"
+                "已读行若有改动请带 offset 重读]"
+            )
         elif capped:
             output += (
                 f"\n[已返回第 {offset + 1}-{page_end} 行（共 {len(lines)} 行），"
@@ -193,21 +235,64 @@ class ReadTool(BaseTool):
         self._tracker.record(target)
 
         # R20/RC-2: tell the harness which lines actually reached the context.
-        # The ledger records the *returned* page, so a paged read of a 3,081-line
-        # file accumulates instead of pretending it read the whole thing.
-        note_read = resolve_ctx(ctx).note_read
+        # The ledger records the *returned* runs, so a paged read of a 3,081-line
+        # file accumulates instead of pretending it read the whole thing -- and a
+        # skipped middle is not recorded as read.
+        note_read = resolved_ctx.note_read
         if note_read is not None and not credential:
-            note_read(
-                self._sandbox.key(target),
-                offset + 1,
-                page_end,
-                len(lines),
-                version,
-                call_id=resolved_ctx.call_id,
-                canonical=True,
-            )
+            for start, stop in gaps:
+                note_read(
+                    key,
+                    start,
+                    stop,
+                    len(lines),
+                    version,
+                    call_id=resolved_ctx.call_id,
+                    canonical=True,
+                )
 
-        return ToolResult(success=True, output=output)
+        return ToolResult(
+            success=True,
+            output=output,
+            data={"repeated_read": repeated, "changed": changed},
+        )
 
 
 __all__ = ["ReadTool"]
+
+
+def _uncovered(
+    start: int, end: int, marks: tuple[tuple[int, int, str], ...]
+) -> list[tuple[int, int]]:
+    """The 1-based inclusive runs of ``start..end`` no mark has covered yet.
+
+    Merging (rather than subtracting mark by mark) is what keeps a set of
+    adjacent pages from producing a hundred one-line gaps.  Version is
+    deliberately *not* part of the key: the caller reports a version change
+    separately, because an append-only file (a trace being written while the
+    model reads it) has stable prefix lines and only a growing tail.
+    """
+    if end < start:
+        return []
+    covered = sorted(
+        (max(mark_start, start), min(mark_end, end))
+        for mark_start, mark_end, _ in marks
+        if mark_end >= start and mark_start <= end
+    )
+    merged: list[tuple[int, int]] = []
+    for first, last in covered:
+        if first > last:
+            continue
+        if merged and first <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    gaps: list[tuple[int, int]] = []
+    cursor = start
+    for first, last in merged:
+        if cursor < first:
+            gaps.append((cursor, first - 1))
+        cursor = max(cursor, last + 1)
+    if cursor <= end:
+        gaps.append((cursor, end))
+    return gaps

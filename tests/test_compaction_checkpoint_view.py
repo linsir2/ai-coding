@@ -126,15 +126,37 @@ async def test_compress_if_needed_applies_the_view_below_the_watermark():
 async def test_a_stale_raw_measurement_does_not_recompact_the_view():
     """Trace f1d881ee t8 compacted six times in one turn: the gate kept reading
     the raw 200k though every request sent the 14k view.  Once a checkpoint
-    exists, the view is what the gate must measure."""
+    exists, the view is what the gate must measure.
+
+    R2-2r: the *number* now comes from ``_observed_prompt_tokens``, which knows
+    a checkpoint invalidated the current turn's row.  Passing a literal 200k
+    would be a caller bug, and the gate is right to act on it.
+    """
+    from ai_coding.core.request_assembly import _observed_prompt_tokens
+
     manager, session, history = _with_checkpoint()
+    # A current-turn row that measured the pre-checkpoint request.
+    session.turn_count = 1
+    session.turn_usages = [
+        type(
+            "Row",
+            (),
+            {
+                "turn": 1,
+                "context_tokens": 200_000,
+                "prompt_tokens": 200_000,
+            },
+        )()
+    ]
     events = []
     compactor = Compactor(manager, emit=events.append)
 
+    observed = _observed_prompt_tokens(session)
     out = await compactor.compress(
-        history, deadline=None, observed_tokens=200_000, session=session
+        history, deadline=None, observed_tokens=observed, session=session
     )
 
+    assert observed < 48_000, "a checkpoint invalidates the raw reading"
     assert len(out) == 6 and (out[0].content or "").startswith(CHECKPOINT_MARK)
     assert events == [], "the stale raw reading is not the request"
 

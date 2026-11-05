@@ -152,6 +152,38 @@ def test_working_history_tokens_without_a_checkpoint_is_the_full_history():
     assert working_history_tokens(_session(messages)) == _history_tokens(messages)
 
 
+def test_a_checkpoint_does_not_make_the_gate_ignore_the_provider_count():
+    """R2-2r: a 135k *estimate* against an 11k *bill* compacted every other step.
+
+    The estimate counts tool bodies before L2/L3 shrink them; the provider
+    measured the request that actually went out.  Once a checkpoint exists the
+    gate used to discard the measured number entirely and fall back to the
+    inflated estimate.
+    """
+    messages = [
+        ChatMessage(
+            role="tool",
+            content="大段工具输出" * 8_000,
+            tool_call_id=f"c{index}",
+            timestamp="",
+        )
+        for index in range(40)
+    ]
+    session = _session(messages)
+    install_checkpoint(
+        session,
+        "早期对话的摘要",
+        consumed=39,
+        anchor=_anchor_of(messages[:39]),
+    )
+
+    manager = _manager()
+    # The provider measured the request that went out: it fits.
+    assert manager.should_compact(messages, observed_tokens=CEILING - 1_000) is False
+    # And a genuine overflow still opens the gate.
+    assert manager.should_compact(messages, observed_tokens=CEILING + 1) is True
+
+
 # ---- 3. the loop records the real measurement after every step -------------
 
 

@@ -261,3 +261,84 @@ async def test_a_read_records_the_file_version(setup):
     )
     assert len(seen[0]) == 5
     assert seen[0][4]
+
+
+# ---- R2-13: a repeat read answers with a pointer, not the same bytes -----
+
+
+@pytest.mark.asyncio
+async def test_a_fully_covered_reread_returns_a_pointer(setup):
+    """A model that reads its own growing trace re-sent the same lines every
+    step (22 retrievals, 262k prompt tokens, one 300s timeout).  Coverage comes
+    from the loop, so the checks below install a fake marker source."""
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "trace.jsonl").write_text(
+        "\n".join(f'{{"line":{index}}}' for index in range(1, 21)) + "\n"
+    )
+    key = sb.key(tmp_path / "trace.jsonl")
+    marks = [(1, 20, "v1")]
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "trace.jsonl"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert result.success is True
+    assert "未返回正文" in result.output
+    assert '"line":1' not in result.output
+    assert result.data is not None and result.data["repeated_read"] is True
+    assert key  # the key is what the loop's marker source is queried with
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_read_returns_only_the_gap(setup):
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "trace.jsonl").write_text(
+        "\n".join(f'{{"line":{index}}}' for index in range(1, 21)) + "\n"
+    )
+    marks = [(1, 15, "v1")]
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "trace.jsonl"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert result.success is True
+    assert '"line":16' in result.output
+    assert '"line":17' in result.output
+    assert '"line":5' not in result.output
+    assert "只返回未读过的行" in result.output
+
+
+@pytest.mark.asyncio
+async def test_a_changed_file_still_reports_the_reason(setup):
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "g.txt").write_text("new\ncontent\n")
+    marks = [(1, 2, "old-version")]
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "g.txt"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert result.success is True
+    assert "文件已变化" in result.output
+    assert result.data is not None and result.data["changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_without_a_marker_source_every_read_returns_the_body(setup):
+    """Direct tool calls (and sub-agents without a ledger) must keep working."""
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "f.txt").write_text("hello\nworld\n")
+
+    first = await tool.execute({"path": "f.txt"})
+    second = await tool.execute({"path": "f.txt"})
+
+    assert "hello" in first.output and "hello" in second.output

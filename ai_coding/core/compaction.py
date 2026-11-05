@@ -164,8 +164,11 @@ class Compactor:
             # reopened the gate every iteration (trace 2026-10-31 t8: six
             # compactions in one turn, each 150→14/155→11/162→9 messages).
             gate_history = view if view is not None else history
-            gate_observed = 0 if view is not None else observed_tokens
-            if not self._should_run(gate_history, gate_observed):
+            # R2-2r: same rule as ``ContextManager.compress_if_needed`` -- the
+            # provider's measurement describes a request that already went
+            # through the pipeline, while the local estimate counts the tool
+            # bodies before L2/L3 shrink them.
+            if not self._should_run(gate_history, observed_tokens):
                 if view is not None:
                     self.last_was_view = True
                     return view

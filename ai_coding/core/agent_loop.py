@@ -2289,6 +2289,16 @@ class AgentLoop:
             # deleted session).
             self.sessions.mutate(session_id, apply)
 
+        # R2-13: the tool results this request will actually contain.  A read
+        # ledger mark only suppresses a repeat while its own result is one of
+        # these -- after a compaction the body is gone and the model must be
+        # able to read it again.
+        _visible_call_ids = {
+            str(getattr(message, "tool_call_id", "") or "")
+            for message in history
+            if getattr(message, "role", "") == "tool"
+        }
+
         def _note_read(
             path: str,
             start: int,
@@ -2338,6 +2348,22 @@ class AgentLoop:
                 # absolute and a relative path in one session, and two keys for
                 # one file would make every citation look uncovered.
                 note_read=_note_read,
+                # R2-13: what this session already put in front of the model for
+                # that key, so ``read`` can answer a repeat with a pointer (or
+                # only the lines it has never returned).  A mark counts only
+                # while its tool result is **still in this request's view**:
+                # after a compaction the body is gone, and a pointer there would
+                # be a promise the model cannot keep.  Writing/editing already
+                # invalidates the marks through the effects ledger.
+                read_marks=lambda key: tuple(
+                    (mark.start, mark.end, mark.version)
+                    # The raw ledger, not ``session.read_ledger``: that property
+                    # is the display projection and deliberately drops
+                    # ``call_id``, which is the only way to prove the body is
+                    # still in the request.
+                    for mark in session.effects.reads
+                    if mark.path == key and mark.call_id in _visible_call_ids
+                ),
                 effects=lambda: session.effects,
                 effects_legacy=session.effects_legacy,
                 note_effect=_note_effect,
@@ -2889,6 +2915,9 @@ class AgentLoop:
         session.live_context_tokens = int(
             _usage.get("context_tokens") or _usage.get("prompt_tokens") or 0
         )
+        # R2-2r: a fresh measurement describes the request that just went out,
+        # so whatever a checkpoint invalidated is replaced.
+        session.context_measure_invalid = False
         self._emit(AssistantMessage(
             text=step.text, tool_calls=tuple(step.tool_calls),
             reasoning=step.reasoning, agent=session.agent))

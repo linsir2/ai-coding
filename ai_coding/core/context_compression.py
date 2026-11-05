@@ -807,6 +807,11 @@ def install_checkpoint(
     # gate measure the view (``working_history_tokens``) instead of a number the
     # checkpoint has already invalidated.
     session.live_context_tokens = 0
+    # R2-2r: the same reading may also survive in this turn's ``turn_usages``
+    # row, which ``_observed_prompt_tokens`` falls back to.  That fallback is
+    # what made a *current-turn* row describe a request the checkpoint had
+    # already replaced.  The flag is cleared as soon as a new step reports.
+    session.context_measure_invalid = True
 
 
 def _ensure_pinned(
@@ -1460,10 +1465,14 @@ class ContextManager:
             # the request; the raw history is only its source.
             view = self.checkpoint_view(messages, session=session, pinned=pinned)
             effective = view if view is not None else messages
-            # A checkpoint means ``observed_tokens`` may describe the *previous*
-            # (raw) request; the view's own estimate is the honest reading.
-            gate_observed = 0 if view is not None else observed_tokens
-            if not self.should_compact(effective, gate_observed):
+            # R2-2r: the provider's count is used even when a view exists.
+            # ``install_checkpoint`` already cleared the stale reading, and the
+            # fallback (``working_history_tokens``) is checkpoint-aware -- so the
+            # number never describes the pre-checkpoint request.  Zeroing it here
+            # instead made the gate judge ``_history_tokens(view)``, which counts
+            # tool bodies *before* L2/L3 shrink them: measured 135k estimated
+            # against 11k billed, one wasted compaction per large read.
+            if not self.should_compact(effective, observed_tokens):
                 return effective
         out = await self.compress(
             messages,

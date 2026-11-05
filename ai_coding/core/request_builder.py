@@ -92,6 +92,9 @@ def tool_context(
     # built from what the harness actually sent rather than from what the model
     # claims it read.
     note_read: Callable[..., None] | None = None,
+    #: R2-13: what the session already returned for a key, so a repeat read can
+    #: answer with a pointer instead of re-sending the same bytes.
+    read_marks: Callable[[str], tuple[tuple[int, int, str], ...]] | None = None,
     effects: Callable[[], Any] | None = None,
     effects_legacy: bool = False,
     note_effect: Callable[..., None] | None = None,
@@ -148,6 +151,7 @@ def tool_context(
         turn=int(turn),
         note_checkpoint=note_checkpoint,
         note_read=note_read,
+        read_marks=read_marks,
         effects=effects,
         effects_legacy=effects_legacy,
         note_effect=note_effect,

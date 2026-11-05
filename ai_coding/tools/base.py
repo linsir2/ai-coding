@@ -116,6 +116,12 @@ class ToolContext:
     # instead of trusting a narrative.  Same shape as ``note_checkpoint``: the
     # loop gives it, the tool uses it, ``None`` outside a loop that owns a turn.
     note_read: Callable[..., None] | None = None
+    #: R2-13: what this session has already returned for a key -- a tuple of
+    #: ``(start, end, version)`` with 1-based inclusive line numbers.  ``read``
+    #: uses it to answer a repeat with a pointer (or only the uncovered lines)
+    #: instead of re-sending bytes the context already paid for.  ``None``
+    #: outside a loop that owns a ledger, which keeps direct tool calls whole.
+    read_marks: Callable[[str], tuple[tuple[int, int, str], ...]] | None = None
     #: Live view of the session effect ledger.  A callback, not a snapshot: a
     #: write earlier in the same tool batch must be visible to a later
     #: todo_write/read check.  ``None`` outside a loop that owns the ledger.
