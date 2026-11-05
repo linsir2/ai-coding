@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.core.events import (
+    CompactionDelta,
     ContextAssembled,
     IterationStarted,
     ModelStepFinished,
@@ -665,7 +666,14 @@ class TraceRecorder:
         # judging the wrapper dropped nothing and every streamed fragment of a
         # child call landed on disk (37 rows, all scoped, in one real session).
         inner = event.event if isinstance(event, ScopedEvent) else event
-        if isinstance(inner, ToolChunk):
+        # Streamed fragments are a live-render signal, not history.  Both
+        # ``ToolChunk`` and ``CompactionDelta`` carry one small slice per token
+        # or per line; writing them to disk turned one compaction summary into
+        # 1,311 rows / 310 KB in a measured run, and the model then read that
+        # trace back into its own context -- a feedback loop that forced
+        # another compaction.  The live fold still receives them; the trace
+        # keeps the boundary events (CompactionStarted/Ended) that explain it.
+        if isinstance(inner, (ToolChunk, CompactionDelta)):
             return
         if not self._turn_open:
             if isinstance(event, IterationStarted) or self.last_path is None:

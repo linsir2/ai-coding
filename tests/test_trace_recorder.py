@@ -8,6 +8,9 @@ anyone noticing (docs/r4-analysis.md 4.2, P1).
 import json
 
 from ai_coding.core.events import (
+    CompactionDelta,
+    CompactionEnded,
+    CompactionStarted,
     ContextAssembled,
     Degraded,
     IterationStarted,
@@ -421,3 +424,24 @@ def test_a_sub_agents_turn_finishing_does_not_end_the_parent_turn(tmp_path):
     assert summary["steps"] == 2
     assert summary["prompt_tokens"] == 200
     assert summary["cached_tokens"] == 160
+
+
+def test_compaction_deltas_are_live_only_not_written_but_boundaries_are(tmp_path):
+    """R2-1: one summary is one row pair, not one row per streamed chunk.
+
+    A measured turn wrote 1,311 ``CompactionDelta`` rows / 310 KB for one
+    compaction, and a model that reads its own trace then fed that back into
+    its context.  The live fold still needs the deltas; the trace does not.
+    """
+    recorder, _ = _recorder(tmp_path)
+    recorder.on_event(CompactionStarted(reason="auto"))
+    recorder.on_event(CompactionDelta(text="## "))
+    recorder.on_event(CompactionDelta(text="目标"))
+    recorder.on_event(
+        CompactionEnded(reason="auto", before_messages=44, after_messages=6)
+    )
+
+    assert [line["evt"] for line in _lines(recorder)] == [
+        "CompactionStarted",
+        "CompactionEnded",
+    ]

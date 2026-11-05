@@ -1582,7 +1582,16 @@ class AgentLoop:
             # A list with items keeps its goal -- it names what the items are for.
             # 18 §10.5: nor does it change in plan mode — the goal topic belongs
             # to the planning axis and a new turn must not steal it.
-            session.task.goal = user_input
+            #
+            # R2-11: a substantive goal must not be replaced by a *follow-up*.
+            # A gate-feedback turn ("后端测试还没通过…FAILED …") used to become
+            # the goal verbatim, and the model then read its own old failure
+            # as current state -- after the test had already passed.  Only an
+            # empty/trivial goal is replaced; a real objective survives its
+            # corrections (they stay in the history, where they belong).
+            current_goal = str(getattr(session.task, "goal", "") or "").strip()
+            if not current_goal or len(current_goal) < 16:
+                session.task.goal = user_input
         task = session.task
         # C3: the continuation allowance is per user turn — a new message
         # starts with a fresh budget, not the previous turn's leftovers.

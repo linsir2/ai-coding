@@ -129,7 +129,12 @@ async def test_compact_now_replaces_the_stored_history_and_reports_it():
 
     report = await compactor.compact_now(session, timeout=5.0)
 
-    assert report == {"messages": 4, "after": 1, "removed": 3}
+    assert report == {
+        "messages": 4,
+        "after": 1,
+        "removed": 3,
+        "reason": "compacted",
+    }
     assert [m.content for m in session.messages] == ["compacted"]
     assert context.forced == [True], "the explicit path must force a page"
 
@@ -142,7 +147,12 @@ async def test_compact_now_leaves_the_session_alone_when_it_fails():
 
     report = await compactor.compact_now(session, timeout=5.0)
 
-    assert report == {"messages": 3, "after": 3, "removed": 0}
+    assert report == {
+        "messages": 3,
+        "after": 3,
+        "removed": 0,
+        "reason": "nothing_to_compact",
+    }
     assert session.messages == before
 
 
@@ -154,6 +164,7 @@ async def test_compact_now_is_a_no_op_for_an_empty_session_or_no_context():
         "messages": 0,
         "after": 0,
         "removed": 0,
+        "reason": "empty",
     }
 
     contextless, _ = _compactor(None)
@@ -162,6 +173,7 @@ async def test_compact_now_is_a_no_op_for_an_empty_session_or_no_context():
         "messages": 1,
         "after": 1,
         "removed": 0,
+        "reason": "no_context",
     }
 
 
@@ -276,4 +288,9 @@ async def test_compact_now_does_not_wait_forever_for_the_lock():
     finally:
         compactor._lock.release()  # type: ignore[attr-defined]
 
-    assert report == {"messages": 3, "after": 3, "removed": 0}
+    assert report == {
+        "messages": 3,
+        "after": 3,
+        "removed": 0,
+        "reason": "busy",
+    }

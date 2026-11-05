@@ -17,6 +17,7 @@ The rule these tests pin:
   full history the checkpoint already stands for.
 """
 
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -93,6 +94,30 @@ def test_without_a_provider_count_the_gate_uses_the_estimate():
     assert manager.should_compact(
         [ChatMessage(role="user", content="small", timestamp="")], observed_tokens=0
     ) is False
+
+
+def test_a_measured_saturation_needs_substantial_growth_to_reopen():
+    """R2-2: a 34k request in a 32k ceiling was compacted, then 35k -- a few
+    hundred tokens of new tool output -- reopened the gate on the next step.
+    The saturation is recorded in the *provider's* measure, so only real
+    growth buys another pass."""
+    manager = _manager()
+    manager._saturated_at_tokens = CEILING + 5_000
+    history = [ChatMessage(role="user", content="x" * 4_000, timestamp="")]
+
+    assert manager.should_compact(history, observed_tokens=CEILING + 5_500) is False
+    assert manager.should_compact(history, observed_tokens=CEILING + 8_000) is True
+
+
+def test_compress_if_needed_records_the_measured_size_as_saturation():
+    """The pass that opened on the provider count must record that count --
+    not the character estimate, which is a different unit."""
+    manager = _manager()
+    messages = [ChatMessage(role="user", content="x" * 200, timestamp="")]
+
+    asyncio.run(manager.compress_if_needed(messages, observed_tokens=CEILING + 1))
+    assert manager._saturated_at_tokens >= CEILING + 1
+    assert manager.should_compact(messages, observed_tokens=CEILING + 1) is False
 
 
 # ---- 2. the fallback counts the checkpoint, not the full history -----------

@@ -1026,7 +1026,7 @@ async def test_tasks_stop_kills_a_background_job_and_says_what_happened(tmp_path
     )
 
     assert action is REPLAction.CONTINUE
-    assert "killed" in _session_text(c)
+    assert "已停止" in _session_text(c)
     assert next(row for row in registry.list() if row.id == job.id).status == "killed"
 
 

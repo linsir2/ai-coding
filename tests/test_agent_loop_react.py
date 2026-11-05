@@ -1544,3 +1544,38 @@ async def test_a_successful_write_invalidates_read_evidence(tmp_path):
     await loop.process_input(session, "go")
 
     assert session.read_ledger[0].version == ""
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_does_not_replace_a_substantive_goal(tmp_path):
+    """R2-11: gate feedback used to become the goal verbatim, so the model read
+    its own old "tests fail" text as current state after they had passed."""
+    engine = ScriptedEngine([_text("ok"), _text("ok")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+    goal = "构建一个可运行的全栈项目 TaskFlow：后端 FastAPI，前端 React + TypeScript"
+
+    await loop.process_input(session, goal)
+    await loop.process_input(
+        session, "后端测试还没通过。请阅读下面的 pytest 输出，定位并修复。"
+    )
+
+    assert session.task is not None
+    assert session.task.goal == goal
+
+
+@pytest.mark.asyncio
+async def test_a_trivial_goal_is_still_replaced_by_the_first_real_task(tmp_path):
+    engine = ScriptedEngine([_text("ok"), _text("ok")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    session = sessions.create()
+
+    await loop.process_input(session, "你好")
+    await loop.process_input(
+        session, "构建一个可运行的全栈项目 TaskFlow：后端 FastAPI，前端 React"
+    )
+
+    assert session.task is not None
+    assert session.task.goal.startswith("构建一个可运行的全栈项目")

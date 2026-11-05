@@ -561,3 +561,43 @@ def test_a_successful_plan_update_resets_the_look_only_streak():
     books.note_outcomes([_outcome("update_plan")])
     assert books.search_streak == 0
     assert books.repeat_streak == 0
+
+
+def _read(offset: int, limit: int, path: str = "a.py") -> DispatchOutcome:
+    body = "\n".join(
+        f"{line:>6}  line {line}" for line in range(offset + 1, offset + limit + 1)
+    )
+    return _outcome(
+        "read",
+        output=body,
+        params={"path": path, "offset": offset, "limit": limit},
+    )
+
+
+def test_reopening_a_read_range_is_stale_not_a_new_finding():
+    """R2-12: 11 reads of the same file with shifting windows looked like 11
+    findings.  An overlapping range is the same evidence; pagination is not."""
+    books = TurnBooks()
+    books.note_outcomes([_read(0, 10)])  # lines 1-10: news
+    assert books.stale_streak == 0
+    assert books.novel_findings == 1
+
+    books.note_outcomes([_read(0, 10)])  # exact repeat
+    assert books.stale_streak == 1
+
+    books.note_outcomes([_read(2, 4)])  # 3-6 is inside 1-10
+    assert books.stale_streak == 2
+
+    books.note_outcomes([_read(10, 10)])  # 11-20: genuine pagination
+    assert books.stale_streak == 0
+    assert books.novel_findings >= 2
+
+
+def test_an_action_forgets_read_coverage_so_the_next_read_is_news():
+    books = TurnBooks()
+    books.note_outcomes([_read(0, 10), _read(0, 10)])
+    assert books.stale_streak == 1
+    books.note_outcomes([_outcome("edit", output="ok")])
+    books.note_outcomes([_read(0, 10)])
+    assert books.stale_streak == 0
+    assert books.novel_findings >= 2

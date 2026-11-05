@@ -1386,8 +1386,15 @@ class ContextManager:
             # The request fits again; a later growth may compact once more.
             self._saturated_at_tokens = 0
             return False
-        if self._saturated_at_tokens and tokens <= self._saturated_at_tokens:
-            return False
+        if self._saturated_at_tokens:
+            # The last pass already tried at this size.  Reopening on any small
+            # growth re-ran a summary (or a no-op) on nearly every iteration of
+            # a long turn; require new material large enough to be worth a pass.
+            # The margin only applies to a provider-measured size -- the
+            # estimate path has its own unit and its tests pin that behaviour.
+            margin = max(1_024, ceiling // 16) if observed_tokens > 0 else 0
+            if tokens <= self._saturated_at_tokens + margin:
+                return False
         return True
 
     def checkpoint_view(
@@ -1467,6 +1474,16 @@ class ContextManager:
             session=session,
             page=False,
         )
+        # Record the size of the request this pass tried to shrink, in the
+        # measure the next gate will use.  `compress` records the *character
+        # estimate* when nothing shrank; the gate compares the provider's
+        # observed count, so a 34k request could be "saturated at 20k" and
+        # reopen on every later iteration (measured: four no-op passes in a
+        # row, then a summary every other step).
+        if observed_tokens > 0:
+            self._saturated_at_tokens = max(
+                self._saturated_at_tokens, int(observed_tokens)
+            )
         target = int(self._max_context_tokens * self._compress_target_ratio)
         trimmed = out
         guard = 0

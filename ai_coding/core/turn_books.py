@@ -29,6 +29,7 @@ The accounting rules are the ones R6 measured and argued for, moved verbatim:
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -130,6 +131,11 @@ _SEVERITY_KEYWORDS: dict[int, tuple[str, ...]] = {
 }
 
 _FAILURE_EXCERPT = 160
+
+#: One line of ``read``'s numbered output: six right-aligned digits, two spaces,
+#: then the content.  The coverage check reads only the numbers, so a content
+#: line that happens to start with digits cannot widen a range on its own.
+_READ_NUMBERED = re.compile(r"^\s*(\d+)\s{2}")
 
 #: I1/R-7: retrieval tools whose output can be turned into a *finding* key.
 #: ``memory_search``/``history_search``/``websearch`` are deliberately absent:
@@ -315,6 +321,12 @@ class TurnBooks:
     stale_streak: int = 0
     repeated_nonempty: int = 0
     novel_findings: int = 0
+    #: I1/R-7 follow-up: line ranges already read from each path this turn.
+    #: ``read`` keys include the output digest, so re-reading the *same file*
+    #: with a slightly different window looked like a brand-new finding --
+    #: measured: 11 reads of ``tasks.py`` in a row, no action, no nudge.  A
+    #: contained/overlapping range is the same evidence, not news.
+    read_coverage: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
     #: B1: the harness ran the configured static checks for this turn.  Once per
     #: turn, because a re-fired L2 must not start mypy again.
     static_check_ran: bool = False
@@ -554,8 +566,42 @@ class TurnBooks:
     def _clear_findings(self) -> None:
         """Forget the evidence seen so far (an action, or the user steering)."""
         self.seen_findings.clear()
+        self.read_coverage.clear()
         self.stale_streak = 0
         self.repeated_nonempty = 0
+
+    def _note_read_overlap(self, item: DispatchOutcome) -> bool:
+        """True when this read only re-returns lines already seen this turn.
+
+        Pagination is news (a new, disjoint range); reopening the same page --
+        or a sub-range inside it -- is not.  Overlap is judged on the line
+        numbers the tool printed, so no tool-specific state is needed.
+        """
+        params = item.call.params
+        path = str(params.get("path", "") or "")
+        if not path:
+            return False
+        numbers = [
+            int(match.group(1))
+            for line in (item.result.output or "").splitlines()
+            if (match := _READ_NUMBERED.match(line))
+        ]
+        if not numbers:
+            return False
+        start, end = min(numbers), max(numbers)
+        ranges = self.read_coverage.setdefault(path, [])
+        for seen_start, seen_end in ranges:
+            overlap = min(seen_end, end) - max(seen_start, start) + 1
+            asked = max(1, end - start + 1)
+            if overlap / asked >= 0.5:
+                self.stale_streak += 1
+                if _has_payload(item.result.output or ""):
+                    self.repeated_nonempty += 1
+                return True
+        ranges.append((start, end))
+        if len(ranges) > 32:
+            ranges.pop(0)
+        return False
 
     def _note_finding(self, item: DispatchOutcome) -> None:
         """Count one successful look as news or as the same old evidence."""
@@ -565,6 +611,8 @@ class TurnBooks:
             # harness bookkeeping.  Neutral: neither novel nor stale.
             return
         output = item.result.output or ""
+        if name == "read" and self._note_read_overlap(item):
+            return
         key = _finding_key(name, item.call.params, output)
         if key is None:
             return
