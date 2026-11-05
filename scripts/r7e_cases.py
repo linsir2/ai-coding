@@ -254,7 +254,6 @@ async def case_subagent_task_only_has_a_clean_window(root: Path) -> tuple[bool, 
         "只做这一件事",
         parent=ParentContext(
             messages=(ChatMessage(role="user", content="parent-said-this", timestamp="t"),),
-            instructions="PARENT",
         ),
     )
     contents = [m.content or "" for m in engine.requests[0]["messages"]]
@@ -283,22 +282,20 @@ async def case_subagent_full_still_inherits_the_parent(root: Path) -> tuple[bool
         "接着做",
         parent=ParentContext(
             messages=(ChatMessage(role="user", content="parent-said-this", timestamp="t"),),
-            instructions="PARENT",
         ),
     )
     contents = [m.content or "" for m in engine.requests[0]["messages"]]
     ok = (
         any("parent-said-this" in c for c in contents)
-        # 13 §2.3: the parent's prompt plus the methods section (shared).
-        and engine.requests[0]["instructions"].startswith("PARENT")
-        and "<methods>" in engine.requests[0]["instructions"]
+        # r25/v2: the child rebuilds its own prompt; no parent text is inherited.
+        and "PARENT" not in (engine.requests[0]["instructions"] or "")
     )
     visible = any("parent-said-this" in c for c in contents)
     return ok, f"mode={runner.context_mode} parent_visible={visible}"
 
 
 async def case_intervention_ladder_is_visible(root: Path) -> tuple[bool, str]:
-    """13 §2.1/§2.2 end to end: L1 nudge → L2 armed refusal → ask, persisted.
+    """13 §2.1/§2.2 end to end: L1 nudge → L2 reminder → ask, persisted.
 
     A real ``AgentLoop`` + real dispatcher + a scripted engine that keeps asking
     for the same failing call.  The interesting moment is the 4th identical
