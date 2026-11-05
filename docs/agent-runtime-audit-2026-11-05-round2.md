@@ -171,11 +171,31 @@
 
 全量：`.venv/bin/python -m pytest -q` 通过（0 failed；仅 8 条按环境跳过的 live/stdio 用例）。
 
+### 4.1 修复后的真机复验（2026-11-05 20:10）
+
+同一模型、同一配置、同一驱动，只换新工作区。
+
+| 项 | 修复前 | 修复后 | 结论 |
+|---|---|---|---|
+| R2-1 trace 体积 | Skill turn-2：1427 行 / 310,594 B，`CompactionDelta` 1311 条 | 同任务：131 行 / 72,803 B，`CompactionDelta` 0 条 | 已修复 |
+| R2-2 压缩次数 | Skill turn-2：8 次 Started，含 `before==after` 空压缩 | 6 次 Started，全部真实收缩（26→10、36→20、38→4、44→10、47→5） | **部分修复**：空压缩消失，但读大 JSON 仍会触发 |
+| R2-2 回合结果 | Skill turn-2 300s 超时，无产物 | Skill turn-2 仍 300s 超时，但**产出了 `skill-diagnosis.md`（3.5KB）** | 部分改善 |
+| R2-11 目标陈旧 | goal = `后端测试还没通过…FAILED…` | goal = `构建可运行的 TaskFlow 全栈任务管理系统：后端 FastAPI+SQLite…` | 已修复 |
+| R2-12 重复读取 | Fullstack 一轮 38 迭代 / 46 次调用，同一处读 7 次，149 万 prompt tokens | Fullstack 两轮共 48 次调用，同一处最多 3 次；**第 2 轮 TASK COMPLETE（455s）** | 已修复 |
+| 长任务最终门禁 | 卡死，前端目录为空 | 后端 `8 passed`、前端 `npm run build` 成功（独立复跑确认） | 门禁通过 |
+
+**但发现一个新的（既有）问题**：这次 `TASK COMPLETE` 是**假阳性** ——
+`frontend/src/App.tsx` 仍是 Vite 脚手架原文（`Get started` / 计数器），
+列表、看板、表单、统计一个都没实现；`npm run build` 能通过只是因为脚手架
+本来就能 build。这与 `eval-05-fullstack-task.md` §4.1 记录的
+“门通过 ≠ 任务完成”是同一个根因：验收项没填，门只校验可机器判定的副产物。
+本轮把它记为 **R2-14**，方案见剩余问题文档。
+
 ## 5. 待补/未验证
 
 - `network=proxy` 白名单模式、`read_deny_paths`（如 `~/.ssh`）未在本轮覆盖。
 - MCP remote / OAuth 未覆盖。
-- Fullstack 最终门禁（后端 pytest、前端 build、README、双服务启动）需在修复后复跑。
-- R2-3～R2-10 尚未修复：沙箱 `/tmp` 假成功、`tool_search` 误审批、job 工具延迟、
-  MCP 进度回调、npx server 卡 connecting、内置工具面成本、SIGPIPE 误报。
+- README 仍未生成（同 R2-14：门不检查文档交付）。
+- R2-3～R2-10、R2-2 残余与 R2-14 的修改方案见
+  [剩余问题修改方案](agent-runtime-remaining-issues-plan-2026-11-05.md)。
 - 子智能体 worktree 隔离 + `merge_agent` 未覆盖（本轮显式关闭隔离）。
