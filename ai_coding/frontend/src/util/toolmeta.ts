@@ -193,8 +193,11 @@ const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
   busy: { label: "合并队列忙", tone: "denied" },
   journal_failed: { label: "合并日志写入失败", tone: "failed" },
   unavailable: { label: "合并不可用", tone: "failed" },
-  merge_skipped: { label: "无需合并", tone: "failed" },
-  nothing_to_merge: { label: "无内容可合并", tone: "failed" },
+  // ``merge_skipped`` is a successful no-op (there was nothing to merge); it is
+  // not breakage.  The card's only non-failure tone is ``denied`` (⊘), which is
+  // closer to "nothing happened" than the red ✗.
+  merge_skipped: { label: "无需合并", tone: "denied" },
+  nothing_to_merge: { label: "无内容可合并", tone: "denied" },
   invalid_ref: { label: "无效的引用或分支", tone: "denied" },
 }
 

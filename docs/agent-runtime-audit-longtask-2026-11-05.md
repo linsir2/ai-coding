@@ -64,83 +64,91 @@
 | 影响 | 模型以为已开始；计划卡显示 pending；同时 `started_seq` 已在 add 时设定，进一步触发 P0-1 |
 | 建议 | 二选一：add 接受 `in_progress`（其余拒绝），或对 add 携带 `status` 给出可操作错误；schema 按 action 拆分 required/allowed |
 
-### P1-1 `write` 覆盖已存在文件必须先 `read`
+### P1-1 `write` 覆盖已存在文件必须先 `read`（已修复提示）
 
 | 项 | 内容 |
 |---|---|
+| 状态 | **已修复提示**：`write`/`edit` 共用 `tools/stale_read.py`；提示现在明确"先读，或新文件无需读，编辑用 edit" |
 | 症状 | `write exists.txt` → `cannot write ... you must read the file first (stale-read protection)` |
 | 证据 | `/tmp/aic-audit/friction.py` write_existing |
 | 根因 | 明确的 stale-read 保护（[write_tool.py](file:///workspace/ai-coding/ai_coding/tools/write_tool.py#L160-L176)） |
 | 影响 | 长任务/重启/resume/子代理中，模型常直接整文件覆盖；每次被拒要重读一轮。压缩后模型看不到旧内容，更容易触发 |
 | 建议 | 保留保护，但把提示改成"先 read 或改用 edit"；对"文件在上一轮已读过、只是被压缩"的情况，可在提示里带文件版本与行数 |
 
-### P1-2 `edit/write` 在 bash 或外部改动后要求重读
+### P1-2 `edit/write` 在 bash 或外部改动后要求重读（已修复提示）
 
 | 项 | 内容 |
 |---|---|
+| 状态 | **已修复提示**：共用 `stale_message`，明确"上下文里的副本是旧版本"，并保留 `stale_read` 码 |
 | 症状 | `read f.txt` → `bash: echo changed > f.txt` → `edit f.txt` → `file has been modified externally; re-read it first` |
 | 证据 | `/tmp/aic-audit/friction.py` stale_read |
 | 根因 | 文件版本（`mtime:size:inode`）与读账本不一致即拒绝（[edit_tool.py](file:///workspace/ai-coding/ai_coding/tools/edit_tool.py#L180-L189)、[write_tool.py](file:///workspace/ai-coding/ai_coding/tools/write_tool.py#L167-L176)） |
 | 影响 | 后台 job / bash 写文件是长任务常态；每个此类改动都会让后续 edit 失败一次 |
 | 建议 | 安全语义不变；可以自动在工具结果里附带"当前文件前 N 行/版本"，减少一次往返。若 `old_string` 仍唯一命中，可考虑允许并提示，但不建议默认放开 |
 
-### P1-3 文件工具不能写 `process_sandbox.writable_paths`（如 `~/.cache`）
+### P1-3 文件工具不能写 `process_sandbox.writable_paths`（如 `~/.cache`）（已修复提示）
 
 | 项 | 内容 |
 |---|---|
+| 状态 | **已修复提示**：`SandboxViolation` 对 cache 路径追加"缓存已重定向到 `<ws>/.ai-coding/cache`，写到那里"；不扩大文件工具边界 |
 | 症状 | `write ~/.cache/x` 被拒（工作区外，需要授权）；进程层按配置会把 `writable_paths` 绑定为可写（本机无 bwrap，未实测） |
 | 证据 | [config/models.py](file:///workspace/ai-coding/ai_coding/config/models.py#L248-L256)（`writable_paths` 只描述进程层）；[sandbox.py](file:///workspace/ai-coding/ai_coding/security/sandbox.py#L65-L68)（文件工具根 = workspace + extra roots）；[world.py](file:///workspace/ai-coding/ai_coding/server/world.py#L221-L225) |
 | 影响 | 用户说的"写缓存被拒"：进程层可写、write 不能写，模型会反复试 `write` 到缓存目录 |
 | 建议 | 二选一：把 `writable_paths` 同步进 `Sandbox.extra_roots`（注意与 read denylist 的重叠），或在 `write` 的拒绝提示里明确"缓存请用 bash 或 `<ws>/.ai-coding/cache`" |
 
-### P1-4 默认 `enforce` + 无 `bwrap` ⇒ 所有 bash `sandbox_unavailable`
+### P1-4 默认 `enforce` + 无 `bwrap` ⇒ 所有 bash `sandbox_unavailable`（已修复诊断）
 
 | 项 | 内容 |
 |---|---|
+| 状态 | **已修复**：`build_process_sandbox` 在 enforce 且机制不可用时打一条 warning，点名原因与两个出口（装 bwrap / 改 warn） |
 | 症状 | `bash echo hello` → `error: sandbox.backend.missing`，`error` 码为 `sandbox_unavailable`；`write` 正常 |
 | 证据 | `/tmp/aic-audit/focused.py` case_sandbox_enforce；[jobs.py](file:///workspace/ai-coding/ai_coding/core/jobs.py#L295-L344)、[bash_tool.py](file:///workspace/ai-coding/ai_coding/tools/bash_tool.py#L619-L629) |
 | 影响 | 在无 bwrap/无 user namespace 的机器上，安装、下载、curl、git 全部不可用；用户观感就是"工具全被拒" |
 | 建议 | `config init` / 启动时探测 bwrap 并给出一次性明确诊断（"bash 将被拒绝，因…；设 `process_sandbox.mode: warn` 或安装 bwrap"）；当前只有配置注释说明 |
 
-### P1-5 `write/edit/bash` 默认 WARN，拒绝一次就是工具失败
+### P1-5 `write/edit/bash` 默认 WARN，拒绝一次就是工具失败（已修复配置项）
 
 | 项 | 内容 |
 |---|---|
+| 状态 | **已修复**：新增 `security.auto_approve_tools`（用户层配置，默认空）；命中时走 standing ALLOW，红线/显式 deny 仍优先；项目层被过滤，不能自我授权 |
 | 症状 | 审批回调返回 NO 时，bash 与 write 都返回 `not_approved` / "用户未批准这次调用" |
 | 证据 | `/tmp/aic-audit/run_audit.py` S3；[permission_gate.py](file:///workspace/ai-coding/ai_coding/security/permission_gate.py#L1-L8) |
 | 影响 | 长任务里模型连续写文件/跑命令，审批面板频繁出现；漏点、超时或误拒都会被模型读成"工具坏了" |
 | 建议 | 产品层提供"本次任务内一律允许 write/edit/bash"的一键授权；面板显示"还剩 N 个同类请求"，避免逐个点 |
 
-### P1-6 `max_context_tokens` 低于固定开销时会反复压缩
+### P1-6 `max_context_tokens` 低于固定开销时会反复压缩（已修复）
 
 | 项 | 内容 |
 |---|---|
+| 状态 | **已修复**：`ContextManager` 记录"压缩后没有实质变短"的输入规模；`should_compact` 在该规模以下不再重开，直到历史继续增长（滞回） |
 | 症状 | 把 `ai.max_context_tokens` 设成 3000（低于 system prompt + 工具 schema 的固定开销）后，第一轮 3 分钟仍未结束；工作区在几分钟内出现 3 个 `summary_*.txt`，进程持续做压缩 |
 | 证据 | `/tmp/aic-live/compact.log`；进程被手动停止；同样任务在 `max_context_tokens=0`、`max_messages=12` 下压缩 40→3、正常完成（`/tmp/aic-live/diag.log`） |
 | 根因 | 预算按"整个请求"估算，固定开销已超过预算，`_should_run` 每步都为真；启动日志只有一条 warning（"far below model's declared window"），不会拒绝该配置 |
 | 影响 | 用户把预算调小以"省上下文"时，反而进入压缩抖动：极慢、频繁摘要、上下文反复重写 |
 | 建议 | 启动时计算固定开销下限：低于它直接拒绝或自动抬到下限并明确提示；压缩后若"压缩前后 token 几乎不降"应短路并告警 |
 
-### P2-1 两次完成失败后条目变 `blocked`
+### P2-1 两次完成失败后条目变 `blocked`（已修复提示）
 
+- 状态：**已修复提示**：错误文案明确"仍可补回执后再次完成"，`data.recoverable=True`；状态机不变。
 - 症状：无回执的条目第二次 `completed` 后返回 `completion_blocked`，状态置 `blocked`。
 - 证据：`/tmp/aic-audit/focused.py` case_two_failures_blocked；补写文件后仍可完成。
 - 影响：模型看到 `blocked` 可能放弃该条目；实际上它是可恢复的。建议提示里明确"补回执后仍可完成"，或不要改状态、只累计计数。
 
-### P2-2 前端：`merge_skipped` 的 tone 与成功语义不一致
+### P2-2 前端：`merge_skipped` 的 tone 与成功语义不一致（已修复）
 
-- `MergeAgentTool` 把 `merge_skipped` 视为成功（`_SUCCESS`），但
+- 状态：**已修复**：`merge_skipped`/`nothing_to_merge` 改为 `denied` 色调（⊘），不再画成红色失败。
+- 原问题：`MergeAgentTool` 把 `merge_skipped` 视为成功（`_SUCCESS`），但
   [toolmeta.ts](file:///workspace/ai-coding/ai_coding/frontend/src/util/toolmeta.ts) 的
-  `FAILURES` 把它标成 `failed`。成功路径不会读该表，但 `/tasks` 或异常路径若按状态渲染，
-  可能显示为失败。建议统一为中性色。
+  `FAILURES` 把它标成 `failed`。
 
-### P2-3 手动压缩可能"什么都没做"且没有可见原因
+### P2-3 手动压缩可能"什么都没做"且没有可见原因（已修复）
 
-- 第一轮真机（32 条消息，`max_messages=30`）`compact_session` 返回
-  `removed=0`，headless 驱动里看不到原因；日志层只在 `_summary_attempted()` 时打
-  warning。诊断轮在 `max_messages=12` 下正常压缩 40→3。
-- 建议：`removed=0` 时在 UI/命令结果里明确区分"无需压缩 / 摘要失败超时 / 预算未超"，
-  而不是返回一个看起来成功的空报告。
+- 状态：**已修复**：`compact_now` 报告新增 `reason`（`compacted` /
+  `nothing_to_compact` / `summary_failed` / `busy` / `empty` / `no_context` /
+  `error`），`/compact` 对非成功原因打印一行中文说明。
+- 原问题：第一轮真机（32 条消息，`max_messages=30`）`compact_session` 返回
+  `removed=0`，headless 驱动里看不到原因；诊断轮在 `max_messages=12` 下正常压缩
+  40→3。
 
 ## 3. 真机结果（qwen3.7-flash）
 
@@ -180,12 +188,20 @@
    批量/会话级批准"，否则会被用户感知为"一直拒绝"。
 4. `merge_skipped` 色调与成功语义不一致（P2-2）。
 
-## 5. 建议的修复顺序
+## 5. 修复状态
 
-1. ~~**P0-1 / P0-2**~~：已完成（`CompletionGate.receipt_floor` + add 状态契约，
-   回归用例 + 真机复验）。
-2. **P1-6**：拒绝/抬升低于固定开销的 `max_context_tokens`，避免压缩抖动。
-3. **P1-3**：统一文件工具与进程层的可写面，或在错误里给出明确替代路径。
-4. **P1-4 / P1-5**：启动诊断 + 会话级授权，直接降低"全被拒"的观感。
-5. **P1-1 / P1-2 / P2-1 / P2-3**：只改提示与恢复路径，不动安全语义。
-6. 真机补跑：bwrap + TUI 的审批/压缩矩阵（本机无 bwrap/tmux）。
+| 项 | 状态 |
+|---|---|
+| P0-1 完成回执下界 | 已修复 + 用例 + 真机复验 |
+| P0-2 add 状态契约 | 已修复 + 用例 |
+| P1-1 / P1-2 stale-read 提示 | 已修复提示（安全语义不变） |
+| P1-3 缓存路径提示 | 已修复提示（不扩大文件工具边界） |
+| P1-4 enforce 无 bwrap 诊断 | 已修复（启动 warning） |
+| P1-5 逐次审批 | 已修复（`security.auto_approve_tools`，项目层不可授予） |
+| P1-6 低预算压缩抖动 | 已修复（滞回，不再每步重压） |
+| P2-1 blocked 可恢复提示 | 已修复提示 |
+| P2-2 merge_skipped 色调 | 已修复 |
+| P2-3 压缩 no-op 原因 | 已修复（`reason` + 命令输出） |
+
+**仍未验证**：bwrap 下的网络墙/`writable_paths`、交互式 TUI 的审批面板与
+"working" 状态（本机无 bwrap/tmux）。
