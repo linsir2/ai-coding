@@ -14,7 +14,8 @@
    `process_sandbox.mode=warn`（本机无 bwrap），AutoApprove；覆盖 3 轮、23 次工具
    调用，另做一次强制压缩诊断。
 
-前端只跑了 `bun test` + `tsc`，没有交互式 TUI，**视觉/交互问题未能真机验证**。
+前端只跑了 `bun test` + `tsc`，另外在安装 `tmux` 后做了真实 TUI 验证
+（`bwrap`/`tmux` 起初缺失，后补装：bubblewrap 0.9.0、tmux 3.4）。
 
 复现脚本（未入库）：`/tmp/aic-audit/*.py`、`/tmp/aic-live/*.py`；证据 JSON 与日志
 在同目录。
@@ -203,5 +204,49 @@
 | P2-2 merge_skipped 色调 | 已修复 |
 | P2-3 压缩 no-op 原因 | 已修复（`reason` + 命令输出） |
 
-**仍未验证**：bwrap 下的网络墙/`writable_paths`、交互式 TUI 的审批面板与
-"working" 状态（本机无 bwrap/tmux）。
+**仍未验证**：鼠标拖选复制（tmux 无法注入鼠标选区；无选区 Ctrl+C 已验）。
+
+## 6. 安装 bwrap/tmux 后的真实复验
+
+环境：Ubuntu 24.04，`bubblewrap 0.9.0`、`tmux 3.4`；bwrap 选中 `no-proc` 层
+（`--proc` + `--unshare-pid` 在当前 host 不可用）。
+
+### 6.1 沙箱矩阵（enforce + network deny）
+
+| 场景 | 结果 |
+|---|---|
+| 工作区内 `bash: echo hi > ok.txt` | 成功 |
+| `bash` 写 `~/.cache/...` | 成功（`writable_paths` 默认 `~/.cache`） |
+| `curl https://example.com`（deny） | 失败，提示"不是主机 DNS 故障，需要 `network_permissions=inherit`" |
+| 同一 curl + `network_permissions="inherit"` | 成功，`577 dl2.html` |
+| `write` 工具写 `~/.cache/...` | `sandbox_violation`，提示缓存重定向到 `<ws>/.ai-coding/cache` |
+
+`tests/test_process_sandbox.py` 全量通过（真实 bwrap 用例不再 skip）。
+
+### 6.2 新发现并修复：kill 不能结束 no-proc job 的子进程
+
+- 症状：真实 bwrap 下运行 `test_a_sandboxed_background_job_can_be_killed` 失败
+  （`7 == 2`）：面板已报停止，沙箱内 shell 仍在写 heartbeat。
+- 根因：`no-proc` 层没有 `--unshare-pid`，且 `--new-session` 让 shell 离开
+  原进程组，`killpg(job.pid)` 打不到它。
+- 修复：`JobRegistry.kill` 先按 `/proc/*/status` 的 PPid 收集后代，再依次
+  SIGTERM/SIGKILL（`core/jobs.py` 的 `_descendants` / `_signal_tree`）；新增
+  `test_descendants_walks_the_proc_ppid_tree`。修复后该用例通过。
+
+### 6.3 交互式 TUI（tmux）
+
+| 场景 | 结果 |
+|---|---|
+| 写文件触发审批 | 面板显示"△ Permission required / 写入文件 · 路径 / Allow once · Always allow · Reject · Stop this turn" |
+| 按 `a`（Always allow） | 写入执行，随后 read 返回 `hello`，最终答复正确 |
+| 长命令运行中 | 状态栏显示 `Working…`，工具卡显示 `正在运行命令`；结束后回到 `Ask anything…` |
+| 运行中按 Esc | 当前 turn 结束并回到输入框；后台 job 继续运行，完成通知随后到达（符合"Esc 只取消当前 turn"） |
+| 无选区 Ctrl+C | 退出 TUI，无残留进程 |
+| 鼠标拖选复制 | 无法在 tmux 中注入选区，未自动验证 |
+
+### 6.4 新 UI 观察（P2-4，未修）
+
+- 审批面板出现时，工具卡已显示"正在运行命令"（Spinner）。实际命令尚未获批、
+  也未启动。建议把"等待审批"作为独立状态（或暂停 Spinner），否则用户会以为
+  命令已经在跑。
+
