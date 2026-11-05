@@ -1224,6 +1224,14 @@ class AgentLoop:
                     pinned=(self._current_instruction,) if self._current_instruction else (),
                 )
                 previous_request = assembled.previous_request
+                if assembled.compacted:
+                    # R3-2: the summary that just replaced the history may have
+                    # taken every earlier tool result with it.  A duplicate-call
+                    # refusal after that names a call the model cannot see and
+                    # blocks the only way forward (measured: 3 in a row, 24s
+                    # after a 610 -> 72 compaction).  Start the books over with
+                    # the request that changed them.
+                    self.dispatcher.guards.reset()
 
                 # The one wait that cannot degrade: a model step either answers or
                 # the turn ends (docs/r2-analysis.md §7.3).  The single exception

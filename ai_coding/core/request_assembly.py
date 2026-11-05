@@ -274,6 +274,10 @@ class Assembled:
     request: list[ChatMessage]
     #: The canonical form of this request, which the next iteration compares against.
     previous_request: str
+    #: R3-2: a new summary replaced the history in this iteration (not merely a
+    #: checkpoint view applied again).  Guard books from before it describe
+    #: results the model may no longer be able to see.
+    compacted: bool = False
 
 
 class RequestAssembler:
@@ -582,6 +586,11 @@ class RequestAssembler:
             instructions=instructions,
             request=request,
             previous_request=canonical,
+            # R3-2: a *new* summary was installed for this request (a checkpoint
+            # view is not one -- it is the same summary applied again).  The
+            # loop uses this to forget duplicate-call books whose results the
+            # model can no longer see.
+            compacted=announce,
         )
 
     # ---- helpers (M2) -------------------------------------------------------

@@ -1628,3 +1628,71 @@ async def test_a_repeated_read_inside_one_turn_does_not_send_the_same_lines(tmp_
     # read must honour it instead of pointing forever (18 in a row live).
     assert "未返回正文" not in results[2]
     assert '"n":1' in results[2]
+
+
+@pytest.mark.asyncio
+async def test_a_new_compaction_resets_the_duplicate_guard_books(tmp_path, monkeypatch):
+    """R3-2: guard state outlives the results it names.
+
+    Live (turn-7): a 610 -> 72 compaction ran, and 24 seconds later three
+    identical bash calls were refused with "reuse the earlier result (call …)"
+    -- a call the model could no longer see.  A new summary must start the
+    duplicate books over; a checkpoint *view* (the same summary applied again)
+    must not, or the guard would be useless for the rest of the turn.
+    """
+    from ai_coding.core.request_assembly import Assembled
+
+    engine = ScriptedEngine([_text("ok")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    resets: list[int] = []
+    monkeypatch.setattr(loop.dispatcher.guards, "reset", lambda: resets.append(1))
+    real = loop.assembler.assemble
+
+    async def _compacted(**kwargs):
+        out = await real(**kwargs)
+        return Assembled(
+            history=out.history,
+            instructions=out.instructions,
+            request=out.request,
+            previous_request=out.previous_request,
+            compacted=True,
+        )
+
+    monkeypatch.setattr(loop.assembler, "assemble", _compacted)
+    session = sessions.create()
+
+    await loop.process_input(session, "hi")
+
+    assert len(resets) == 2, "turn start plus the compacted request"
+
+
+@pytest.mark.asyncio
+async def test_a_checkpoint_view_does_not_reset_the_duplicate_guard_books(
+    tmp_path, monkeypatch
+):
+    from ai_coding.core.request_assembly import Assembled
+
+    engine = ScriptedEngine([_text("ok")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions)
+    resets: list[int] = []
+    monkeypatch.setattr(loop.dispatcher.guards, "reset", lambda: resets.append(1))
+    real = loop.assembler.assemble
+
+    async def _view(**kwargs):
+        out = await real(**kwargs)
+        return Assembled(
+            history=out.history,
+            instructions=out.instructions,
+            request=out.request,
+            previous_request=out.previous_request,
+            compacted=False,
+        )
+
+    monkeypatch.setattr(loop.assembler, "assemble", _view)
+    session = sessions.create()
+
+    await loop.process_input(session, "hi")
+
+    assert len(resets) == 1, "only the turn-start reset"
