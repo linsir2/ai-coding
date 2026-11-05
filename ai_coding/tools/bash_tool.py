@@ -34,7 +34,7 @@ from ai_coding.security.process_sandbox import (
     spawn_argv,
 )
 from ai_coding.security.sandbox import Sandbox
-from ai_coding.shell_parse import effect_path_candidates
+from ai_coding.shell_parse import command_views, effect_path_candidates
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 _DEFAULT_TIMEOUT = 60
@@ -43,6 +43,14 @@ _DEFAULT_MAX_OUTPUT = 50_000
 #: environment failure, not a human or gate refusal -- "denied" read as "someone
 #: said no", and the UI drew it struck through as if permission had been refused.
 SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+
+#: Directories a sandboxed command gets as a fresh tmpfs (see
+#: ``process_sandbox._CONSTRUCTION_TIERS``).  A redirect here is private to the
+#: one call, so a success is not evidence the file exists for anyone else.
+_TMPFS_DIRS = ("/tmp", "/var/tmp", "/dev/shm")
+
+#: What a command sees when it asks for the process table in the no-proc tier.
+_NO_PROC_RE = re.compile(r"mount -t proc|/proc: No such file", re.IGNORECASE)
 # Per-call widening ceiling: the model may raise a slow command's timeout up to
 # this (see `timeout_seconds` in the schema), but never past it.  It lines up
 # with the turn wall clock (`ai.turn_timeout_seconds`, 600) and the sub-agent
@@ -462,6 +470,83 @@ class BashTool(BaseTool):
             "也不要把 /tmp 当作可复用的 HOME。"
         )
 
+    def _no_proc_note(self, output: str) -> str | None:
+        """Point the model at ``job_list`` when ``ps`` cannot work.
+
+        The ``no-proc`` construction tier mounts ``--tmpfs /proc`` (it is the
+        only way to hide host pids without a pid namespace).  A command that
+        asks the kernel for the process table therefore fails with
+        ``Error, do this: mount -t proc proc /proc`` -- measured in the R2-5
+        run, where the model spent two steps on ``ps aux`` before finding
+        ``tool_search``.
+        """
+        tier = str(getattr(self._backend, "tier", "") or "")
+        if tier != "no-proc":
+            return None
+        if not _NO_PROC_RE.search(output or ""):
+            return None
+        return (
+            "[sandbox] 这个沙箱没有 /proc（no-proc 层），ps/top/pgrep 不可用。"
+            "查看/停止后台任务请用 job_list / job_kill（若还没加载，先 "
+            'tool_search("job") 一次）。'
+        )
+
+    def _sandbox_private_tmp_note(self, command: str, workspace: str) -> str | None:
+        """Say when a redirection lands in a directory the sandbox replaces.
+
+        ``--tmpfs /tmp`` gives every sandboxed command a private ``/tmp``: the
+        write really succeeds *inside* that call and leaves nothing on the host,
+        and the next call gets a fresh one.  Measured (R2-3): two independent
+        runs wrote ``/tmp/...`` with ``rc=0`` while the host file never existed,
+        and the model concluded "the file boundary did not stop it".
+
+        Only ``enforce`` is judged: that is the mode where the wrap is
+        guaranteed, and a note about a wall that is not there would be worse
+        than no note.  The check reads redirection targets from the shell
+        grammar, so ``> out.txt`` (inside) is never confused with ``> /tmp/x``.
+        """
+        policy = self._policy
+        if policy is None or policy.mode != "enforce":
+            return None
+        if self._backend is None:
+            return None
+        targets: list[str] = []
+        for view in command_views(command):
+            targets.extend(view.redirects)
+        if not targets:
+            return None
+        base = Path(workspace or ".").expanduser()
+        try:
+            base = base.resolve()
+        except OSError:
+            pass
+        roots = [base, *self._snapshot_roots()]
+        private: list[str] = []
+        for raw in targets:
+            target = raw.strip().strip("'\"")
+            # ``2>&1`` / ``>&2`` name descriptors, not paths.
+            if not target or target.startswith("&") or target in ("/dev/null", "/dev/stdout"):
+                continue
+            path = Path(target).expanduser()
+            if not path.is_absolute():
+                path = base / path
+            try:
+                path = path.resolve()
+            except OSError:
+                continue
+            if any(path == root or root in path.parents for root in roots):
+                continue
+            if any(str(path) == d or str(path).startswith(d + "/") for d in _TMPFS_DIRS):
+                private.append(str(path))
+        if not private:
+            return None
+        shown = "、".join(private[:3]) + (" 等" if len(private) > 3 else "")
+        return (
+            f"[sandbox] /tmp 是沙箱私有层（--tmpfs /tmp）：{shown} 的写入只存在于"
+            "本次调用，宿主看不到，下一次 bash 也不会保留。需要跨调用持久化的文件"
+            "请写到工作区（例如 .ai-coding/tmp/）。"
+        )
+
     @property
     def params_json_schema(self) -> dict[str, Any]:
         return {
@@ -633,7 +718,8 @@ class BashTool(BaseTool):
             f"You will be notified when it finishes -- do not poll and do "
             f"not sleep waiting for it; keep working on independent steps. "
             f"Its output streams to: {job.log_path}; inspect it with job_output "
-            f"{job.id}, stop it with job_kill."
+            f"{job.id}, stop it with job_kill. If job_* is not loaded yet, call "
+            f'tool_search("job") once -- it is a deferred tool.'
         )
         data: dict[str, Any] = {"job_id": job.id, "pid": job.pid, "log": job.log_path}
         if network_mode in ("deny", "proxy"):
@@ -733,7 +819,16 @@ class BashTool(BaseTool):
             # The result is in hand and the model's answer is about to be built;
             # a record of a command that already answered would be litter.
             registry.discard(job.id)
-            return self._settled_result(job, text, size, effective, duration, command, network)
+            return self._settled_result(
+                job,
+                text,
+                size,
+                effective,
+                duration,
+                command,
+                network,
+                self._workspace_dir(ctx) or "",
+            )
         # Promotion: the pump keeps reading, because the model may still be
         # watching this command in the UI when it finally ends.
         settlement.enable_async()
@@ -766,6 +861,7 @@ class BashTool(BaseTool):
         duration: float,
         command: str = "",
         network: str | None = None,
+        workspace: str = "",
     ) -> ToolResult:
         """Project a finished job into the ToolResult the model has always seen."""
         output = text
@@ -791,6 +887,14 @@ class BashTool(BaseTool):
         if filesystem_note is not None:
             output = f"{output}\n\n{filesystem_note}" if output else filesystem_note
             data["sandbox_filesystem"] = True
+        private_tmp_note = self._sandbox_private_tmp_note(command, workspace)
+        if private_tmp_note is not None:
+            output = f"{output}\n\n{private_tmp_note}" if output else private_tmp_note
+            data["sandbox_private_tmp"] = True
+        no_proc_note = self._no_proc_note(output)
+        if no_proc_note is not None:
+            output = f"{output}\n\n{no_proc_note}" if output else no_proc_note
+            data["sandbox_no_proc"] = True
         if job.stop_reason:
             cancelled = "cancelled" in job.stop_reason or "停止" in job.stop_reason
             return ToolResult(
@@ -1068,6 +1172,16 @@ class BashTool(BaseTool):
         if lifecycle is not None:
             output = f"{output}\n\n{lifecycle}" if output else lifecycle
             data["foreground_child_reaped"] = True
+        private_tmp_note = self._sandbox_private_tmp_note(
+            command, self._workspace_dir(ctx) or ""
+        )
+        if private_tmp_note is not None:
+            output = f"{output}\n\n{private_tmp_note}" if output else private_tmp_note
+            data["sandbox_private_tmp"] = True
+        no_proc_note = self._no_proc_note(output)
+        if no_proc_note is not None:
+            output = f"{output}\n\n{no_proc_note}" if output else no_proc_note
+            data["sandbox_no_proc"] = True
         if outcome.returncode == 0:
             return ToolResult(success=True, output=output, data=data)
         return ToolResult(

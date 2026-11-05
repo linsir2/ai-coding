@@ -895,3 +895,85 @@ async def test_a_background_job_does_not_block_another_writer(tmp_path: Path):
         claimed.release()
     finally:
         registry.kill(job.id, reason="test cleanup")
+
+
+# ---- R2-3: /tmp is the sandbox's own tmpfs -------------------------------
+
+
+def test_a_write_into_the_private_tmp_is_called_out(tmp_path: Path):
+    """R2-3: ``echo x > /tmp/y`` succeeded with rc=0 while the host file never
+    existed, and the model concluded the file boundary had not stopped it.
+
+    The note is what makes the command result honest about *where* the write
+    landed, without changing the sandbox's behaviour.
+    """
+    from types import SimpleNamespace
+
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    tool = BashTool(
+        policy=ProcessSandboxPolicy(mode="enforce"),
+        backend=SimpleNamespace(network_mode="deny", tier="full"),
+    )
+    note = tool._sandbox_private_tmp_note(
+        "echo escape > /tmp/aic-r2/outside.txt", str(tmp_path)
+    )
+
+    assert note is not None
+    assert "/tmp/aic-r2/outside.txt" in note
+    assert "宿主看不到" in note
+    assert ".ai-coding/tmp/" in note
+
+
+def test_a_write_inside_the_workspace_gets_no_tmp_note(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    tool = BashTool(
+        policy=ProcessSandboxPolicy(mode="enforce"),
+        backend=SimpleNamespace(network_mode="deny", tier="full"),
+    )
+
+    assert tool._sandbox_private_tmp_note("echo ok > out.txt", str(tmp_path)) is None
+    assert (
+        tool._sandbox_private_tmp_note("echo ok > /dev/null", str(tmp_path)) is None
+    )
+    assert tool._sandbox_private_tmp_note("cat a.txt", str(tmp_path)) is None
+
+
+def test_a_warn_mode_run_does_not_claim_a_tmp_wall(tmp_path: Path):
+    """``warn`` may run unwrapped, so a note about a tmpfs that is not there
+    would be worse than silence."""
+    from types import SimpleNamespace
+
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    tool = BashTool(
+        policy=ProcessSandboxPolicy(mode="warn"),
+        backend=SimpleNamespace(network_mode="deny", tier="full"),
+    )
+
+    assert tool._sandbox_private_tmp_note("echo x > /tmp/y", str(tmp_path)) is None
+
+
+# ---- R2-5: no /proc means ps cannot work ----------------------------------
+
+
+def test_a_missing_proc_table_points_at_the_job_tools():
+    from types import SimpleNamespace
+
+    tool = BashTool(backend=SimpleNamespace(network_mode="deny", tier="no-proc"))
+    note = tool._no_proc_note("Error, do this: mount -t proc proc /proc\n")
+
+    assert note is not None
+    assert "job_list" in note
+    assert 'tool_search("job")' in note
+
+
+def test_a_full_tier_run_is_not_told_proc_is_missing():
+    from types import SimpleNamespace
+
+    tool = BashTool(backend=SimpleNamespace(network_mode="deny", tier="full"))
+
+    assert tool._no_proc_note("Error, do this: mount -t proc proc /proc") is None
