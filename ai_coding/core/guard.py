@@ -64,12 +64,12 @@ def build_guards(app_config: Any) -> GuardChain:
     turn, and a sub-agent sharing the parent's counter would be refused for calls
     it never made.
     """
-    guards: list[Guard] = [FailedRepeatGuard()]
+    guards: list[Guard] = [FailedRepeatGuard(advisory=True)]
     guard_cfg = getattr(app_config, "guard", None)
     if guard_cfg is not None:
         threshold = int(getattr(guard_cfg, "duplicate_threshold", 2) or 0)
         if threshold > 0:
-            guards.append(DuplicateCallGuard(threshold=threshold))
+            guards.append(DuplicateCallGuard(threshold=threshold, advisory=True))
         deny = list(getattr(guard_cfg, "bash_deny", []) or [])
         confirm = list(getattr(guard_cfg, "bash_confirm", []) or [])
         if deny or confirm:
@@ -97,6 +97,9 @@ class GuardDecision:
     reason: str = ""
     params: dict[str, Any] | None = None
     guard: str = ""
+    #: An ALLOW with advice still runs the call; the dispatcher appends this
+    #: sentence to the result so the model sees the reminder without a veto.
+    advice: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,9 +109,12 @@ class TurnView:
     iteration: int = 0
     tokens_spent: int = 0
     task_open: int = 0
-    #: 13 §2.2: True while a strategy/fatigue L2 window is open.  The
-    #: ``FailedRepeatGuard`` stays dormant while this is False.
+    #: 13 §2.2: True while a strategy/fatigue L2 window is open.  The legacy
+    #: hard ``FailedRepeatGuard`` uses it; production advisory mode ignores it.
     strict_repeats: bool = False
+    #: Set by the dispatcher from the tool's per-call footprint.  Advisory
+    #: duplicate reminders become hard refusals for side-effecting calls.
+    mutates_world: bool = False
 
 
 def call_fingerprint(call: ToolCall) -> str:
@@ -154,6 +160,7 @@ class GuardChain:
     def check(
         self, call: ToolCall, ctx: ToolContext, view: TurnView
     ) -> GuardDecision:
+        advice: list[str] = []
         for guard in self._guards:
             name = getattr(guard, "name", type(guard).__name__)
             try:
@@ -166,7 +173,9 @@ class GuardChain:
                 )
             if decision.verdict is not GuardVerdict.ALLOW:
                 return decision
-        return GuardDecision(GuardVerdict.ALLOW)
+            if decision.advice:
+                advice.append(decision.advice)
+        return GuardDecision(GuardVerdict.ALLOW, advice="\n".join(advice))
 
     def after(
         self, call: ToolCall, result: ToolResult, ctx: ToolContext, view: TurnView
@@ -296,8 +305,9 @@ class DuplicateCallGuard:
 
     name = "duplicate_call"
 
-    def __init__(self, threshold: int = 2) -> None:
+    def __init__(self, threshold: int = 2, *, advisory: bool = False) -> None:
         self.threshold = max(0, int(threshold))
+        self.advisory = bool(advisory)
         self.reset()
 
     def reset(self) -> None:
@@ -307,8 +317,34 @@ class DuplicateCallGuard:
         self._successes: dict[str, list[str]] = {}
 
     def check(self, call: ToolCall, ctx: ToolContext, view: TurnView) -> GuardDecision:
-        del view
         if self.threshold <= 0:
+            return GuardDecision(GuardVerdict.ALLOW)
+        if self.advisory:
+            fingerprint = call_fingerprint(call)
+            succeeded = self._successes.get(fingerprint, [])
+            count = len(succeeded)
+            # Side-effecting edits stay strict: a duplicate write is not a
+            # harmless poll, and an earlier result is not a value to reuse.
+            # Everything else gets advisory reminders only (DeepSeek parity).
+            if view.mutates_world:
+                if count >= self.threshold:
+                    return self._refusal(call, succeeded[0], count)
+                return GuardDecision(GuardVerdict.ALLOW)
+            if count in (3, 5, 8):
+                return GuardDecision(
+                    GuardVerdict.ALLOW,
+                    reason=(
+                        f"'{call.name}' has already succeeded {count} time(s) "
+                        "with the same arguments; reuse the earlier result or "
+                        "change the approach instead of repeating it"
+                    ),
+                    guard=self.name,
+                    advice=(
+                        f"[repeat] '{call.name}' has already succeeded {count} "
+                        "time(s) with the same arguments; reuse the earlier "
+                        "result or change the approach."
+                    ),
+                )
             return GuardDecision(GuardVerdict.ALLOW)
         # ``list`` is a read and ``update`` is a state setter: repeating the
         # same one changes nothing, and refusing it taught the model to retry
@@ -433,8 +469,9 @@ class FailedRepeatGuard:
 
     name = "failed_repeat"
 
-    def __init__(self, threshold: int = 2) -> None:
+    def __init__(self, threshold: int = 2, *, advisory: bool = False) -> None:
         self.threshold = max(1, int(threshold))
+        self.advisory = bool(advisory)
         self.reset()
 
     def reset(self) -> None:
@@ -442,10 +479,27 @@ class FailedRepeatGuard:
 
     def check(self, call: ToolCall, ctx: ToolContext, view: TurnView) -> GuardDecision:
         del ctx
-        if not view.strict_repeats:
-            return GuardDecision(GuardVerdict.ALLOW)
         fingerprint = call_fingerprint(call)
         failures = self._failures[fingerprint]
+        if self.advisory:
+            if failures in (3, 5, 8):
+                return GuardDecision(
+                    GuardVerdict.ALLOW,
+                    reason=(
+                        f"'{call.name}' has already failed {failures} time(s) "
+                        "with the same arguments; read the error and change "
+                        "approach, or ask the user"
+                    ),
+                    guard=self.name,
+                    advice=(
+                        f"[repeat] '{call.name}' has already failed {failures} "
+                        "time(s) with the same arguments; read the error and "
+                        "change approach, or ask the user."
+                    ),
+                )
+            return GuardDecision(GuardVerdict.ALLOW)
+        if not view.strict_repeats:
+            return GuardDecision(GuardVerdict.ALLOW)
         if failures >= self.threshold:
             return GuardDecision(
                 GuardVerdict.DENY,

@@ -211,22 +211,28 @@ async def test_path_strictness_reaches_the_subagent_too(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_the_default_config_still_gives_the_child_its_duplicate_budget(tmp_path):
-    """``duplicate_threshold`` defaults to 2, so the default child is guarded."""
+async def test_the_default_config_advises_but_does_not_block_duplicate_reads(tmp_path):
+    """The old hard budget stopped the third read.  The new policy lets it run
+    and injects a repeat reminder; the scripted child stops after four calls."""
     read = _RecordingTool("read")
+    read.mutates_world = False
 
-    class _Repeater(_OneCallEngine):
+    class _FourReads(_OneCallEngine):
         def __init__(self) -> None:
             super().__init__(_ref("c", "read", path="/a"))
+            self.seen = 0
 
         async def step(self, messages, *, tools, instructions=None, on_delta=None):
-            return StepResult(
-                text=None,
-                tool_calls=(_ref("c", "read", path="/a"),),
-                finish_reason="tool_calls",
-                usage=None,
-                reasoning=None,
-            )
+            self.seen += 1
+            if self.seen <= 4:
+                return StepResult(
+                    text=None,
+                    tool_calls=(_ref("c", "read", path="/a"),),
+                    finish_reason="tool_calls",
+                    usage=None,
+                    reasoning=None,
+                )
+            return StepResult(text="done", tool_calls=(), finish_reason="stop")
 
     app = AppConfig(
         default_model="m",
@@ -241,15 +247,15 @@ async def test_the_default_config_still_gives_the_child_its_duplicate_budget(tmp
 
     runner = SubAgentRunner(
         app,
-        engine_factory=_Repeater,  # the class itself is the zero-arg factory
+        engine_factory=_FourReads,
         build_tools=build_tools,
         workspace=str(tmp_path),
     )
     runner._timeout = 20.0
 
-    await runner.run("loop forever", name="t")
+    await runner.run("repeat", name="t")
 
-    assert len(read.calls) < 5, f"duplicate guard did not engage: {len(read.calls)} calls"
+    assert len(read.calls) == 4, "a duplicate read must not be hard-denied"
 
 
 # ---- the permission gate --------------------------------------------------

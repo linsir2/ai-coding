@@ -244,7 +244,7 @@ async def case_strategy_ladder_climbs_to_l2(root: Path) -> tuple[bool, str]:
     ok = (
         len(gates) == 2
         and "不要重复同样的做法" in gates[0]
-        and "直接拦截" in gates[1]
+        and "重复提醒" in gates[1]
     )
     return ok, f"{len(gates)} strategy gate(s): L1 then L2 (budget spent at 6)"
 

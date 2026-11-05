@@ -19,6 +19,7 @@ from ai_coding.core.events import (
     ToolFinished,
     ToolStarted,
 )
+from ai_coding.core.guard import GuardChain, GuardDecision, GuardVerdict
 from ai_coding.domain.message import CANCELLED_BY_USER, ToolCallRef, ToolResult
 from ai_coding.domain.task import TaskState
 from ai_coding.infra.deadline import Deadline
@@ -132,7 +133,7 @@ def _ctx() -> ToolContext:
 
 def _dispatcher(
     tools, *, approval=None, max_parallel=4, observer=None, write_coordinator=None,
-    slots=None,
+    slots=None, guards=None,
 ):
     registry = ToolRegistry()
     for tool in tools:
@@ -145,6 +146,7 @@ def _dispatcher(
         observer=observer,
         write_coordinator=write_coordinator,
         slots=slots,
+        guards=guards,
     )
 
 
@@ -1367,3 +1369,57 @@ async def test_a_conflict_with_a_blocker_does_not_mention_killing_a_job():
     assert result.error == "write_conflict"
     assert "阻塞会话：s2" in result.output
     assert "job_kill" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_tool_points_at_the_nearest_real_tool():
+    tool = _FakeTool("edit")
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("c1", "edi", "{}")], _ctx()
+    )
+
+    result = outcomes[0].result
+    assert result.error == "unknown_tool"
+    assert "edit" in result.output
+    assert result.data is not None
+    assert result.data["suggestions"] == ["edit"]
+
+
+
+@pytest.mark.asyncio
+async def test_guard_advice_is_appended_without_denying_the_call():
+    class _Advice:
+        name = "advice"
+
+        def check(self, call, ctx, view):
+            return GuardDecision(
+                GuardVerdict.ALLOW,
+                advice="[repeat] same call three times; change approach",
+                guard=self.name,
+            )
+
+    tool = _FakeTool("read")
+    outcomes = await _dispatcher(
+        [tool], guards=GuardChain([_Advice()])
+    ).dispatch_batch([_ref("c1", "read")], _ctx())
+
+    assert outcomes[0].result.success is True
+    assert tool.executed is True
+    assert "[repeat] same call three times" in outcomes[0].result.output
+    assert outcomes[0].result.data is not None
+    assert outcomes[0].result.data["repeat_advice"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_tool_does_not_suggest_a_plan_only_tool_outside_plan_mode():
+    tool = _FakeTool("finish_research")
+    tool.plan_only = True
+    outcomes = await _dispatcher([tool]).dispatch_batch(
+        [_ref("c1", "finish_research_typo", "{}")], _ctx()
+    )
+
+    result = outcomes[0].result
+    assert result.error == "unknown_tool"
+    assert "did you mean" not in result.output
+    assert result.data is not None
+    assert result.data["suggestions"] == []

@@ -114,7 +114,7 @@ async def test_failed_iterations_climb_the_strategy_ladder_in_the_session():
     gates = _strategy_gates(session)
     assert len(gates) == 2                       # L1 → L2, not one-shot anymore
     assert "不要重复同样的做法" in gates[0]
-    assert "直接拦截" in gates[1]
+    assert "重复提醒" in gates[1]
     assert loop.last_outcome is not None
     assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS
 

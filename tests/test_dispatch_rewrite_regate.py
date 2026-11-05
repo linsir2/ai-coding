@@ -168,4 +168,4 @@ async def test_guard_view_is_passed_through():
         view=view,
     )
 
-    assert seen == [view]
+    assert seen == [TurnView(iteration=3, tokens_spent=1234, mutates_world=True)]

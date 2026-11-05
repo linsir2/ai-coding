@@ -105,7 +105,7 @@ async def test_a_turn_cut_mid_window_retries_the_same_level_next_turn(tmp_path):
         m.content or "" for m in session.messages
         if m.synthetic and "strategy-gate" in (m.content or "")
     ]
-    assert "直接拦截" in nudges[-1]                                   # L2 的武装文案
+    assert "重复提醒" in nudges[-1]                                   # L2 的武装文案
     persisted = sessions.load(session.session_id)
     assert persisted.intervention_state["strategy"]["level"] == 2     # 搭车落盘、读回存活
 
@@ -217,7 +217,7 @@ async def test_a_validation_refusal_does_not_escalate_the_l1_window(tmp_path):
         if m.synthetic and "strategy-gate" in (m.content or "")
     ]
     assert len(nudges) == 1
-    assert "直接拦截" not in nudges[0]  # L2's armed text never lands
+    assert "重复提醒" not in nudges[0]  # L2's armed text never lands
 
 
 # ---- B1/B2/B5: the search ladder end to end ----

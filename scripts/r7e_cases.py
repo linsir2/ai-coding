@@ -396,9 +396,9 @@ async def case_intervention_ladder_is_visible(root: Path) -> tuple[bool, str]:
     state = persisted.intervention_state if persisted is not None else None
     ok = (
         len(gates) == 3                                       # L1 → L2 → L3(ask)
-        and "直接拦截" in (gates[1] if len(gates) > 1 else "")  # L2 is the armed level
+        and "重复提醒" in (gates[1] if len(gates) > 1 else "")  # L2 is the armed level
         and any("change approach" in (event.output_preview or "") for event in refusals)
-        and tool.executions == 3                               # the refused call never ran
+        and tool.executions == 4                               # advisory; the fourth call runs
         and outcome is not None
         and outcome.text == "换了方法，重新读过配置"
         and bool(state) and bool(state.get("strategy"))

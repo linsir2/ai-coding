@@ -25,6 +25,7 @@ declared tool_calls still pair up and the model can react (docs/r2-analysis.md �
 from __future__ import annotations
 
 import asyncio
+import difflib
 import enum
 import threading
 import time
@@ -596,7 +597,7 @@ class ToolDispatcher:
             return self._bad_arguments(call, item.refusal), True, False
 
         if item.tool is None:
-            return self._unknown(call), True, False
+            return self._unknown(call, ctx), True, False
 
         verdict = _verdict(item.decision)
         reason = _reason(item.decision)
@@ -624,6 +625,9 @@ class ToolDispatcher:
 
         # ---- A3/A5: guards, and a rewritten call must pass the gate again ----
         turn_view = view if view is not None else TurnView()
+        turn_view = replace(
+            turn_view, mutates_world=tool.mutates_world_for(call.params)
+        )
         guard_decision = self.guards.check(call, ctx, turn_view)
         rewritten_from: dict[str, Any] | None = None
         if guard_decision.verdict is GuardVerdict.DENY:
@@ -775,7 +779,10 @@ class ToolDispatcher:
                 data = dict(reused.data or {})
                 data["replayed"] = True
                 reused = replace(reused, data=data)
-                result = self.guards.after(call, reused, ctx, turn_view)
+                result = self._with_advice(
+                    self.guards.after(call, reused, ctx, turn_view),
+                    guard_decision.advice,
+                )
                 await self._run_hooks(
                     HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result
                 )
@@ -826,7 +833,10 @@ class ToolDispatcher:
                     rewritten_from,
                     guard_decision.guard or f"hook:{hook_rewriter}",
                 )
-            result = self.guards.after(call, result, ctx, turn_view)
+            result = self._with_advice(
+                self.guards.after(call, result, ctx, turn_view),
+                guard_decision.advice,
+            )
             await self._run_hooks(
                 HookPoint.TOOL_AFTER, call, ctx, turn_view, result=result
             )
@@ -1003,8 +1013,29 @@ class ToolDispatcher:
             data={"decision": "deny", "reason": refusal, "tool": call.name},
         )
 
-    @staticmethod
-    def _unknown(call: ToolCall) -> ToolResult:
+    def _unknown(self, call: ToolCall, ctx: ToolContext | None = None) -> ToolResult:
+        context = ctx if ctx is not None else ToolContext()
+        tools = [
+            tool
+            for tool in self.registry.all_tools
+            if (not tool.plan_only or context.mode == "plan")
+            and (
+                not context.readonly
+                or not tool.mutates_world
+                or tool.readonly_capable
+            )
+            and (
+                not tool.defer
+                or tool.name in context.loaded_tools
+                or tool.name in context.searchable_names
+            )
+        ]
+        names = [tool.name for tool in tools]
+        close = difflib.get_close_matches(
+            call.name.lower(), [name.lower() for name in names], n=3, cutoff=0.45
+        )
+        by_lower = {name.lower(): name for name in names}
+        suggestions = [by_lower[name] for name in close]
         if call.name in _PLAN_TEXT_NAMES:
             output = (
                 f"error: unknown tool '{call.name}'. "
@@ -1014,11 +1045,15 @@ class ToolDispatcher:
             )
         else:
             output = f"error: unknown tool '{call.name}'"
+            if suggestions:
+                output += "; did you mean: " + ", ".join(suggestions) + "?"
+            elif names:
+                output += "; available tools: " + ", ".join(names[:8])
         return ToolResult(
             success=False,
             output=output,
             error="unknown_tool",
-            data={"tool": call.name},
+            data={"tool": call.name, "suggestions": suggestions},
         )
 
     @staticmethod
@@ -1147,6 +1182,18 @@ class ToolDispatcher:
             output="error: 用户已停止",
             error="stopped",
             data={"decision": "warn", "stopped": True, "tool": call.name},
+        )
+
+    @staticmethod
+    def _with_advice(result: ToolResult, advice: str) -> ToolResult:
+        if not advice:
+            return result
+        data = dict(result.data or {})
+        data["repeat_advice"] = True
+        return replace(
+            result,
+            output=(result.output + ("\n\n" if result.output else "") + advice),
+            data=data,
         )
 
     @staticmethod

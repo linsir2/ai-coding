@@ -524,7 +524,7 @@ class GuardChain:
 
 | 守卫 | 生效条件 | 规则 | 默认 | 依据的真实失效模式 |
 |---|---|---|---|---|
-| `DuplicateCallGuard` | `duplicate_threshold > 0` | 同一 `(工具名, 参数指纹)` 第 N 次调用起拒绝；拒绝结果里**带上一次结果的 call_id**，让模型直接复用。O-1 之后 `read` 只在"上次结果仍在本请求上下文里"时才算重复：L2 信封、L3 持久化标记、L4 摘要掉的结果都不可复用，放行重读，但同一指纹的总成功次数封顶 `2×阈值`（防原地重读循环） | **开（阈值 2）** | ReAct 循环经典病：模型原地重复 `read`/`bash`。既省 token 又破死循环 |
+| `DuplicateCallGuard` | `duplicate_threshold > 0` | 生产链对非副作用调用从第 3/5/8 次起只注入重复提醒，不拒绝；`write`/`edit` 等有副作用的重复仍按阈值硬拒。O-1 的 `read` 可见性逻辑保留在非 advisory 的单元路径 | **开（advisory）** | ReAct 循环经典病：模型原地重复 `read`/`bash`；硬拒会把“可重试”变成死路 |
 | `BashPolicyGuard` | 配置了 `bash_deny` / `bash_confirm` | 在权限门硬拒表**之外**，允许配置追加拒绝模式（命中即 DENY）与「必须确认」模式 | 开（空表 = 不生效） | 权限门的硬拒表写死了，用户加不了自己的红线 |
 | `SecretGuard`（后置） | 总是 | 高置信密钥模式在**写盘前**强制脱敏；是否同时改历史由 `redact_history` 控制 | trace 强制；history 默认关 | `config.local.yaml` 里就是真实 key，轨迹落盘即泄漏面 |
 | `PathEscapeGuard` | `strict_paths` | `bash` 参数里出现工作区外的绝对路径 / `cd /`：默认**只观察**（放行 + 轨迹标记），`strict_paths: true` 才拒绝 | 观察 | `Sandbox` 只管文件工具；`bash` 能绕过 `ctx.workspace` |

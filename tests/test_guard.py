@@ -451,3 +451,35 @@ def test_a_repeated_edit_says_the_file_already_reflects_it():
     reason = guard.check(call, ctx, view).reason
     assert "reuse the earlier result" not in reason
     assert "file" in reason
+
+
+# ---- advisory mode: the production chain reminds, it does not veto ----------
+
+
+def test_duplicate_advisory_does_not_deny_at_three():
+    guard = DuplicateCallGuard(threshold=2, advisory=True)
+    ctx = ToolContext()
+    call = _call("read", path="/a")
+    view = TurnView()
+    for _ in range(3):
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, ToolResult(success=True, output="ok"), ctx, view)
+
+    decision = guard.check(call, ctx, view)
+    assert decision.verdict is GuardVerdict.ALLOW
+    assert "already succeeded 3" in decision.advice
+
+
+def test_failed_repeat_advisory_does_not_deny_at_three():
+    from ai_coding.core.guard import FailedRepeatGuard
+
+    guard = FailedRepeatGuard(advisory=True)
+    ctx = ToolContext()
+    call = _call("read", path="/a")
+    view = TurnView()
+    for _ in range(3):
+        guard.after(call, ToolResult(success=False, output="no"), ctx, view)
+
+    decision = guard.check(call, ctx, view)
+    assert decision.verdict is GuardVerdict.ALLOW
+    assert "already failed 3" in decision.advice

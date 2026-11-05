@@ -535,7 +535,7 @@ def _strategy_text(level: int, snap: TurnSnapshot) -> str:
         ])
     if level == L2:
         return "\n".join([
-            f"{STRATEGY_GATE_LEAD} 仍无进展：相同参数的失败调用从现在起会被直接拦截。",
+            f"{STRATEGY_GATE_LEAD} 仍无进展：相同参数的失败调用会收到重复提醒。",
             "1) 读错误输出，换一种方式；",
             "2) 或立刻用 ask_user 向用户提问，说明卡点与已经试过的方法。",
         ])
@@ -629,7 +629,7 @@ def _fatigue_text(level: int, snap: TurnSnapshot) -> str:
         ])
     if level == L2:
         return "\n".join([
-            f"{FATIGUE_GATE_LEAD} 错误仍在累积：相同参数的失败调用会被直接拦截。",
+            f"{FATIGUE_GATE_LEAD} 错误仍在累积：相同参数的失败调用会收到重复提醒。",
             "停止当前路径，换一种完全不同的方法，或立刻用 ask_user 提问。",
         ])
     return "\n".join([
