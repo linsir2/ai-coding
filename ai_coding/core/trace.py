@@ -840,11 +840,20 @@ class TraceRecorder:
                 scope,
             )
         if isinstance(event, ModelStepFinished):
+            if nested:
+                return (
+                    name,
+                    payload,
+                    f"step{event.index}",
+                    f"i{event.index}",
+                    event.index,
+                    scope,
+                )
             return (
                 name,
                 payload,
-                f"step{event.index}",
-                f"i{event.index}",
+                self._span("step", event.index),
+                self._span("i", event.index),
                 event.index,
                 scope,
             )
