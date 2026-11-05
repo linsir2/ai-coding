@@ -562,6 +562,22 @@ R2-14 的验收门按预期工作：第 3 轮起 `fe_build=0`、`fe_components=4
 `fe_starter=False`，第 4 轮 `readme=True`；只有 `be_pytest=1` 一直未过，
 所以 8 轮后判 `ROUNDS EXHAUSTED`，没有把“脚手架通过”当成完成。
 
+## 实施状态（R3）
+
+| 编号 | 状态 | 验证 |
+|---|---|---|
+| R3-1 read 逃生门 | 已修复 | read 单测 3 条（第 2 次指针→正文、≤60 行不抑制）+ 循环级 3 连读 |
+| R3-2 压缩后 guard | 已修复（仅压缩边界重置） | 循环级两条：`compacted=True` 才重置，checkpoint 视图不重置 |
+| R3-3 工具面计量 | 已修复 | deferred 工具存在时告警与 `ContextAssembled` 都等于可见面 |
+| R3-4 wheel 回喂 | 已修复 | 真机 dry-run 回喂点名 `pydantic-core==2.27.2` |
+
+R3-2 的方案 1（在 `check()` 里做可见性检查）**没有采用**：它会与既有安全
+约定 `test_duplicate_guard_does_not_excuse_a_trimmed_bash` 冲突——bash 的输出
+被裁剪不等于命令没有执行，重复执行有副作用的命令仍然必须拒绝。压缩边界
+重置已经覆盖真机上的全部 25 次拒绝场景。
+
+全量 `ruff` / `mypy`（185 个源文件）/ `pytest` 通过。
+
 ## R3-1（P0）read 的“去重指针”没有逃生门，模型原地死循环
 
 ### 证据
