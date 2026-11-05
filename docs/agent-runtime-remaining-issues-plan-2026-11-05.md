@@ -534,3 +534,172 @@ function App() {
 
 每条都应带一条**能复现的**测试；真机复验沿用本轮的
 `/tmp/aic-r2/scripts/runner.py` 与 `scripts/eval_fullstack_task.py`。
+
+---
+
+# 第三轮真机复跑（R3，8 轮全栈长任务）
+
+配置：`/tmp/aic-r2/config-fullstack.yaml`（qwen3.7-flash、`max_context_tokens=48000`、
+`max_tool_iterations=30`、`max_auto_continuations=4`），工作区
+`/tmp/aic-r2/ws-fullstack3`，日志 `/tmp/aic-r2/logs/fullstack3.log`，
+trace 在 `ws-fullstack3/.ai-coding/traces/*/turn-*.jsonl`。
+
+## 结果
+
+| 指标 | 值 |
+|---|---|
+| 轮次 | 8（`ROUNDS EXHAUSTED`，**没有**误报 `TASK COMPLETE`） |
+| 总耗时 | 2404s（40 分钟） |
+| 模型步数 / 工具调用 | 307 / 294 |
+| prompt tokens | 7,530,280（缓存命中 4,776,960，63%） |
+| 压缩 | 5 次（如 610 → 72 条） |
+| read 去重指针 | 57 次（占步数 18.6%） |
+| `duplicate_call` 拒绝 | 25 次（占工具调用 8.5%） |
+| 工具失败 | 42 次（含上述拒绝） |
+| 最终产物 | 前端 4 个组件 + `npm run build` 通过 + README；后端 15 个测试用系统 Python 全绿 |
+
+R2-14 的验收门按预期工作：第 3 轮起 `fe_build=0`、`fe_components=4`、
+`fe_starter=False`，第 4 轮 `readme=True`；只有 `be_pytest=1` 一直未过，
+所以 8 轮后判 `ROUNDS EXHAUSTED`，没有把“脚手架通过”当成完成。
+
+## R3-1（P0）read 的“去重指针”没有逃生门，模型原地死循环
+
+### 证据
+
+`turn-2.jsonl`：13:22:21–13:23:36 之间，模型连续 18 次
+`read frontend/package.json`，每次都拿到：
+
+```
+[未返回正文：第 1-22 行在本会话已经读过（共请求 22 行，文件未变化）。
+ 需要原样再看一遍请用 limit=22 重新指定；需要新内容请读未覆盖的行。]
+```
+
+`turn-7.jsonl` 更直接：13:50:59 用 `limit=50, offset=0` 读 `backend/main.py`
+拿到正文，13:51:02 与 13:51:05 用**同样的参数**再读，两次都返回
+“请用 limit=50 重新指定”——也就是说，**提示里教的逃生门并不存在**。
+`turn-1` 20/59 步、`turn-2` 25/85 步消耗在这类指针上。
+
+### 根因
+
+`tools/read_tool.py` 的 `if not gaps:` 分支无条件返回指针；
+`limit` 只决定请求范围，完全被覆盖时仍然没有缺口，指针一字不差地重复。
+模型按提示重试，永远出不去。
+
+### 方案
+
+1. **让提示成真**：同一 `(path, offset, limit, version)` 在本回合第二次被
+   抑制时，直接返回正文（第一次仍返回指针，省一次大文件重发）。
+   需要一份回合级计数：`SessionData.read_repeats` + `ToolContext` 的
+   `count_repeat_read(key, start, end) -> int` 回调，回合开始清空。
+2. **小读不抑制**：请求范围 ≤ 60 行（或 ≤ 2,000 字符）时不做去重。
+   实测 22 行的 `package.json` 省下约 450 字符，却换来 18 次模型调用
+   （约 50 万 prompt tokens），收益是负的。
+3. 指针文案改成“再次请求相同范围会返回正文”，与实现一致。
+
+### 验证
+
+- 单测：同一范围连续读 3 次，第 1 次指针、第 2 次正文；≤60 行首次即正文。
+- 真机：同一场景里 `read package.json` 的重复次数应从 18 降到 ≤2。
+
+## R3-2（P1）压缩后 `duplicate_call` 仍拒绝，并引用模型已看不到的结果
+
+### 证据
+
+`turn-7`：13:50:14 压缩 610 → 72 条；24 秒后 13:50:38/42/45 连续 3 次
+`duplicate_call` 拒绝，理由是“已成功 2 次，复用之前的结果（call …）”。
+被引用的那次结果已在压缩里被摘要掉。`turn-3` 同类拒绝 11 次，
+其中 `which python3`、`pytest …` 各被拒 2–3 次。
+
+### 根因
+
+`core/guard.py::DuplicateCallGuard` 的 `_successes` 是回合级状态，压缩不会
+清空；而 `check()` 的 bash 分支只调用 `_mutated_after_read()`，没有像
+`_check_reread()` 那样先算“这些成功结果是否还在 `ctx.messages` 里”。
+结果：拒绝理由指向一个模型拿不到的结果，唯一出路（重新运行）被堵死。
+
+### 方案
+
+1. 在 `check()` 的 bash 与通用分支加可见性检查：
+   `visible = visible_tool_call_ids(ctx.messages)`，若 `succeeded` 一个都不可见
+   就直接 `ALLOW`（没有可复用的结果）。
+2. `assemble()` 报告本次请求发生过压缩时，清空 `dispatcher.guards`，
+   让“压缩前的结果”不再约束压缩后的回合。
+3. 拒绝文案在“不可见”时改用 `reusable=False` 的措辞（已有该分支），
+   不要再说“复用之前的结果”。
+
+### 验证
+
+- 单测：记录一次成功后，把对应工具结果从 `ctx.messages` 移除，同样的
+  bash 应 `ALLOW`。
+- 真机：同一长任务里 `duplicate_call` 拒绝数应从 25 降到个位数。
+
+## R3-3（P2）`tools_chars` / `estimated_tokens` 把没广告的工具也算进去
+
+### 证据
+
+`ContextAssembled.tools_chars` 全程恒为 **27,181**；用同一配置实测：
+
+```
+all 27 tools: 23,864 chars   visible 16 tools: 15,169   deferred(11): 8,695
+```
+
+即上报值比真实请求大约 1.8 倍。`estimated_tokens=7,648` 同样被抬高。
+
+### 根因
+
+`agent_loop.__init__` 的 `self._tools_text = short_json(self._tool_schemas)`
+取的是注册表全量 schema；真正发请求的是 `_surface_cache`（posture + loaded
++ deferred 过滤后）。R2-8 的告警和 `ContextAssembled` 都读前者。
+
+### 方案
+
+在第一次组装后按 `_surface_tools()` 的结果计算并缓存 `_tools_chars`
+（key 与 `_surface_cache` 相同），`ContextAssembled` 与告警改用它。
+
+### 验证
+
+- 单测：deferred 工具存在时，上报字符数 == 可见 schema 字符数。
+- 真机：`tools_chars` 应从 27,181 降到约 15k，`estimated_tokens` 同比例下降。
+
+## R3-4（P3，环境/模型）后端门被 `pydantic==2.10.4` 钉死在 Python 3.14
+
+### 证据
+
+第 1–8 轮 `be_pytest=1` 一直不变。门禁给的反馈是明确的：
+
+```
+[依赖安装失败] pip install 返回 1
+ERROR: Failed building wheel for pydantic-core
+/tmp/.../.venv/bin/python: No module named pytest
+```
+
+但模型连续 6 轮把它诊断为“venv 损坏”，改用系统 Python 跑通 15 个测试后
+就认为后端完成，从未修改 `requirements.txt` 的 pin。实测 cp314 轮子存在：
+`pydantic 2.13.4` + `pydantic_core 2.47.0`（`--only-binary=:all:` 可下）。
+因此这是**模型诊断问题**，不是环境不可解。
+
+### 方案
+
+1. 驱动侧：`self_check` 在 pip 失败时，额外跑一次
+   `pip install --dry-run --only-binary=:all: -r requirements.txt`，
+   把“哪个 pin 没有可用轮子”单独写进回喂文本，避免模型只看 Cargo 噪声。
+2. 可选（产品侧）：`bash` 工具的 `pip install` 失败结果里，如果是
+   `failed-wheel-build-for-install` 且主机是 CPython ≥3.13，附加一句
+   “该 pin 可能无对应 wheel，先试 `--only-binary=:all:` 或放宽版本”。
+   是否做取决于是否愿意在工具里内置包管理启发式。
+
+### 验证
+
+- 驱动脚本对“requirements 钉死无 wheel 版本”的仓库，回喂文本里必须出现
+  包名与“无可用 wheel”，而不只是 maturin 堆栈。
+
+## 建议的实施顺序
+
+1. **R3-1**（P0，read 逃生门 + 小读不抑制）—— 这是本轮 18.6% 步数的来源；
+2. **R3-2**（P1，guard 可见性）—— 8.5% 的工具拒绝，且与压缩强耦合；
+3. **R3-3**（P2，计量）—— 一条单测即可锁，影响 R2-8 的判断；
+4. **R3-4**（P3，驱动/文档）—— 只改回喂文本，不动产品行为。
+
+R3-1 与 R3-2 都是“状态比模型看得见的上下文活得更久”，可以放在同一批：
+改完后用 `eval_fullstack_task.py --rounds 4` 复跑，看 `dedup` 与
+`guard_deny` 两个计数是否降到个位数。
