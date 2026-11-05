@@ -977,3 +977,36 @@ def test_a_full_tier_run_is_not_told_proc_is_missing():
     tool = BashTool(backend=SimpleNamespace(network_mode="deny", tier="full"))
 
     assert tool._no_proc_note("Error, do this: mount -t proc proc /proc") is None
+
+
+# ---- R2-9: a non-zero exit that is a result, not a failure ----------------
+
+def test_a_sigpipe_exit_with_output_is_not_a_failure():
+    tool = BashTool()
+    ok, note = tool._exit_verdict(
+        141, '{"evt":"ContextAssembled"}\n', "grep -n ContextAssembled trace.jsonl | head -3"
+    )
+
+    assert ok is True
+    assert note is not None and "SIGPIPE" in note
+
+
+def test_a_sigpipe_exit_without_output_stays_a_failure():
+    tool = BashTool()
+
+    assert tool._exit_verdict(141, "", "grep x missing.txt | head -3")[0] is False
+
+
+def test_grep_exit_one_means_no_match_not_a_crash():
+    tool = BashTool()
+    ok, note = tool._exit_verdict(1, "", "grep -rn nothing .")
+
+    assert ok is True
+    assert note is not None and "没有匹配" in note
+
+
+def test_an_ordinary_non_zero_exit_is_still_a_failure():
+    tool = BashTool()
+    ok, note = tool._exit_verdict(1, "boom", "python script.py")
+
+    assert ok is False and note is None

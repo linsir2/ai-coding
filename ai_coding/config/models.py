@@ -480,6 +480,11 @@ class AIConfig(BaseModel):
     # ceiling sat below the floor and every session warned about a cost the user
     # cannot change.  The built-in tools are not configurable; MCP servers are.
     mcp_chars_warn: int = 2_000
+    # R2-8: the *whole* tool surface, built-ins included.  0 (the default)
+    # disables it, because the built-ins are a fixed cost most operators cannot
+    # change -- but a session that wants to know its per-step floor can set it
+    # (measured on this repository: 23,418 chars across 28 tools).
+    tools_chars_warn: int = 0
     # R7e-2: what one turn may absorb from a user who keeps typing (docs §12 Q6).
     steering_max_messages: int = 5
     steering_max_chars: int = 2_000

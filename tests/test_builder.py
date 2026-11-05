@@ -276,3 +276,23 @@ def test_main_stack_has_one_merge_queue_and_tool(tmp_path):
     assert parent.get("merge_agent") is not None
     assert "merge_agent" not in child.list_names()
     assert child.scheduler is parent.scheduler
+
+
+def test_low_frequency_orchestration_tools_are_deferred():
+    """R2-8: ~3.7k characters of rarely used agent-control schemas were resent
+    on every step.  They stay reachable through ``tool_search``."""
+    from ai_coding.tools.builder import DEFERRED_TOOL_NAMES
+
+    for name in (
+        "send_message",
+        "interrupt_agent",
+        "close_agent",
+        "resume_agent",
+        "merge_agent",
+        "history_search",
+    ):
+        assert name in DEFERRED_TOOL_NAMES
+    # The backbone of parallel work stays advertised: deferring it would cost
+    # an extra round trip on the task it exists for.
+    for name in ("spawn_agent", "wait_agent", "list_agents"):
+        assert name not in DEFERRED_TOOL_NAMES

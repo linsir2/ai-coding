@@ -515,6 +515,9 @@ class AgentLoop:
         # the warning costs nothing per turn.
         self._tools_by_origin = _tools_by_origin(tools)
         self._tools_warned = False
+        #: R2-8: the whole-surface budget is a separate, opt-in warning; a
+        #: loop that only cares about MCP must not silence it.
+        self._total_tools_warned = False
         self.dispatcher = ToolDispatcher(
             tools,
             self.gate,
@@ -1753,40 +1756,65 @@ class AgentLoop:
         )
 
     def _warn_tools_chars_once(self) -> None:
-        """Say once, per loop, that the MCP tool surface is over its ceiling.
+        """Say once, per loop, that the tool surface is over its ceiling.
 
-        r22: judged on the MCP part, not the whole surface.  The built-in tools
-        are a fixed cost the user cannot change, and they had grown past the old
-        whole-surface ceiling, so the warning fired for every session and told
-        nobody anything they could act on.  ``origin`` is ``"local"`` for a
-        built-in tool and an MCP server's name otherwise (``tools/base.py``), so
-        everything that is not local is what the user configured.
+        Two independent budgets, because they are actionable in different ways:
+
+        * ``mcp_chars_warn`` (r22) judges only what the operator configured --
+          the built-in tools are a fixed cost, and warning about them told
+          nobody anything they could act on;
+        * ``tools_chars_warn`` (R2-8, default 0 = off) judges the whole surface
+          for the operator who wants to know the per-step floor.  Measured on
+          this repository: 23,418 characters across 28 tools, with ``bash``
+          alone at 2,466 and the always-advertised agent controls another ~4k.
+
+        ``origin`` is ``"local"`` for a built-in tool and an MCP server's name
+        otherwise (``tools/base.py``).
         """
-        if self._tools_warned:
-            return
-        threshold = int(getattr(self.settings, "mcp_chars_warn", 0) or 0)
+        mcp_threshold = int(getattr(self.settings, "mcp_chars_warn", 0) or 0)
         mcp_chars = sum(
             chars for origin, chars in self._tools_by_origin.items() if origin != "local"
         )
-        if threshold <= 0 or mcp_chars <= threshold:
-            return
-        self._tools_warned = True
-        biggest = next(
-            (origin for origin, _ in self._tools_by_origin.items() if origin != "local"), ""
-        )
-        self._emit(
-            ToolSurfaceWarning(
-                tools_chars=self._tools_chars,
-                mcp_chars=mcp_chars,
-                threshold=threshold,
-                origins=tuple(self._tools_by_origin.items()),
-                hint=(
-                    "MCP 工具 schema 每一步都会重发；"
-                    f"最贵的是 '{biggest}'。用 mcp.servers[].tools 只注册需要的工具，"
-                    "或关掉用不到的 server。"
-                ),
+        if not self._tools_warned and mcp_threshold > 0 and mcp_chars > mcp_threshold:
+            self._tools_warned = True
+            biggest = next(
+                (origin for origin, _ in self._tools_by_origin.items() if origin != "local"), ""
             )
-        )
+            self._emit(
+                ToolSurfaceWarning(
+                    tools_chars=self._tools_chars,
+                    mcp_chars=mcp_chars,
+                    threshold=mcp_threshold,
+                    origins=tuple(self._tools_by_origin.items()),
+                    hint=(
+                        "MCP 工具 schema 每一步都会重发；"
+                        f"最贵的是 '{biggest}'。用 mcp.servers[].tools 只注册需要的工具，"
+                        "或关掉用不到的 server。"
+                    ),
+                )
+            )
+
+        total_threshold = int(getattr(self.settings, "tools_chars_warn", 0) or 0)
+        if (
+            not self._total_tools_warned
+            and total_threshold > 0
+            and self._tools_chars > total_threshold
+        ):
+            self._total_tools_warned = True
+            local = int(self._tools_by_origin.get("local", 0))
+            self._emit(
+                ToolSurfaceWarning(
+                    tools_chars=self._tools_chars,
+                    mcp_chars=mcp_chars,
+                    threshold=total_threshold,
+                    origins=tuple(self._tools_by_origin.items()),
+                    hint=(
+                        f"内置工具占 {local} 字符（共 {self._tools_chars}），每一步都会重发。"
+                        "用 /trace 看明细；把低频工具改成延迟注册（tool_search）"
+                        "能把这一步的固定开销压下来。"
+                    ),
+                )
+            )
 
     async def _finish_turn(
         self,

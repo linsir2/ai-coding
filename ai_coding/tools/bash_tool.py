@@ -51,6 +51,13 @@ _TMPFS_DIRS = ("/tmp", "/var/tmp", "/dev/shm")
 
 #: What a command sees when it asks for the process table in the no-proc tier.
 _NO_PROC_RE = re.compile(r"mount -t proc|/proc: No such file", re.IGNORECASE)
+
+#: Exits that mean "the pipeline finished early", not "the command failed":
+#: ``head``/``less``/``grep -q`` close the read end, the producer takes SIGPIPE
+#: (shell reports 141 or ``-13``), and the output already produced is complete.
+_PIPE_CLOSED_CODES = (-13, 141)
+#: Programs whose exit 1 means "no match" rather than "broke".
+_SEARCH_PROGRAMS = frozenset({"grep", "egrep", "fgrep", "rg", "ag", "ack"})
 # Per-call widening ceiling: the model may raise a slow command's timeout up to
 # this (see `timeout_seconds` in the schema), but never past it.  It lines up
 # with the turn wall clock (`ai.turn_timeout_seconds`, 600) and the sub-agent
@@ -469,6 +476,35 @@ class BashTool(BaseTool):
             "不要用 /tmp 存跨命令缓存（每次 bash 调用的 /tmp 都是新的）；"
             "也不要把 /tmp 当作可复用的 HOME。"
         )
+
+    def _exit_verdict(
+        self, returncode: int, output: str, command: str
+    ) -> tuple[bool, str | None]:
+        """Is this exit a failure, or a result the model should read (R2-9)?
+
+        Two measured false alarms: ``grep … | head -30`` reported
+        ``nonzero_exit`` while carrying perfectly good output (SIGPIPE), and a
+        bare ``grep`` reports 1 when it simply found nothing.  Treating both as
+        failures sends the model hunting a bug in a command that worked.
+
+        The evidence bar is deliberate: a SIGPIPE exit only counts when there
+        *is* output (an empty 141 may be a command that never ran), and the
+        "no match" reading is limited to search programs.
+        """
+        if returncode == 0:
+            return True, None
+        if returncode in _PIPE_CLOSED_CODES and (output or "").strip():
+            return True, (
+                "[pipe] 命令因下游提前关闭而终止（SIGPIPE 141）；"
+                "以上输出完整可用，不是失败。"
+            )
+        if returncode == 1 and not (output or "").strip():
+            program = next(
+                (Path(view.program).name for view in command_views(command)), ""
+            )
+            if program in _SEARCH_PROGRAMS:
+                return True, "[grep] 没有匹配（退出码 1 表示“未找到”，不是执行失败）。"
+        return False, None
 
     def _no_proc_note(self, output: str) -> str | None:
         """Point the model at ``job_list`` when ``ps`` cannot work.
@@ -903,7 +939,10 @@ class BashTool(BaseTool):
                 error="cancelled" if cancelled else "killed",
                 data=data,
             )
-        if job.exit_code == 0:
+        ok, note = self._exit_verdict(int(job.exit_code or 0), output, command)
+        if note:
+            output = f"{output}\n\n{note}" if output else note
+        if ok:
             return ToolResult(success=True, output=output, data=data)
         return ToolResult(
             success=False,
@@ -1182,7 +1221,10 @@ class BashTool(BaseTool):
         if no_proc_note is not None:
             output = f"{output}\n\n{no_proc_note}" if output else no_proc_note
             data["sandbox_no_proc"] = True
-        if outcome.returncode == 0:
+        ok, exit_note = self._exit_verdict(int(outcome.returncode or 0), output, command)
+        if exit_note:
+            output = f"{output}\n\n{exit_note}" if output else exit_note
+        if ok:
             return ToolResult(success=True, output=output, data=data)
         return ToolResult(
             success=False,

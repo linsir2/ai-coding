@@ -332,6 +332,11 @@ class SessionData:
     # which measures the un-compacted history and never shrinks.  Measured live
     # 2026-10-30: 21 iterations, 21 compactions.  0 means "no step has reported".
     live_context_tokens: int = 0
+    # NOT persisted.  R2-2r: a checkpoint installed after that reading makes it
+    # describe a request nobody will send again (including the current-turn
+    # ``turn_usages`` row it also feeds).  ``_observed_prompt_tokens`` returns
+    # the working view while this is set; the next model step clears it.
+    context_measure_invalid: bool = False
     # NOT persisted.  C-2/C-3 (codex path): this turn is the one Codex sends for
     # an approved plan (the literal "Implement the plan." prompt).  In-process
     # only -- ``to_dict`` is a whitelist, so a crash during it resumes as an

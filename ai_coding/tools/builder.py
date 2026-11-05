@@ -601,6 +601,18 @@ DEFERRED_TOOL_NAMES = frozenset(
         "skill",
         "webfetch",
         "websearch",
+        # R2-8: agent-control and merge tools are rare relative to their schema
+        # cost (measured: send_message 574, interrupt_agent 478, close_agent 422,
+        # resume_agent 420, merge_agent 849, history_search 953 characters --
+        # ~3.7k per step).  ``tool_search`` lists them by description, so they
+        # stay reachable; spawn/wait/list stay advertised because they are the
+        # backbone of parallel work.
+        "send_message",
+        "interrupt_agent",
+        "close_agent",
+        "resume_agent",
+        "merge_agent",
+        "history_search",
     }
 )
 
