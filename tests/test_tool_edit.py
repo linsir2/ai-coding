@@ -41,6 +41,24 @@ async def test_edit_old_string_not_found(setup):
 
 
 @pytest.mark.asyncio
+async def test_edit_miss_names_the_nearest_current_line(setup):
+    """956c45cb: the model wrote ``osxosx`` where the file had ``osx-osx``.
+    A bare "not found" cost two edits and armed the strategy loop; the actual
+    line is the correction."""
+    tmp_path, sb, fst, tool = setup
+    p = tmp_path / "f.txt"
+    _write_and_record(p, "  -moz-osx-osx-grayscale;\n", fst)
+    result = await tool.execute({
+        "path": "f.txt",
+        "old_string": "  -moz-osxosx-grayscale;",
+        "new_string": "  -moz-osx-font-smoothing: grayscale;",
+    })
+    assert result.success is False
+    assert "nearest current line 1" in result.output
+    assert "-moz-osx-osx-grayscale;" in result.output
+
+
+@pytest.mark.asyncio
 async def test_edit_old_string_not_unique(setup):
     tmp_path, sb, fst, tool = setup
     p = tmp_path / "f.txt"

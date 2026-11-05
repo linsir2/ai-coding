@@ -243,3 +243,27 @@ def test_observed_prompt_tokens_falls_back_to_the_working_view():
         "with no provider reading, the estimate must describe the checkpoint view"
     )
     assert observed < _history_tokens(messages)
+
+
+def test_observed_prompt_tokens_ignores_a_previous_turns_measurement():
+    """956c45cb: a new turn inherited the last closed turn's 24k reading.
+
+    The synthetic-message loop grew the raw history to 2.45M tokens without a
+    model step, so ``live_context_tokens`` was 0.  The gate then read turn 1's
+    usage row and skipped compaction, sending the whole poisoned history; the
+    provider timed out twice.  A row from an older turn describes a request
+    that no longer exists.
+    """
+    messages = [
+        ChatMessage(role="user", content=f"消息{index}" + "内容" * 500, timestamp="")
+        for index in range(200)
+    ]
+    session = _session(messages)
+    session.turn_count = 3
+    session.record_turn_usage(1, {"prompt_tokens": 24_916, "context_tokens": 24_916})
+
+    observed = _observed_prompt_tokens(session)
+
+    assert observed == working_history_tokens(session)
+    assert observed > CEILING
+    assert _manager().should_compact(messages, observed) is True

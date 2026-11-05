@@ -1039,6 +1039,12 @@ class AgentLoop:
             synthetic=synthetic,
         )
         task = frame.task
+        # A session loaded from disk may still carry a ladder from the task it
+        # just finished (legacy files, or a turn that completed the items and
+        # then kept working).  This boundary runs once, so it cannot re-arm the
+        # gate on every iteration the way the old per-decision clear did.
+        if task.items and task.is_complete():
+            session.intervention_state = None
         # R7a: everything the turn counts about itself lives in one object, so a
         # new rule is a method on the books rather than a tenth local variable.
         books = TurnBooks()
@@ -1093,6 +1099,15 @@ class AgentLoop:
                 decision = self.policy.decide_next_iteration(
                     snapshot, budget_expired=budget_expired,
                 )
+                if decision.action is TurnAction.NUDGE and books.nudge_pending:
+                    # One injection per model step.  Every ladder is supposed
+                    # to leave its window observable; a gate that re-arms from
+                    # cleared/reset state must not stack advice the model has
+                    # not read yet (956c45cb: 50.9k fatigue-gate messages,
+                    # then 9.7k strategy-gate messages).
+                    decision = TurnDecision(
+                        TurnAction.ITERATE, "nudge already pending"
+                    )
                 self._note_intervention(session, decision, snapshot)
                 if decision.action is TurnAction.FINISH:
                     outcome = terminal_outcome(
@@ -1175,6 +1190,7 @@ class AgentLoop:
                     session.add_message(
                         user_message(decision.inject or "", now_utc(), synthetic=True)
                     )
+                    books.nudge_pending = True
                     self.closer.checkpoint(session, index)
                     if restart:
                         index = 0
@@ -1359,6 +1375,7 @@ class AgentLoop:
                     session.add_message(
                         user_message(decision.inject or "", now_utc(), synthetic=True)
                     )
+                    books.nudge_pending = True
                     self.closer.checkpoint(session, index)
                     continue
 
@@ -1975,6 +1992,15 @@ class AgentLoop:
             ),
             turn_end=True,
         )
+        # A finished task starts the next task from a clean ledger.  This used
+        # to run before every iteration (through _settled_interventions), which
+        # made a completed task clear the ledger while the turn was still
+        # working: a strategy L1 nudge was then re-armed from ``entry is None``
+        # on every iteration, before the model could run (956c45cb's follow-up:
+        # 9.7k ``[strategy-gate]`` messages).  The boundary is the turn close,
+        # not the decision point.
+        if task.items and task.is_complete():
+            session.intervention_state = None
         # 18 §10.2: a flip queued while this turn ran lands here, so the close's
         # own save carries it to disk (zero new save points).
         self._apply_pending_posture(session)
@@ -2480,9 +2506,6 @@ class AgentLoop:
         from a clean ledger; everything else rides the existing save rhythm —
         this method never saves on its own.
         """
-        if task.items and task.is_complete():
-            session.intervention_state = None
-            return {}
         ledger = interventions.settle(
             session.intervention_state or {}, snapshot, turn_end=turn_end
         )

@@ -403,6 +403,15 @@ def _due(
         return (L2, "finish") if level >= L2 else (L2, "nudge")
     if outcome == "unfinished":
         return (max(level, L1), "nudge")      # same-level retry
+    if outcome == "helped" and gate == FATIGUE:
+        # Fatigue only accumulates: "equal to the ref" is how ``_helped``
+        # recognises that the last nudge stopped new damage.  Re-arming L1 on
+        # that same equality made the gate fire before every model step, so the
+        # index could never move and the turn died in a synthetic-message loop
+        # (956c45cb: 18k ``[fatigue-gate]`` messages).  Wait for *new* damage.
+        ref = entry.get("ref") or {}
+        if snap.fatigue_index <= float(ref.get("fatigue", 0.0) or 0.0):
+            return None
     return (L1, "nudge")                      # helped / exhausted / unknown
 
 

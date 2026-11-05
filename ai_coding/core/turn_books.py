@@ -327,6 +327,10 @@ class TurnBooks:
     fatigue_index: float = 0.0
     #: F2: fatigue nudges already injected this turn.
     fatigue_nudges: int = 0
+    #: A gate nudge was injected and the model has not run since.  A second
+    #: injection would be advice the model never saw; it also turns any ladder
+    #: bug that re-arms itself into an unbounded synthetic-message loop.
+    nudge_pending: bool = False
     #: 13 §2.1: successful ``ask_user`` calls this turn — the helped signal of
     #: the ladder's ask levels (L3 for strategy/fatigue, L2 for task).
     ask_user_calls: int = 0
@@ -350,6 +354,9 @@ class TurnBooks:
         """
         self.iterations = index
         self.total_iterations += 1
+        # The model is about to see the last injection; a gate may speak again
+        # after this step.
+        self.nudge_pending = False
 
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""

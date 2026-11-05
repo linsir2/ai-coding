@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,33 @@ from ai_coding.security.sandbox import (
     relative_to_root,
 )
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
+
+
+def _nearest_line_hint(text: str, old: str) -> str:
+    """Name the closest current line when an exact edit misses.
+
+    Models copy from the read display and can drop punctuation (956c45cb: the
+    old string said ``osxosx`` while the file had ``osx-osx``).  A bare "not
+    found" sends them back to another whole-file read; the line itself is the
+    correction, so show it.  Bounded and advisory: never an automatic match.
+    """
+    lines = text.splitlines()
+    needles = old.splitlines()
+    if not lines or not needles:
+        return ""
+    needle = needles[0].strip()
+    best_index = 0
+    best_ratio = 0.0
+    for index, line in enumerate(lines, start=1):
+        ratio = SequenceMatcher(None, line.strip(), needle).ratio()
+        if ratio > best_ratio:
+            best_index, best_ratio = index, ratio
+    if best_ratio < 0.6:
+        return ""
+    line = lines[best_index - 1]
+    if len(line) > 300:
+        line = line[:300] + "…"
+    return f"\nnearest current line {best_index}: {line}"
 
 
 def _trim_read_display_indent(old: str) -> str:
@@ -173,7 +201,13 @@ class EditTool(BaseTool):
             if candidate_count == 1:
                 old, count, adjusted = candidate, candidate_count, True
         if count == 0:
-            return ToolResult(success=False, output=f"old_string not found in {path_str}")
+            return ToolResult(
+                success=False,
+                output=(
+                    f"old_string not found in {path_str}"
+                    f"{_nearest_line_hint(text, old)}"
+                ),
+            )
         if not replace_all and count > 1:
             msg = (
                 f"old_string appears {count} times in {path_str}; "

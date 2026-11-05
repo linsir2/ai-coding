@@ -800,26 +800,33 @@ def make_handlers(
                 }
             stripped = text.strip()
             if stripped and not stripped.startswith("/"):
-                _queue_next_step(session, stripped)
+                item = _queue_next_step(session, stripped)
+                if item is not None and _turn_in_flight():
+                    return {
+                        "turnId": _live_turn_id(),
+                        "sessionId": session_id,
+                        "steered": True,
+                        "pending": _next_step_count(session),
+                        "rejected": [],
+                    }
+                if item is not None:
+                    # The turn closed between the check and the write: no
+                    # boundary will drain the row, so fall through and start
+                    # this line as its own turn.
+                    _drop_inbox_item(session, item)
+            else:
                 return {
                     "turnId": _live_turn_id(),
                     "sessionId": session_id,
-                    "steered": True,
+                    "steered": False,
                     "pending": _next_step_count(session),
-                    "rejected": [],
+                    "rejected": [
+                        {
+                            "name": "输入",
+                            "reason": "工作区正在运行，命令或空输入未提交；请等本轮结束后再输入",
+                        }
+                    ],
                 }
-            return {
-                "turnId": _live_turn_id(),
-                "sessionId": session_id,
-                "steered": False,
-                "pending": _next_step_count(session),
-                "rejected": [
-                    {
-                        "name": "输入",
-                        "reason": "工作区正在运行，命令或空输入未提交；请等本轮结束后再输入",
-                    }
-                ],
-            }
         # r17/T5: clipboard images arrive as data URLs; they are written under
         # the workspace once and the message references the file.
         images: list[Any] = []
@@ -936,23 +943,27 @@ def make_handlers(
         length meant to the composer."""
         return sum(1 for item in session.inbox if item.target == "next-step")
 
-    def _queue_next_step(session: Any, text: str) -> bool:
-        """Write one next-step row; False for the two inputs steering refuses.
+    def _queue_next_step(session: Any, text: str) -> InboxItem | None:
+        """Write one next-step row; None for the two inputs steering refuses.
 
         Shared by ``session.steer`` and the mid-turn branch of
         ``session.prompt`` so the text rules cannot drift apart.
         """
         text = text.strip()
         if not text or text.startswith("/"):
-            return False
-        session.inbox.append(
-            InboxItem(
-                id=uuid.uuid4().hex[:8], text=text, target="next-step",
-                created_at=now_utc(),
-            )
+            return None
+        item = InboxItem(
+            id=uuid.uuid4().hex[:8], text=text, target="next-step",
+            created_at=now_utc(),
         )
+        session.inbox.append(item)
         _persist_session(world, session)
-        return True
+        return item
+
+    def _drop_inbox_item(session: Any, item: InboxItem) -> None:
+        """Remove a row the turn can no longer reach, and persist the removal."""
+        session.inbox = [row for row in session.inbox if row.id != item.id]
+        _persist_session(world, session)
 
     def session_steer(params: dict[str, Any]) -> dict[str, Any]:
         """steering 前端化: a line typed mid-turn goes to the run, not the queue.
@@ -963,18 +974,42 @@ def make_handlers(
         lines are refused by the same rule as before; the caller keeps those
         on its queue path.  ``pending`` counts the next-step rows still
         waiting, which is what the old queue length meant.
+
+        956c45cb: a steer whose turn ended before the ack must not become a
+        row nobody drains.  The client then saw ``accepted: true`` with
+        ``turnId: 0``, kept its busy latch, and the row sat in the inbox
+        forever.  Refuse instead and let the client start a fresh turn.
         """
         session = state.session
         if session is None:
             raise ValueError("no session initialized")
-        accepted = _queue_next_step(session, str(params.get("text", "") or ""))
-        # A steer joins the turn that is already running.  Name it: the UI may
-        # have cleared its own turn id when a nested plan round ended, and a
-        # later finish would then be orphaned while its busy latch stayed up.
+        turn_id = _live_turn_id()
+        if turn_id == 0:
+            return {
+                "accepted": False,
+                "pending": _next_step_count(session),
+                "turnId": 0,
+            }
+        item = _queue_next_step(session, str(params.get("text", "") or ""))
+        if item is None:
+            return {
+                "accepted": False,
+                "pending": _next_step_count(session),
+                "turnId": turn_id,
+            }
+        if not _turn_in_flight():
+            # The turn closed while we were writing: no boundary will ever
+            # drain this row.  Hand the text back to the client instead.
+            _drop_inbox_item(session, item)
+            return {
+                "accepted": False,
+                "pending": _next_step_count(session),
+                "turnId": 0,
+            }
         return {
-            "accepted": accepted,
+            "accepted": True,
             "pending": _next_step_count(session),
-            "turnId": _live_turn_id(),
+            "turnId": turn_id,
         }
 
     def session_command(params: dict[str, Any]) -> dict[str, Any]:

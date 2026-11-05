@@ -357,15 +357,17 @@ export function Session(props: SessionProps) {
         .request("session.steer", { text })
         .then((ack: unknown) => {
           const data = ack as { accepted?: boolean; turnId?: unknown } | null
-          const accepted = data?.accepted !== false
-          if (accepted) {
+          const turnId = Number(data?.turnId ?? 0)
+          // A steer only exists while its turn is live.  If the turn ended
+          // before the ack (956c45cb), accepting the line leaves ``busy`` set
+          // and a next-step row that no loop boundary will ever drain.  Clear
+          // the stale latch and run the line as its own turn instead.
+          if (data?.accepted !== false && Number.isInteger(turnId) && turnId > 0) {
             apply({ kind: "submitted", text, images: [] })
-            const turnId = Number(data?.turnId ?? 0)
-            if (Number.isInteger(turnId) && turnId > 0) {
-              apply({ kind: "turn-started", turnId })
-            }
+            apply({ kind: "turn-started", turnId })
           } else {
-            queueText(text)
+            apply({ kind: "turn-refused" })
+            if (dispatch(text, [])) apply({ kind: "submitted", text, images: [] })
           }
         })
         .catch(() => queueText(text))

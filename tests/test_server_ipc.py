@@ -2461,12 +2461,25 @@ def _inbox_rows(ipc_client):
 async def test_session_steer_writes_a_next_step_row_and_refuses_commands(ipc):
     """Same contract as the old FIFO endpoint -- text accepted, '/' and blanks
     refused, pending counts what is waiting -- but the row lands in the session
-    table where the panel and a restart can see it."""
-    _world, _service, client = ipc
+    table where the panel and a restart can see it.
+
+    A steer needs a live boundary to land at.  Without one the row used to be
+    written anyway, so 956c45cb's late ack left an undrainable line and a busy
+    composer; the endpoint now refuses and the client starts a fresh turn.
+    """
+    world, _service, client = ipc
     client.request("initialize")
+
+    idle = client.request("session.steer", {"text": "改个方向：先看测试"})
+    assert idle["accepted"] is False and idle["pending"] == 0
+
+    world.loop = _GateLoop()
+    started = client.request("session.prompt", {"text": "slow"})
+    assert await client.wait_for(lambda: bool(world.loop.calls))
 
     ok = client.request("session.steer", {"text": "改个方向：先看测试"})
     assert ok["accepted"] is True and ok["pending"] == 1
+    assert ok["turnId"] == started["turnId"]
 
     refused = client.request("session.steer", {"text": "/help"})
     assert refused["accepted"] is False and refused["pending"] == 1
@@ -2477,6 +2490,9 @@ async def test_session_steer_writes_a_next_step_row_and_refuses_commands(ipc):
     rows = _inbox_rows(client)
     assert len(rows) == 1 and rows[0]["target"] == "next-step"
     assert rows[0]["text"] == "改个方向：先看测试"
+
+    world.loop.release.set()
+    assert await client.wait_for(client.turn_finished.is_set)
 
 
 @pytest.mark.asyncio

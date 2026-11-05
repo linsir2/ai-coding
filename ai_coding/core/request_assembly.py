@@ -242,9 +242,21 @@ def _observed_prompt_tokens(session: SessionData) -> int:
     or before the last compaction measured a context that no longer exists, and
     reading it would make the gate compact again on the very next request.
     """
-    live = session.live_prompt_tokens()
+    live = int(getattr(session, "live_context_tokens", 0) or 0)
     if live > 0:
         return live
+    # A turn row is written only when a turn closes, so before this turn's
+    # first step the newest row belongs to an older request.  Reading it here
+    # was how 956c45cb sent 2.45M tokens (the poisoned synthetic-message loop
+    # had grown the raw history without a model step) while turn 1's 24k row
+    # said the context was small.  Only a row from the *current* turn can
+    # describe the request this turn is about to send.
+    current = int(getattr(session, "turn_count", 0) or 0)
+    boundary = int(getattr(session, "last_compacted_turn", 0) or 0)
+    if current > boundary:
+        for row in reversed(session.turn_usages):
+            if int(row.turn) == current:
+                return int(row.context_tokens or row.prompt_tokens or 0)
     return working_history_tokens(session)
 
 

@@ -128,6 +128,29 @@ def test_fatigue_l1_helped_when_damage_stops_growing():
     assert ledger["fatigue"]["outcome"] == "helped"
 
 
+def test_fatigue_helped_does_not_refire_until_new_damage():
+    """A helped window is not an instruction to nag again (956c45cb).
+
+    Fatigue only accumulates, so "equal to the ref" is the helped signal.  But
+    ``_due`` mapped helped straight back to L1, so every iteration injected the
+    same nudge before the model could run: the fatigue index never changed and
+    the turn died with 18k synthetic messages.  A helped window must stay quiet
+    until the index grows past the ref.
+    """
+    ledger = _fired("fatigue", 1, outcome="helped", ref={"fatigue": 35.0})
+    quiet = iv.select(
+        _snap(iteration=5, fatigue_index=35.0, intervention_ledger=ledger),
+        phase=iv.PRE, limits=LIMITS,
+    )
+    assert quiet is None
+
+    damaged = iv.select(
+        _snap(iteration=6, fatigue_index=64.0, intervention_ledger=ledger),
+        phase=iv.PRE, limits=LIMITS,
+    )
+    assert (damaged.gate, damaged.level, damaged.kind) == ("fatigue", 1, "nudge")
+
+
 def test_fatigue_l3_lapse_finishes():
     ledger = _fired("fatigue", 3, outcome="failed", at=(2, 4))
     d = iv.select(_snap(iteration=4, fatigue_index=99.0, intervention_ledger=ledger),

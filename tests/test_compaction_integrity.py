@@ -431,7 +431,7 @@ def test_the_gate_still_reads_usage_recorded_after_the_compaction():
     from ai_coding.core.request_assembly import _observed_prompt_tokens
 
     session = SessionData(session_id="s", title="", created_time="t", last_access_time="t")
-    session.turn_count = 20
+    session.turn_count = 21
     session.record_turn_usage(20, {"prompt_tokens": 237_157})
     session.last_compacted_turn = 20
     session.record_turn_usage(21, {"prompt_tokens": 4_450})

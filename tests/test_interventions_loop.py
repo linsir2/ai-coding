@@ -35,6 +35,24 @@ class _Flaky(BaseTool):
         return ToolResult(success=False, output="boom", error="nonzero_exit")
 
 
+class _TimedOut(BaseTool):
+    """Always fails with a severity-5 error: two calls cross the fatigue line."""
+
+    name = "timedout"
+    parallel_safe = True
+
+    @property
+    def description(self) -> str:
+        return "a tool that always times out"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=False, output="timed out", error="timeout")
+
+
 class _ScriptedEngine(ChatEngine):
     """Returns pre-scripted steps and records every request it received."""
 
@@ -108,6 +126,78 @@ async def test_a_turn_cut_mid_window_retries_the_same_level_next_turn(tmp_path):
     assert "重复提醒" in nudges[-1]                                   # L2 的武装文案
     persisted = sessions.load(session.session_id)
     assert persisted.intervention_state["strategy"]["level"] == 2     # 搭车落盘、读回存活
+
+
+@pytest.mark.asyncio
+async def test_a_completed_task_does_not_clear_the_ledger_mid_turn(tmp_path):
+    """956c45cb follow-up: a finished task cleared the ladder before every
+    decision, so a strategy L1 nudge re-armed from ``entry is None`` and the
+    model never got to run again (9.7k synthetic messages).  The clear belongs
+    at the turn close, not inside the loop.
+    """
+    engine = _ScriptedEngine([
+        _call("c1"),                       # all-fail 1
+        _call("c2"),                       # all-fail 2 -> strategy L1
+        _text("done"),                     # the model must get this step
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, max_tool_iterations=8)
+    session = sessions.create()
+    session.task = TaskState(
+        goal="g", items=[TodoItem(id="1", content="done", status="completed")]
+    )
+
+    await loop.process_input(session, "go")
+
+    assert len(engine.requests) == 3
+    strategy = [
+        m.content or ""
+        for m in session.messages
+        if m.synthetic and "strategy-gate" in (m.content or "")
+    ]
+    assert len(strategy) == 1
+    assert session.intervention_state is None       # completed task: clean at close
+
+
+@pytest.mark.asyncio
+async def test_a_helped_fatigue_window_lets_the_model_run_before_refiring(tmp_path):
+    """956c45cb replay: fatigue is monotonic, so an unchanged index is "helped".
+
+    The old ``_due`` mapped helped straight back to L1.  The loop injected the
+    same nudge every iteration before the model could run, and the session grew
+    to 18k synthetic messages.  One nudge must be followed by a model step.
+    """
+    engine = _ScriptedEngine([
+        _call_named("c1", "timedout"),      # severity 5 -> fatigue 25
+        _call_named("c2", "timedout"),      # 50 -> L1
+        _text("done"),
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    registry = ToolRegistry()
+    registry.register(_TimedOut())
+    loop = AgentLoop(
+        engine,
+        sessions,
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(
+            failed_streak_threshold=0,
+            stall_iterations=0,
+            max_tool_iterations=8,
+        ),
+        workspace=".",
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    fatigue = [
+        m.content or ""
+        for m in session.messages
+        if m.synthetic and "fatigue-gate" in (m.content or "")
+    ]
+    assert len(fatigue) == 1
+    assert len(engine.requests) == 3       # c1, c2, then the closing text
 
 
 @pytest.mark.asyncio
