@@ -290,6 +290,12 @@ class RequestAssembler:
         policy: Any,
         memory: Any,
         reporter: Any,
+        # R3-3: the serialised tool schemas this request will carry.  Deferred
+        # tools are not advertised, so the registry-wide text overstates both
+        # the attribution and ``estimated_tokens`` (measured live: 27,181 vs
+        # 15,169).  A provider, because it depends on the posture and on what
+        # ``tool_search`` loaded.
+        tools_text_provider: Callable[[SessionData], str] | None = None,
         # R01 (F-51): the loop replaces ``policy`` for a planning round or a
         # sub-agent (``continuations_disabled``) or a plan step (a scoped
         # policy of its own).  A provider makes every iteration read the policy
@@ -316,6 +322,7 @@ class RequestAssembler:
         self._policy_provider = policy_provider
         self._memory = memory
         self._reporter = reporter
+        self._tools_text_provider = tools_text_provider
         # The system prompt belongs to the composition root (project instructions +
         # the skills catalogue), so the loop hands its builder in rather than the
         # assembler learning about prompt assembly.
@@ -580,6 +587,11 @@ class RequestAssembler:
             request=request,
             tail_blocks=tail_blocks,
             previous=previous_request,
+            tools_text=(
+                self._tools_text_provider(session)
+                if self._tools_text_provider is not None
+                else None
+            ),
         )
         return Assembled(
             history=history,

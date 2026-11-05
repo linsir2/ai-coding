@@ -224,3 +224,29 @@ async def test_the_warning_never_changes_the_request(monkeypatch):
     assert loud_events.of_type(ToolSurfaceWarning)
 
 
+@pytest.mark.asyncio
+async def test_the_reported_surface_excludes_deferred_tools():
+    """R3-3: the attribution must measure the request, not the registry.
+
+    Live: ``ContextAssembled.tools_chars`` was 27,181 for the whole 8-round run
+    while the request carried 15,169 (11 tools were deferred and never sent).
+    That inflated ``estimated_tokens`` by the same factor and made the R2-8
+    warning judge a surface nobody pays for.
+    """
+    from ai_coding.core.events import ContextAssembled
+    from ai_coding.core.trace import short_json
+    from ai_coding.tools.schema import tool_schemas_from_tools
+
+    plain = _Tool("plain", "x" * 100)
+    deferred = _Tool("deferred", "y" * 5_000)
+    deferred.defer = True
+    loop, _engine, observer = _loop(plain, deferred, tools_chars_warn=1)
+
+    await loop.process_input(_session(), "一")
+
+    visible = len(short_json(tool_schemas_from_tools([plain])))
+    warning = observer.of_type(ToolSurfaceWarning)[0]
+    assembled = observer.of_type(ContextAssembled)[0]
+    assert warning.tools_chars == visible
+    assert assembled.tools_chars == visible
+    assert abs(sum(dict(warning.origins).values()) - visible) <= 6

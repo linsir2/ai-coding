@@ -127,12 +127,21 @@ class TurnReporter:
         request: Sequence[ChatMessage],
         tail_blocks: tuple[tuple[str, int], ...],
         previous: str | None,
+        tools_text: str | None = None,
     ) -> str:
         """Report how this request was assembled; return its canonical form.
 
         The return value is what the next iteration compares against to measure
         the shared prefix, so the caller never has to rebuild it.
+
+        R3-3: ``tools_text`` is the schema text **this request carries**.  The
+        registry-wide text includes deferred tools that are not advertised, so
+        using it here made every report ~1.8x the real request (27,181 chars
+        reported, 15,169 sent).
         """
+        if tools_text is not None:
+            self._tools_text = tools_text
+            self._tools_chars = len(tools_text)
         canonical = canonical_request(instructions, request, self._tools_text)
         shared_chars, shared_ratio = prefix_shared(previous, canonical)
         event = ContextAssembled(

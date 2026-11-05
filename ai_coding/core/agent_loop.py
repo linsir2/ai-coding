@@ -243,14 +243,17 @@ def _armed_profile(session: Any) -> str:
     return str(getattr(task, "armed_profile", "") or "")
 
 
-def _tools_by_origin(registry: ToolRegistry) -> dict[str, int]:
+def _tools_by_origin(tools: Sequence[BaseTool]) -> dict[str, int]:
     """Serialised schema chars per origin, biggest first (R7e-3).
 
     Per *tool* rather than per group, so the numbers add up to the same schemas the
     request carries (the whole-array text differs only by its brackets and commas).
+    R3-3: takes the *visible* tools, not the registry -- a deferred tool's schema
+    is not sent, so counting it made the warning and the attribution ~1.8x the
+    truth (measured live: 27,181 reported, 15,169 sent).
     """
     sizes: dict[str, int] = {}
-    for tool in registry.all_tools:
+    for tool in tools:
         sizes[tool.origin] = sizes.get(tool.origin, 0) + len(short_json(tool_schema(tool)))
     return dict(sorted(sizes.items(), key=lambda item: (-item[1], item[0])))
 
@@ -505,15 +508,18 @@ class AgentLoop:
                 tuple[str, ...],
                 bool,
             ],
-            list[dict[str, Any]],
+            tuple[list[BaseTool], list[dict[str, Any]]],
         ] = {}
         # R4a: the tool schemas are part of every prompt, so their size belongs in
-        # the attribution (docs/r4-analysis.md 4.3).
+        # the attribution (docs/r4-analysis.md 4.3).  R3-3: these are the values
+        # for the *full* registry, used before the first request is assembled;
+        # ``_surface`` replaces them with the visible surface for every turn.
         self._tools_text = short_json(self._tool_schemas)
         self._tools_chars = len(self._tools_text)
         # R7e-3: the tool surface is static, so its breakdown is computed once and
-        # the warning costs nothing per turn.
-        self._tools_by_origin = _tools_by_origin(tools)
+        # the warning costs nothing per turn.  R3-3: recomputed per turn from the
+        # surface the request actually carries (see ``_warn_tools_chars_once``).
+        self._tools_by_origin = _tools_by_origin(list(tools.all_tools))
         self._tools_warned = False
         #: R2-8: the whole-surface budget is a separate, opt-in warning; a
         #: loop that only cares about MCP must not silence it.
@@ -574,6 +580,10 @@ class AgentLoop:
             policy_provider=lambda: self.policy,
             memory=self.turn_memory,
             reporter=self.reporter,
+            # R3-3: the attribution must measure the surface the request really
+            # carries -- deferred schemas are not sent, and counting them made
+            # every ContextAssembled report ~1.8x the truth.
+            tools_text_provider=self._tools_text_for,
             build_instructions=self._build_instructions,
             catalog_builder=self.catalog_builder,
             settings=self.settings,
@@ -1631,7 +1641,7 @@ class AgentLoop:
         # per turn; a new turn starts the count over.
         session.read_repeats.clear()
         self.reporter.begin_turn(self.observer)
-        self._warn_tools_chars_once()
+        self._warn_tools_chars_once(session)
         # P2 (补充式方案 06) mark this turn open; 11-spec §7.1 makes it
         # durable immediately.  The old design rode the *next* save ("a crash
         # before that first save has no output to lose") -- true for outputs,
@@ -1766,7 +1776,7 @@ class AgentLoop:
             )
         )
 
-    def _warn_tools_chars_once(self) -> None:
+    def _warn_tools_chars_once(self, session: Any) -> None:
         """Say once, per loop, that the tool surface is over its ceiling.
 
         Two independent budgets, because they are actionable in different ways:
@@ -1781,7 +1791,15 @@ class AgentLoop:
 
         ``origin`` is ``"local"`` for a built-in tool and an MCP server's name
         otherwise (``tools/base.py``).
+
+        R3-3: the numbers come from **this session's visible surface**.  The
+        registry-wide text counts deferred tools whose schemas are not sent, and
+        that overstated the live surface by 1.8x (27,181 vs 15,169).
         """
+        tools, schemas = self._surface(session)
+        self._tools_text = short_json(schemas)
+        self._tools_chars = len(self._tools_text)
+        self._tools_by_origin = _tools_by_origin(tools)
         mcp_threshold = int(getattr(self.settings, "mcp_chars_warn", 0) or 0)
         mcp_chars = sum(
             chars for origin, chars in self._tools_by_origin.items() if origin != "local"
@@ -3608,8 +3626,8 @@ class AgentLoop:
         merged = tuple(dict.fromkeys([*getattr(session, "loaded_tools", ()), *names]))
         session.loaded_tools = merged[-_LOADED_TOOLS_CAP:]
 
-    def _surface_schemas(self, session: Any) -> list[dict[str, Any]]:
-        """The schema list for this request -- one per posture and rule set.
+    def _surface(self, session: Any) -> tuple[list[BaseTool], list[dict[str, Any]]]:
+        """The tools and schemas this request carries -- one per posture/rules.
 
         The cache is what keeps the request byte-stable: the same posture and
         the same session rules always produce the same list, in the same
@@ -3638,21 +3656,28 @@ class AgentLoop:
             # catalogue would be served during the run.
             bool(getattr(session, "plan_implementing", False)),
         )
-        schemas = self._surface_cache.get(key)
-        if schemas is None:
-            schemas = tool_schemas_from_tools(
-                self._surface_tools(
-                    mode,
-                    readonly,
-                    session_rules,
-                    agent_rules,
-                    key[-3],
-                    key[-2],
-                    plan_implementing=key[-1],
-                )
+        cached = self._surface_cache.get(key)
+        if cached is None:
+            tools = self._surface_tools(
+                mode,
+                readonly,
+                session_rules,
+                agent_rules,
+                key[-3],
+                key[-2],
+                plan_implementing=key[-1],
             )
-            self._surface_cache[key] = schemas
-        return schemas
+            cached = (tools, tool_schemas_from_tools(tools))
+            self._surface_cache[key] = cached
+        return cached
+
+    def _surface_schemas(self, session: Any) -> list[dict[str, Any]]:
+        """The schema list for this request (see :meth:`_surface`)."""
+        return self._surface(session)[1]
+
+    def _tools_text_for(self, session: Any) -> str:
+        """R3-3: the tool text the next request really carries, for attribution."""
+        return short_json(self._surface_schemas(session))
 
     # ---- memory -----------------------------------------------------------
 
