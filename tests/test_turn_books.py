@@ -383,6 +383,79 @@ def test_running_the_static_check_ends_the_streak():
     assert books.search_streak == 0
 
 
+# ---- R4-1: inspection bash is a look, not an action ----
+
+
+def test_an_inspection_bash_extends_the_look_only_streak():
+    """Live: 47 identical reads and 61 ``find/ls/cat`` calls in one turn, and
+    the ladder never saw the loop because every such bash reset the streak."""
+    books = TurnBooks()
+    books.note_outcomes(
+        [_outcome("bash", params={"command": "cd /tmp && find src -type f | sort"})]
+    )
+    assert books.search_streak == 1
+    books.note_outcomes([_outcome("read")])
+    assert books.search_streak == 2
+
+
+def test_a_building_bash_still_ends_the_streak():
+    books = TurnBooks()
+    books.note_outcomes([_outcome("read"), _outcome("read")])
+    books.note_outcomes(
+        [
+            _outcome(
+                "bash",
+                params={"command": "cd frontend && npm run build 2>&1 | tail -20"},
+            )
+        ]
+    )
+    assert books.search_streak == 0
+
+
+def test_a_redirect_inside_a_compound_command_is_an_action():
+    """``command_views`` cannot see this redirect (it wraps the whole list);
+    the raw text can, and a write must not count as a look."""
+    books = TurnBooks()
+    books.note_outcomes(
+        [_outcome("bash", params={"command": "cd /tmp && echo hi > out.txt"})]
+    )
+    assert books.search_streak == 0
+
+
+def test_a_heredoc_write_is_an_action():
+    books = TurnBooks()
+    books.note_outcomes(
+        [
+            _outcome(
+                "bash",
+                params={"command": "cd /tmp && cat > README.md <<'EOF'\nhi\nEOF"},
+            )
+        ]
+    )
+    assert books.search_streak == 0
+
+
+def test_version_probes_are_looks():
+    books = TurnBooks()
+    books.note_outcomes(
+        [_outcome("bash", params={"command": "python --version && npm --version"})]
+    )
+    assert books.search_streak == 1
+
+
+def test_inspection_bash_does_not_erase_a_stale_streak():
+    """The measured loop alternated read and ``find``.  ``find`` used to batch
+    as an action, so ``_clear_findings`` reset ``stale_streak`` every time and
+    the 47 identical reads never reached ``stale_l3`` (6)."""
+    books = TurnBooks()
+    for _ in range(8):
+        books.note_outcomes([_read(0, 10)])
+        books.note_outcomes(
+            [_outcome("bash", params={"command": "cd /tmp && find src -type f | sort"})]
+        )
+    assert books.stale_streak >= 6
+
+
 def test_a_failed_retrieval_does_not_count():
     """A failed call is STRATEGY's evidence, not evidence of looking without acting."""
     books = TurnBooks()

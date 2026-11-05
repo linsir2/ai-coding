@@ -349,6 +349,46 @@ async def test_a_small_file_is_never_answered_with_a_pointer(setup):
 
 
 @pytest.mark.asyncio
+async def test_a_short_but_wide_page_is_not_exempt(setup):
+    """R4-4: "small" is lines **and** characters.  Twenty lines of minified
+    output is not the 450-byte config the exemption was written for."""
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "bundle.js").write_text(
+        "\n".join("x" * 300 for _ in range(20)) + "\n"
+    )
+    marks = [(1, 20, "v1")]
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "bundle.js"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert "未返回正文" in result.output
+
+
+@pytest.mark.asyncio
+async def test_a_59_line_file_is_deduplicated(setup):
+    """R4-4: the live loop re-read a 59-line ``App.tsx`` 47 times because the
+    old 60-line threshold exempted it."""
+    tmp_path, sb, fst, tool = setup
+    (tmp_path / "App.tsx").write_text(
+        "\n".join(f"const row{index} = {index};" for index in range(1, 60)) + "\n"
+    )
+    marks = [(1, 59, "v1")]
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "App.tsx"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert "未返回正文" in result.output
+
+
+@pytest.mark.asyncio
 async def test_a_repeat_read_returns_only_the_gap(setup):
     tmp_path, sb, fst, tool = setup
     (tmp_path / "trace.jsonl").write_text(

@@ -100,6 +100,81 @@ ACTION_TOOLS = frozenset(
     }
 )
 
+#: R4-1: programs that only report state.  A ``bash`` call made *only* of these
+#: is a look, not an action -- otherwise every "verify the files" command resets
+#: the look-only streak, and a model alternating ``read`` with ``find`` can
+#: inspect forever without the ladder seeing it (measured: 47 identical reads
+#: and 61 near-identical ``find/ls/cat`` calls in one turn, 116 iterations).
+#: Mutating verbs (``rm/mv/cp/mkdir/tee/sed -i``), build/test runners
+#: (``npm run``/``pytest``/``uvicorn``) and anything unparsed stay actions.
+_INSPECTION_PROGRAMS = frozenset(
+    {
+        "cd", "echo", "printf", "ls", "find", "cat", "head", "tail", "sort",
+        "uniq", "wc", "stat", "file", "du", "df", "tree", "pwd", "which",
+        "type", "grep", "rg", "diff", "cut", "tr", "paste", "basename",
+        "dirname", "realpath", "readlink", "printenv", "env", "date",
+        "uname", "whoami", "id", "ps", "free", "test", "command",
+        "true", "false",
+    }
+)
+
+#: R4-1: ``find`` flags that mutate.  A command that deletes or executes is not
+#: an inspection even though its program is allowlisted.
+_FIND_MUTATING_FLAGS = frozenset({"-delete", "-exec", "-execdir", "-ok", "-okdir"})
+
+_GIT_READ_SUBCOMMANDS = frozenset(
+    {"status", "log", "diff", "show", "branch", "rev-parse", "ls-files", "blame"}
+)
+
+#: R4-1: a redirect to a real file.  ``command_views`` cannot report a redirect
+#: inside an ``&&`` list (measured: ``cd /tmp && echo hi > a.txt`` comes back
+#: with no redirects), so the raw text is the only reliable source.  ``2>&1``
+#: and ``>/dev/null`` are excluded by the lookahead and the target check.
+_FILE_REDIRECT = re.compile(r"(?<![0-9&])>>?\s*([^\s&|;]+)")
+
+_SIMPLE_VERSION_FLAGS = frozenset({"--version", "-V", "-v", "--help", "-h"})
+
+
+def _bash_is_inspection(command: str) -> bool:
+    """Is this bash command a read of existing state, with no side effects?
+
+    Conservative by design: an unparsed command, an unknown program or any
+    redirect to a real file answers *no* (action).  A false "action" merely
+    leaves today's behaviour alone; a false "look" would let a command hide a
+    stall from the ladder.
+    """
+    from ai_coding.shell_parse import command_views
+
+    text = str(command or "").strip()
+    if not text:
+        return False
+    for target in _FILE_REDIRECT.findall(text):
+        if target not in ("/dev/null", "&1", "&2", "-"):
+            return False
+    views = command_views(text)
+    if not views:
+        return False
+    for view in views:
+        if view.broken:
+            return False
+        program = view.program.rsplit("/", 1)[-1]
+        args = view.arguments
+        if program in _INSPECTION_PROGRAMS:
+            if program == "find" and any(arg in _FIND_MUTATING_FLAGS for arg in args):
+                return False
+            continue
+        # Version/help probes are inspections even though the program itself can
+        # write: ``python --version`` and ``npm --version`` answer questions.
+        if program in ("python", "python3", "py", "node", "npm", "pip", "uv"):
+            if any(arg in _SIMPLE_VERSION_FLAGS for arg in args[:2]):
+                continue
+            return False
+        if program == "git" and args and args[0] in _GIT_READ_SUBCOMMANDS:
+            continue
+        return False
+    return True
+
+
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
 #: plan-validation refusals -- ``update_plan``'s ``invalid_plan``).  A round
 #: whose calls all carry these is not evidence of failure: it neither records
@@ -224,8 +299,29 @@ class TurnFrame:
     deadline: Deadline | None = None
 
 
+def _is_look(item: Any) -> bool:
+    """R4-1: does this successful call only read existing state?
+
+    ``bash`` joins the retrieval tools when its whole command is an inspection
+    (``cd``/``find``/``ls``/``cat``/``echo`` …).  Without this, alternating a
+    read with a ``find`` reset the look-only streak on every batch, and the
+    ladder could not see the verification loop at all (measured: 47 identical
+    reads + 61 inspection commands, 116 iterations, one turn).
+    """
+    name = item.call.name
+    if name in RETRIEVAL_TOOLS:
+        return True
+    return name == "bash" and _bash_is_inspection(
+        str(item.call.params.get("command", "") or "")
+    )
+
+
 def _is_action(item: Any) -> bool:
     """A merge only counts as an action when it actually landed."""
+    if item.call.name == "bash":
+        # R4-1: which bash counts as acting is a per-command question, not a per-
+        # tool one.  A read-only inspection must not reset the streak.
+        return not _bash_is_inspection(str(item.call.params.get("command", "") or ""))
     if item.call.name in ACTION_TOOLS:
         return True
     if item.call.name != "merge_agent":
@@ -489,7 +585,7 @@ class TurnBooks:
         # STRATEGY's evidence, and a todo write is not an action on the workspace,
         # so neither may be able to hide a stall from the ladder.
         for item in succeeded:
-            if item.call.name in RETRIEVAL_TOOLS:
+            if _is_look(item):
                 self.search_streak += 1
                 self.search_calls += 1
                 # I1/R-7: a successful look also answers "is this news".

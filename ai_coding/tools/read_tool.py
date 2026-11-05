@@ -25,7 +25,11 @@ _DEFAULT_MAX_LINES = 500
 #: step.  Measured: a 22-line ``package.json`` was pointed at 18 times in a row
 #: (~450 characters saved, ~500k prompt tokens spent).  Large reads still
 #: answer with a pointer; a small one is simply returned again.
-_SMALL_READ_LINES = 60
+#: R4-4: 60 lines was too high -- a 59-line ``App.tsx`` (~2.5KB) stayed exempt
+#: and was re-sent 47 times in one turn.  A page must be small in **both**
+#: dimensions to skip the ledger.
+_SMALL_READ_LINES = 30
+_SMALL_READ_CHARS = 1_200
 
 
 class ReadTool(BaseTool):
@@ -176,7 +180,11 @@ class ReadTool(BaseTool):
         # a fully covered request answers with a pointer.
         # R3-1: a small page opts out of the whole mechanism -- the pointer
         # saves a few hundred characters and can cost a whole iteration.
-        small = page_end - offset <= _SMALL_READ_LINES
+        # R4-4: "small" means few lines **and** few characters: a 20-line
+        # minified bundle is not small.
+        page_lines = page_end - offset
+        page_chars = sum(len(line) for line in lines[offset:page_end])
+        small = page_lines <= _SMALL_READ_LINES and page_chars <= _SMALL_READ_CHARS
         marks = (
             resolved_ctx.read_marks(key)
             if resolved_ctx.read_marks is not None and not small
