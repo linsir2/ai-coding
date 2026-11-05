@@ -21,6 +21,7 @@ import { AskPanel } from "../component/ask"
 import { PermissionPanel } from "../component/permission"
 import { Prompt } from "../component/prompt"
 import { buildSubmission, commandName, planPrelude, type PendingPrompt } from "../util/submission"
+import { toolTarget } from "../util/toolmeta"
 import { normalizeAgents, nextAgentId, type AgentSummary } from "../state/agents"
 import { isPlanAgentId } from "../util/plan-agent"
 import { AgentPicker } from "../component/agent-picker"
@@ -422,6 +423,13 @@ export function Session(props: SessionProps) {
 
   /** A card owns the keyboard while it is up (D4). */
   const cardOpen = (): boolean => props.permission !== null || props.ask !== null
+  /** P2-4: name the tool call the permission panel is blocking, so its card can
+   *  read "等待审批" instead of the running spinner. */
+  const waitingTool = (): { toolName: string; target: string } | null => {
+    const request = props.permission
+    if (request === null) return null
+    return { toolName: request.toolName, target: toolTarget(request.toolName, request.params) }
+  }
 
   /**
    * T7: run one agent switch through session.agent.select.  The backend owns
@@ -928,7 +936,13 @@ export function Session(props: SessionProps) {
             paddingTop={1}
           >
             <Index each={state.messages}>
-              {(message) => <MessageView message={message()} alwaysOpen={alwaysThinking()} />}
+              {(message) => (
+                <MessageView
+                  message={message()}
+                  alwaysOpen={alwaysThinking()}
+                  waiting={waitingTool()}
+                />
+              )}
             </Index>
             <box height={1} />
           </scrollbox>

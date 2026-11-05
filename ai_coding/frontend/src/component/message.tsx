@@ -88,7 +88,12 @@ export const USER_BORDER = {
  * once, at creation, so the reused instance would keep drawing the old kind —
  * which is how a thought ended up rendered as a wall of prose.
  */
-function PartView(props: { part: Part; alwaysOpen: boolean }) {
+function PartView(props: {
+  part: Part
+  alwaysOpen: boolean
+  /** P2-4: the call the permission panel is waiting on, if any. */
+  waiting?: { toolName: string; target: string } | null
+}) {
   return (
     <Switch>
       <Match when={props.part.kind === "text" && props.part}>
@@ -108,7 +113,15 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
         {(part) => <Reasoning text={part().text} alwaysOpen={props.alwaysOpen} />}
       </Match>
       <Match when={props.part.kind === "tool" && props.part}>
-        {(part) => <ToolCard part={part() as Extract<Part, { kind: "tool" }>} />}
+        {(part) => (
+          <ToolCard
+            part={part() as Extract<Part, { kind: "tool" }>}
+            waiting={
+              props.waiting?.toolName === part().toolName &&
+              (props.waiting.target === "" || props.waiting.target === part().target)
+            }
+          />
+        )}
       </Match>
       <Match when={props.part.kind === "plan" && props.part}>
         {(part) => {
@@ -245,7 +258,11 @@ function PartView(props: { part: Part; alwaysOpen: boolean }) {
   )
 }
 
-export function MessageView(props: { message: ChatMessage; alwaysOpen: boolean }) {
+export function MessageView(props: {
+  message: ChatMessage
+  alwaysOpen: boolean
+  waiting?: { toolName: string; target: string } | null
+}) {
   if (props.message.role === "user") {
     const text = () => {
       const part = props.message.parts[0]
@@ -269,7 +286,9 @@ export function MessageView(props: { message: ChatMessage; alwaysOpen: boolean }
   return (
     <>
       <Index each={props.message.parts}>
-        {(part) => <PartView part={part()} alwaysOpen={props.alwaysOpen} />}
+        {(part) => (
+          <PartView part={part()} alwaysOpen={props.alwaysOpen} waiting={props.waiting} />
+        )}
       </Index>
       {/* M1b T1b + T7: who answered.  Only a non-default agent earns a tag —
           the build agent is the norm, and a tag on every answer is noise.

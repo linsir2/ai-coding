@@ -26,7 +26,7 @@ import {
 
 type ToolPart = Extract<Part, { kind: "tool" }>
 
-export function ToolCard(props: { part: ToolPart }) {
+export function ToolCard(props: { part: ToolPart; waiting?: boolean }) {
   // 20 §批次2: a settled todo_write is the plan card's event, not a card of
   // its own -- the raw `<task-state>` preview it used to print was half the
   // wall the user saw.  A failure still draws: the card is the only place a
@@ -47,13 +47,26 @@ export function ToolCard(props: { part: ToolPart }) {
   const toggle = () => setExpanded((value) => !value)
 
   const running = () => props.part.status === "running"
+  // P2-4: a call waiting for the operator has not started.  Drawing the running
+  // spinner here told the user the command was already executing while the
+  // permission panel was still asking.
+  const waiting = () => running() && props.waiting === true
   const failure = () => toolFailure(props.part.error)
   const denied = () => props.part.status !== "running" && failure().tone === "denied"
 
   const accent = () => {
+    if (waiting()) return theme.feedbackWarning
     if (running()) return theme.textBase
     if (denied()) return theme.feedbackWarning
     return props.part.status === "ok" ? theme.feedbackSuccess : theme.feedbackError
+  }
+
+  const title = () => {
+    if (!waiting()) {
+      return toolTitle(props.part.verb, props.part.target, running(), props.part.status === "ok")
+    }
+    const action = `等待审批 · ${props.part.verb}`
+    return props.part.target ? `${action} · ${props.part.target}` : action
   }
 
   const icon = () => (running() ? null : denied() ? "⊘" : props.part.status === "ok" ? "✓" : "✗")
@@ -68,13 +81,13 @@ export function ToolCard(props: { part: ToolPart }) {
           `+`/`−` glyph — next to ✓/✗/⊘ it read as part of the outcome — and a
           row-wide target beats making the reader find the label. */}
       <box flexDirection="row" gap={1} onMouseUp={canExpand() ? toggle : undefined}>
-        <Show when={!running()} fallback={<spinner name="dots" color={theme.textMuted} />}>
+        <Show when={!running() || waiting()} fallback={<spinner name="dots" color={theme.textMuted} />}>
           <text fg={accent()} attributes={strike()}>
-            {icon()}
+            {waiting() ? "△" : icon()}
           </text>
         </Show>
         <text fg={accent()} attributes={strike()}>
-          {toolTitle(props.part.verb, props.part.target, running(), props.part.status === "ok")}
+          {title()}
         </text>
         <Show when={props.part.durationMs > 0}>
           {/* A-10: never let the wait note wrap or squeeze the tool name. */}

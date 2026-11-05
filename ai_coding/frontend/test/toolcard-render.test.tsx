@@ -28,8 +28,11 @@ const part = (over: Partial<ToolPart> = {}): ToolPart => ({
   ...over,
 })
 
-const render = async (value: ToolPart) => {
-  const setup = await testRender(() => <ToolCard part={value} />, { width: 70, height: 16 })
+const render = async (value: ToolPart, waiting = false) => {
+  const setup = await testRender(
+    () => <ToolCard part={value} waiting={waiting} />,
+    { width: 70, height: 16 },
+  )
   await setup.flush()
   await setup.waitForVisualIdle()
   return setup
@@ -97,6 +100,13 @@ describe("ToolCard", () => {
   // The running branch is covered by toolmeta.test.ts: a running part draws the
   // spinner, which the render harness has no component for.
 
+  test("a call waiting for approval does not claim to be running (P2-4)", async () => {
+    const setup = await render(part({ status: "running" }), true)
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("等待审批 · 运行命令 · git branch")
+    expect(frame).not.toContain("正在运行命令")
+    setup.renderer.destroy()
+  })
 
   test("stderr lines read as errors and stdout lines do not", async () => {
     const setup = await render(

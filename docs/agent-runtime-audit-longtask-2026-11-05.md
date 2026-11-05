@@ -174,10 +174,10 @@
 | `curl` 下载到工作区（sandbox off） | 成功 |
 | bash 改文件后生成 `observed` 回执，todo 完成 | 成功 |
 | 会话保存/加载 | `startedSeq`、`effectsVersion=2`、`fileReceipts` 全部保留 |
-| 前端 `bun test` / `tsc` | 571 pass / 0 fail / 无类型错误 |
+| 前端 `bun test` / `tsc` | 572 pass / 0 fail / 无类型错误 |
 
-**未能验证**：交互式 TUI 的审批面板与 "working" 状态、bwrap 下的网络墙与
-`writable_paths` 行为（本机无 bwrap）。
+**未能验证（当轮）**：交互式 TUI 的审批面板与 "working" 状态、bwrap 下的网络墙与
+`writable_paths` 行为（本机无 bwrap）。后续已安装 bwrap/tmux 并在第 6 节复验。
 
 ## 4. 前端问题记录
 
@@ -185,9 +185,10 @@
    `completion_unverified`、`conflict`、`verify_failed` 等都有中文标签。
 2. 工具卡正文对沙箱失败显示原始 reason（如 `sandbox.backend.missing`），标签正确但正文
    偏技术；建议正文用"沙箱不可用（缺少 bwrap）"，reason 放详情。
-3. 审批面板未在真机验证：如果一次任务里连续出现多个 write/bash，需要确认"是否支持
-   批量/会话级批准"，否则会被用户感知为"一直拒绝"。
+3. 审批面板：已在 tmux 真机验证（第 6.3 节）。面板提供 Allow once / Always allow /
+   Reject / Stop this turn，"Always allow" 即会话级授权。
 4. `merge_skipped` 色调与成功语义不一致（P2-2）。
+5. 审批等待期间工具卡画 Spinner 并显示"正在运行命令"，命令实际尚未启动（P2-4）。
 
 ## 5. 修复状态
 
@@ -203,6 +204,7 @@
 | P2-1 blocked 可恢复提示 | 已修复提示 |
 | P2-2 merge_skipped 色调 | 已修复 |
 | P2-3 压缩 no-op 原因 | 已修复（`reason` + 命令输出） |
+| P2-4 审批等待态显示 | 已修复 + 用例 + TUI 真机复验 |
 
 **仍未验证**：鼠标拖选复制（tmux 无法注入鼠标选区；无选区 Ctrl+C 已验）。
 
@@ -244,9 +246,16 @@
 | 无选区 Ctrl+C | 退出 TUI，无残留进程 |
 | 鼠标拖选复制 | 无法在 tmux 中注入选区，未自动验证 |
 
-### 6.4 新 UI 观察（P2-4，未修）
+### 6.4 新 UI 观察（P2-4，已修复）
 
-- 审批面板出现时，工具卡已显示"正在运行命令"（Spinner）。实际命令尚未获批、
-  也未启动。建议把"等待审批"作为独立状态（或暂停 Spinner），否则用户会以为
-  命令已经在跑。
+- 现象：审批面板出现时，工具卡已显示"正在运行命令"（Spinner）。实际命令尚未
+  获批、也未启动，用户会以为命令已经在跑。
+- 修复：工具卡新增 `waiting` 态，等待审批时不再画 Spinner，而是显示
+  `△ 等待审批 · <动词> · <目标>`（警告色）。`session.tsx` 由待决权限请求
+  反解出 `{toolName, target}`，经 `MessageView` 传到对应的 `ToolCard`；获批后
+  恢复原有运行/完成渲染。
+- 验证：`test/toolcard-render.test.tsx` 新增等待态用例（断言含"等待审批"、
+  不含"正在运行命令"），前端全量 572 pass、`tsc --noEmit` 通过。tmux 真机：
+  写文件审批时卡面为 `△ 等待审批 · 写入文件 · /tmp/aic-tui/ws/tui2.txt`；
+  按 `a` 批准后变为 `✓ 已写入文件 · …`，文件内容正确。
 
