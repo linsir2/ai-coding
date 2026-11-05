@@ -810,3 +810,56 @@ trace `ws-fullstack5/.ai-coding/traces/`。
 
 R4-1 改完后按同配置从零复跑 4 轮，目标：第 3 轮的耗时 < 400s、
 `read` 重复 ≤ 8 次、压缩 ≤ 3 次。
+
+---
+
+## R4 根因复核（代码级）
+
+| 结论 | 位置 |
+|---|---|
+| `bash` 被无条件算作 action（`ACTION_TOOLS`），每条 `find/ls/cat` 都把 `search_streak` 清零 | `core/turn_books.py:89-101`、`note_outcomes` 587-597 |
+| action 还会调 `_clear_findings()`，把 `stale_streak` 也清零——47 次重复读永远到不了 `stale_l3=6` | `core/turn_books.py:593-597` |
+| `repeat_streak` 按“输出摘要”判重；核验命令只改 `echo` 标签，输出不同 → 永远不重复 | `core/turn_books.py:516-529` |
+| 默认 `search_streak_threshold=4`、`stale_l1=3`、`stale_l3=6`、`search_streak_l3=0（关）`；本机配置把 l3 开到 20 | `core/interventions.py:105-125` |
+| C3 续跑只在 todo 有 open 项时触发，最多 4 次 → 单回合可到 150 步 | `core/turn_policy.py:260-324` |
+| `max_context_tokens=48000` 显式低于模型 131k 窗口；压缩水位按配置走 | `config.example.yaml:84`、`docs/data-contracts.md:123` |
+| trace span 直接取 `event.index`，续跑会重置 | `core/trace.py:809-822` |
+| 小读豁免按行数，59 行的 App.tsx 被豁免 | `tools/read_tool.py:31` |
+
+## R4 实施状态
+
+| 编号 | 状态 | 提交 | 验证 |
+|---|---|---|---|
+| R4-1 只读 bash 算 look | 已修复 | `7635c89` | books 单测 6 条（inspection/redirect/heredoc/version/stale 不被清） |
+| R4-4 小读阈值 | 已修复 | `7635c89` | read 单测：20 行 6k 字符仍去重、59 行去重、22 行豁免 |
+| R4-3 trace 批次前缀 | 已修复 | `9b7ac79` | recorder 单测：`i1/i2/i3` 后接 `b2-i1`，父节点同步 |
+| R4-2 上下文预算 | 已修复（配置/文档） | `9b7ac79` | 示例配置改 0；how-to-run 写明取值原则 |
+| R4-5（A 轮新发现）todo 提示 | 已修复 | `a2442bd` | unknown_id 列出现有 id；headless override 说明改用 files/verify |
+
+## R4 修复后的两次真机复跑
+
+| 指标 | 修复前（ws5） | A 轮（ws6，仍 48000） | B 轮（ws7，预算 0） |
+|---|---|---|---|
+| 结果 | 4 轮完成 | **3 轮完成** | **5 轮完成** |
+| 总耗时 | 1959s | 1281s | **1168s** |
+| 模型步数 | 195 | 186 | **127** |
+| 工具调用 | 275 | 178 | **109** |
+| 压缩次数 | 17 | 6 | **0** |
+| read 指针 / guard 拒绝 | 4 / 3 | 7 / 1 | 6 / 2 |
+| 停滞阶梯触发 | 3 | 9 | 3 |
+| 单轮最慢 | 1258s（116 步） | 650s（102 步） | 324s（29 步） |
+
+结论：
+
+1. R4-1 生效：同一个“核验循环”从 116 步降到 102 步（A 轮），阶梯触发次数从
+   3 升到 9（说明它终于看得见循环）；B 轮最慢一轮只有 29 步。
+2. R4-2 生效：预算跟随模型窗口后，B 轮 **0 次压缩**（单轮摘要的 9 分钟消失）。
+3. R4-4 生效：App.tsx 类文件重新走去重路径，重复读从 47 次降到个位数
+   （A 轮最多 10 次、B 轮最多 15 次读取且分散在多个文件）。
+4. R4-5 生效：B 轮第 1 轮 todo_write 只有 4 次（A 轮 20 次），`现有 id` 提示
+   出现后模型一次就改对了。
+
+仍存在的代价：B 轮用了 5 个“用户轮次”（每轮 30 步上限），
+其中第 2–4 轮都卡在同一个前端 TS 构建错误上。这不是 harness 停滞，
+而是真实的代码修复；每轮都确实在改文件（`fe_components` 从 0 到 4）。
+`ROUNDS` 上限是驱动脚本的配置，不是产品缺陷。
