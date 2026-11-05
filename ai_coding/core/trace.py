@@ -794,9 +794,15 @@ class TraceRecorder:
                 bucket["steps"] += 1
 
     def _describe(
-        self, event: Any
+        self, event: Any, *, nested: bool = False
     ) -> tuple[str, Any, str, str, int, str]:
-        """Return ``(name, payload, span, parent, iteration, scope)``."""
+        """Return ``(name, payload, span, parent, iteration, scope)``.
+
+        ``nested`` marks an event that arrived inside a ``ScopedEvent`` (a
+        sub-agent).  Its iteration counter is the *child's* own 1, 2, 3…; it
+        must not advance the parent's batch bookkeeping, or every child would
+        look like a C3 continuation (R4-3 regression, caught by trace case c10).
+        """
         scope = ""
         if isinstance(event, ScopedEvent):
             scope = event.scope
@@ -805,7 +811,9 @@ class TraceRecorder:
             # the tool builder today; if one arrives, this keeps the outer
             # scope and inherits the inner parent, which is the least wrong
             # answer available without a per-scope parent chain.
-            name, payload, span, inner_parent, iteration, _inner_scope = self._describe(inner)
+            name, payload, span, inner_parent, iteration, _inner_scope = self._describe(
+                inner, nested=True
+            )
             # The child loop has its own tree (step1→i1, i1→turn); only its root
             # (TurnFinished, whose inner parent is empty) hangs off the subAgent
             # call that spawned it.
@@ -819,13 +827,14 @@ class TraceRecorder:
         if isinstance(event, IterationStarted):
             # R4-3: a continuation restarts at 1; a lower-or-equal index means a
             # new batch, so the span namespace moves to ``b2-``, ``b3-`` …
-            if self._iteration and event.index <= self._iteration:
-                self._batch += 1
-            self._iteration = event.index
+            if not nested:
+                if self._iteration and event.index <= self._iteration:
+                    self._batch += 1
+                self._iteration = event.index
             return (
                 name,
                 payload,
-                self._span("i", event.index),
+                f"i{event.index}" if nested else self._span("i", event.index),
                 "turn",
                 event.index,
                 scope,
@@ -834,27 +843,38 @@ class TraceRecorder:
             return (
                 name,
                 payload,
-                self._span("step", event.index),
-                self._span("i", event.index),
+                f"step{event.index}",
+                f"i{event.index}",
                 event.index,
                 scope,
             )
         if isinstance(event, ContextAssembled):
-            self._iteration = event.iteration
+            if not nested:
+                self._iteration = event.iteration
             return (
                 name,
                 payload,
-                self._span("i", event.iteration),
+                f"i{event.iteration}"
+                if nested
+                else self._span("i", event.iteration),
                 "turn",
                 event.iteration,
                 scope,
             )
         if isinstance(event, (ToolStarted, ToolFinished)):
             iteration = event.iteration or self._iteration
-            return name, payload, event.call_id, self._span("i", iteration), iteration, scope
+            parent = f"i{iteration}" if nested else self._span("i", iteration)
+            return name, payload, event.call_id, parent, iteration, scope
         if isinstance(event, TurnFinished):
             return name, payload, "turn", "", self._iteration, scope
-        return name, payload, self._span("i", self._iteration), "turn", self._iteration, scope
+        return (
+            name,
+            payload,
+            f"i{self._iteration}" if nested else self._span("i", self._iteration),
+            "turn",
+            self._iteration,
+            scope,
+        )
 
     def _span(self, kind: str, index: int) -> str:
         """R4-3: ``i3`` in the first batch, ``b2-i3`` in the second."""

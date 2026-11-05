@@ -387,9 +387,17 @@ async def test_the_closing_call_offers_no_tools_on_the_wire(tmp_path: Path) -> N
     server = _FakeModel()
     # 12 distinct successful commands burn the iteration budget (max=12); the
     # ending is the only one that asks for a closing word (G8-2).
+    # R4-1: the commands must *act* (``mkdir``) and print something distinct.
+    # A read-only run now feeds the look-only ladder, and an action with an
+    # identical (empty) output feeds the repeat ladder; either nudge spends an
+    # iteration slot without a model call, which would hide G8-2's closing call.
     server.script(
         *[
-            _respond(*_tool_call("bash", json.dumps({"command": f"echo {i}"})))
+            _respond(
+                *_tool_call(
+                    "bash", json.dumps({"command": f"mkdir -p d{i} && echo made {i}"})
+                )
+            )
             for i in range(12)
         ],
         _respond(*_text("总结")),
