@@ -216,7 +216,7 @@ class UpdatePlanTool(BaseTool):
                     # A legacy pending item had no creation boundary; start one
                     # now.  A boundary already carried from creation stays put.
                     item.started_seq = next_seq + 1
-                floor = _receipt_floor(item, resolved)
+                floor = CompletionGate.receipt_floor(item, resolved)
                 if floor is not None and floor < item.started_seq:
                     # Work was done before the status flip.  The receipts name
                     # the exact file version, so lowering the boundary is safe
@@ -229,7 +229,7 @@ class UpdatePlanTool(BaseTool):
                     if prior is not None and prior.started_seq > 0
                     else next_seq
                 )
-                floor = _receipt_floor(item, resolved)
+                floor = CompletionGate.receipt_floor(item, resolved)
                 if floor is not None and floor < item.started_seq:
                     item.started_seq = floor
             written.append(item)
@@ -273,19 +273,6 @@ class UpdatePlanTool(BaseTool):
 
         task.items = written
         return ToolResult(success=True, output="Plan updated")
-
-
-def _receipt_floor(item: TodoItem, resolved: Any) -> int | None:
-    """Earliest receipt for an item's declared files, if one exists."""
-    if not item.files or getattr(resolved, "effects", None) is None:
-        return None
-    ledger = resolved.effects()
-    seqs: list[int] = []
-    for raw in item.files:
-        receipt = ledger.receipt_for(str(raw))
-        if receipt is not None and receipt.seq > 0:
-            seqs.append(int(receipt.seq))
-    return min(seqs) if seqs else None
 
 
 def _has_proof(item: TodoItem) -> bool:

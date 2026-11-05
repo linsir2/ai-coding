@@ -206,6 +206,84 @@ async def test_completion_cannot_swap_in_a_file_without_its_own_receipt(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_work_done_before_the_item_was_added_still_counts(tmp_path):
+    """A model often writes the file first and records the todo afterwards.
+
+    The receipt names the exact file version, so the completion boundary must
+    be lowered to it instead of demanding a redundant second write.
+    """
+    session = SessionData(
+        session_id="s", title="", created_time="t", last_access_time="t"
+    )
+    session.task = TaskState(goal="g")
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    session.record_effect("a.py", file_version(target), tool="write", call_id="c1")
+    tool = TodoWriteTool()
+
+    added = await tool.execute(
+        {
+            "action": "add",
+            "content": "先写后建",
+            "files": ["a.py"],
+            "status": "in_progress",
+        },
+        _ctx(session, tmp_path),
+    )
+    assert added.success is True
+    assert session.task.items[0].started_seq == session.effects.sequence + 1
+
+    result = await tool.execute(
+        {"action": "update", "id": "1", "status": "completed"},
+        _ctx(session, tmp_path),
+    )
+
+    assert result.success is True
+    assert session.task.items[0].status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_add_honours_in_progress(tmp_path):
+    session = SessionData(
+        session_id="s", title="", created_time="t", last_access_time="t"
+    )
+    session.task = TaskState(goal="g")
+
+    result = await TodoWriteTool().execute(
+        {"action": "add", "content": "开工", "status": "in_progress"},
+        _ctx(session, tmp_path),
+    )
+
+    assert result.success is True
+    assert session.task.items[0].status == "in_progress"
+    assert session.task.items[0].started_seq > 0
+
+
+@pytest.mark.asyncio
+async def test_add_refuses_completed_and_skipped(tmp_path):
+    session = SessionData(
+        session_id="s", title="", created_time="t", last_access_time="t"
+    )
+    session.task = TaskState(goal="g")
+    tool = TodoWriteTool()
+
+    completed = await tool.execute(
+        {"action": "add", "content": "直接完成", "status": "completed"},
+        _ctx(session, tmp_path),
+    )
+    skipped = await tool.execute(
+        {"action": "add", "content": "跳过", "status": "skipped"},
+        _ctx(session, tmp_path),
+    )
+
+    assert completed.success is False
+    assert completed.error == "invalid_status"
+    assert skipped.success is False
+    assert skipped.error == "runner_only_status"
+    assert session.task.items == []
+
+
+@pytest.mark.asyncio
 async def test_auto_approval_cannot_grant_a_completion_override(tmp_path):
     session = _session()
     auto = AutoApproveCallback()

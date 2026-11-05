@@ -172,6 +172,37 @@ class TodoWriteTool(BaseTool):
                 output="error: 'content' is required for 'add'",
                 error="missing_content",
             )
+        raw_status = str(params.get("status") or "").strip().lower()
+        if raw_status == "skipped":
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: skipped 是系统在依赖失败时设置的终态，模型不能直接写。"
+                    "做不了本项时请标 blocked，并说明缺什么。"
+                ),
+                error="runner_only_status",
+                data={"action": "add"},
+            )
+        if raw_status == "completed":
+            # Completing needs a receipt/verify gate; ``add`` has no prior item
+            # to carry them, so the model must add then update.
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: add creates a pending item; add it first, then "
+                    "update it to completed with files/verify"
+                ),
+                error="invalid_status",
+                data={"action": "add", "status": raw_status},
+            )
+        if raw_status not in ("", "pending", "in_progress"):
+            return ToolResult(
+                success=False,
+                output="error: 'status' must be pending or in_progress for 'add'",
+                error="invalid_status",
+                data={"action": "add", "status": raw_status},
+            )
+
         raw_deps = params.get("depends_on") or []
         deps = [str(d) for d in raw_deps] if isinstance(raw_deps, list) else []
         if self._enforce:
@@ -213,10 +244,14 @@ class TodoWriteTool(BaseTool):
             verify=str(params.get("verify", "") or ""),
             files=files,
         )
+        if raw_status == "in_progress":
+            item.status = "in_progress"
         resolved = resolve_ctx(ctx)
         if resolved.effects is not None:
-            # Any later effect must be after the item boundary; this makes a
-            # direct pending -> completed with an old receipt impossible.
+            # Any later effect must be after the item boundary.  Work that was
+            # already done before the item was added is still provable: the
+            # completion gate lowers this boundary to a real receipt (see
+            # CompletionGate.receipt_floor).
             item.started_seq = resolved.effects().sequence + 1
         return self._ok(task, "add", item_id=item.id)
 
@@ -291,6 +326,13 @@ class TodoWriteTool(BaseTool):
                     item.started_seq if item.started_seq > 0 else new_start
                 ),
             )
+            # Work done before this item was created still has a real receipt.
+            # Lower the boundary to it, exactly as ``update_plan`` does; without
+            # this a ``write -> add -> complete`` sequence was rejected even
+            # though the file had just been written.
+            floor = CompletionGate.receipt_floor(probe, resolved)
+            if floor is not None and floor < probe.started_seq:
+                probe = replace(probe, started_seq=floor)
             if item.status == "completed":
                 return self._ok(task, "update", item_id=item_id)
             verdict = await CompletionGate.check(probe, resolved)

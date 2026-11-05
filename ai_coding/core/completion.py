@@ -46,6 +46,30 @@ class CompletionGate:
         return relative.as_posix(), path
 
     @classmethod
+    def receipt_floor(cls, item: TodoItem, ctx: Any) -> int | None:
+        """Earliest receipt for the item's declared files, if one exists.
+
+        A step created *after* the work was done still has a real receipt for
+        it; lowering the boundary to that receipt is what keeps the completion
+        gate from demanding a redundant second write.  ``update_plan`` and
+        ``todo_write`` share this rule so the two readers cannot disagree.
+        """
+        ledger = ctx.effects() if getattr(ctx, "effects", None) is not None else None
+        if ledger is None or not item.files:
+            return None
+        workspace = str(getattr(ctx, "workspace", "") or ".")
+        seqs: list[int] = []
+        for raw in item.files:
+            resolved = cls._key(str(raw), workspace)
+            if resolved is None:
+                continue
+            key, _path = resolved
+            receipt = ledger.receipt_for(key)
+            if receipt is not None and receipt.seq > 0:
+                seqs.append(int(receipt.seq))
+        return min(seqs) if seqs else None
+
+    @classmethod
     async def check(cls, item: TodoItem, ctx: Any) -> CompletionVerdict:
         ledger = ctx.effects() if getattr(ctx, "effects", None) is not None else None
         workspace = str(getattr(ctx, "workspace", "") or ".")
