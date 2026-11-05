@@ -9,6 +9,7 @@ cannot do that reliably, and a unit test should not need a live server anyway).
 """
 
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -879,4 +880,83 @@ async def test_a_local_server_that_times_out_still_names_only_itself(monkeypatch
     detail = manager.servers()[0]["detail"]
     assert "内就绪" in detail
     assert "授权" not in detail, detail
+    await manager.aclose()
+
+
+# ---- R2-7: a connecting row must say how long it has been waiting ---------
+
+
+def test_a_connecting_row_reports_attempts_and_the_ceiling():
+    manager = MCPManager(MCPConfig(enabled=True, servers=[]))
+    server = MCPServerConfig(
+        name="slow",
+        command=["/bin/true"],
+        timeout=MCPTimeout(startup=60_000),
+    )
+    manager._attempt_started["slow"] = time.monotonic() - 40
+    manager._attempts["slow"] = 3
+
+    detail = manager._connecting_detail(server)
+
+    assert "第 3 次" in detail
+    assert "已等待" in detail
+    assert "上限 60s" in detail
+    assert "协议不兼容" in detail
+
+
+def test_a_fresh_connecting_row_stays_quiet_about_incompatibility():
+    manager = MCPManager(MCPConfig(enabled=True, servers=[]))
+    server = MCPServerConfig(
+        name="fresh", command=["/bin/true"], timeout=MCPTimeout(startup=60_000)
+    )
+    manager._attempt_started["fresh"] = time.monotonic()
+
+    detail = manager._connecting_detail(server)
+
+    assert "第 1 次" in detail
+    assert "协议不兼容" not in detail
+
+
+@pytest.mark.asyncio
+async def test_wait_ready_returns_as_soon_as_every_server_settles():
+    session = _Session(tools=[_tool("echo")])
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[MCPServerConfig(name="fast", command=["/bin/true"])],
+        ),
+        session_factory=_factory({"fast": session}),
+    )
+    await manager.open_all()
+    started = time.monotonic()
+    await manager.wait_ready(5.0)
+    elapsed = time.monotonic() - started
+
+    assert [owner.server.name for owner in manager._owners] == ["fast"]
+    assert elapsed < 2.0, f"a settled server must not cost the whole budget ({elapsed})"
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_ready_is_capped_when_a_server_never_settles():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def hang(_server):
+        await asyncio.sleep(3_600)
+        yield None  # pragma: no cover - never reached
+
+    manager = MCPManager(
+        MCPConfig(
+            enabled=True,
+            servers=[MCPServerConfig(name="hung", command=["/bin/true"])],
+        ),
+        session_factory=hang,
+    )
+    await manager.open_all()
+    started = time.monotonic()
+    await manager.wait_ready(0.3)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"the cap must bound the wait ({elapsed})"
     await manager.aclose()

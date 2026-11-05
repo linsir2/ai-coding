@@ -279,6 +279,13 @@ mcp:
   # project's own config apply.  Dropped keys are reported as a warning.
   enabled: false                  # master switch; per-server default is ON
   # servers:                     # v2 shape (docs/specs/2026-10-10-external-mcp.md)
+  #   - name: echo               # the repo's own stdio server: no network, ~2s
+  #     command: ["/path/to/repo/.venv/bin/python",
+  #               "/path/to/repo/scripts/mcp_echo_server.py"]
+  #     timeout:
+  #       startup: 30000
+  #       catalog: 30000
+  #     auto_approve: true
   #   - name: fs
   #     command: ["/usr/bin/python3", "-m", "my_mcp_server"]   # argv as one list
   #     environment: {TOKEN: "..."}  # keys are data: case preserved
@@ -290,6 +297,11 @@ mcp:
   #       execution: 600000       # one remote call (ms); omit = turn deadline only
   #     tools: ["read_file"]      # only register these remote tools (R7d)
   #     auto_approve: true        # this server's tools skip the prompt (R7d)
+  #
+  # R2-7: an npx server that starts but never answers `initialize` sits at
+  # "connecting" until `startup` runs out; the panel now shows the elapsed time,
+  # the attempt number and the ceiling so that case is distinguishable from a
+  # slow install.  Pin a version instead of `latest` for anything you rely on.
 
 security:
   # How long an "always" answer stays in force (seconds; null = permanent).

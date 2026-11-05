@@ -45,6 +45,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 import urllib.parse as urllib_parse
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
@@ -1110,6 +1111,11 @@ class MCPManager:
         self._stop = asyncio.Event()
         self._notifier: Callable[[str, Any], None] | None = None
         self._semaphore = asyncio.Semaphore(_MAX_CONCURRENT_CONNECTS)
+        # R2-7: when the current attempt started, and how many have run.  A row
+        # that says only "正在连接…" cannot tell a slow npx cold start from a
+        # server that will never finish its handshake.
+        self._attempt_started: dict[str, float] = {}
+        self._attempts: dict[str, int] = {}
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1134,6 +1140,28 @@ class MCPManager:
                 continue
             seen.add(server.name)
             await self.start_supervisor(server)
+
+    async def wait_ready(self, timeout: float = 3.0) -> None:
+        """Wait a bounded time for the first attempt of every server (R2-7).
+
+        ``open_all`` is deliberately non-blocking so the TUI appears at once,
+        but the *first model step* then reads a catalog with every server still
+        ``connecting`` -- measured: the model asked for a tool that was already
+        connected and got "still connecting".  A short, capped wait costs a few
+        hundred milliseconds in the common case (a local stdio server settles in
+        ~2s) and buys a first request that names what is actually available.
+
+        Failure counts as settled: a server whose handshake fails is reported
+        ``failed`` with its reason, which is more useful than waiting.
+        """
+        if not self._config.enabled or not self._supervisors:
+            return
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            settled = {owner.server.name for owner in self._owners}
+            if set(self._supervisors) <= settled:
+                return
+            await asyncio.sleep(0.05)
 
     def adopt(self, server: MCPServerConfig) -> dict[str, Any]:
         """Take a server into the running process (the wizard's backend, M5).
@@ -1180,6 +1208,8 @@ class MCPManager:
         previous: _MCPSessionOwner | None = None
         try:
             while not self._stop.is_set():
+                self._attempt_started[server.name] = time.monotonic()
+                self._attempts[server.name] = self._attempts.get(server.name, 0) + 1
                 if previous is not None:
                     await previous.close()
                     previous = None
@@ -1541,6 +1571,26 @@ class MCPManager:
         """
         return self._config.enabled
 
+    def _connecting_detail(self, server: MCPServerConfig) -> str:
+        """What a ``connecting`` row can honestly say about the wait (R2-7).
+
+        The measured run showed one row sitting at "正在连接…" for 28 seconds
+        with no way to tell whether npx was still installing or the server had
+        already accepted the process but would never answer ``initialize``.
+        Elapsed time, the attempt number and the configured ceiling separate
+        those cases; the ceiling is what turns "wait forever" into a decision.
+        """
+        limit = server.timeout.startup / 1000
+        started = self._attempt_started.get(server.name)
+        attempts = self._attempts.get(server.name, 1)
+        if started is None:
+            return "正在连接…"
+        elapsed = max(0.0, time.monotonic() - started)
+        detail = f"正在连接（第 {attempts} 次，已等待 {elapsed:.0f}s / 上限 {limit:g}s）"
+        if elapsed > max(10.0, limit / 2):
+            detail += "；本地 server 通常数秒内完成握手，超时多半是命令或协议不兼容"
+        return detail
+
     def servers(self) -> list[dict[str, Any]]:
         """Every configured server and what became of it (MCP-MCP §2.1).
 
@@ -1586,7 +1636,7 @@ class MCPManager:
                     row["detail"] = "配置缺少 url"
                 elif server.name in self._supervisors:
                     row["status"] = "connecting"
-                    row["detail"] = "正在连接…"
+                    row["detail"] = self._connecting_detail(server)
                 else:
                     row["detail"] = "与同名服务器重复，只连了第一个"
             elif owner.dead is not None:

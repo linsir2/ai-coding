@@ -256,6 +256,10 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     recorder = _make_recorder(app_cfg, str(paths.workspace), None)
     mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
     await mcp_manager.open_all()
+    # R2-7: give the first attempt a short, capped head start so the model's
+    # first request sees the tools that are already up instead of a catalog
+    # full of ``connecting`` rows.  Failure settles too (it just reports).
+    await mcp_manager.wait_ready(3.0)
     # M2: one dispatcher carries every remote call, and the catalog it is
     # chosen from is built from the same manager — the text the model reads and
     # the calls it can make come from one source, so they cannot drift apart.

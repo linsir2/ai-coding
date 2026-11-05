@@ -200,16 +200,29 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
 mcp:
   enabled: true
   servers:
-    - name: everything
-      command: ["npx", "-y", "@modelcontextprotocol/server-everything"]
-      # enabled/args 两个字段没了：v2 契约里 command 是 argv 一体，server 默认开
-      # （想关用 disabled: true）。env 改名 environment。
+    # 先从这个开始：仓库自带的本地 stdio server，不联网、不装包，
+    # 握手在 ~2s 内完成（本轮真机实测调用 9ms）。
+    - name: echo
+      command: ["/path/to/repo/.venv/bin/python", "/path/to/repo/scripts/mcp_echo_server.py"]
       timeout:
-        startup: 60000      # 握手（npx 冷启动实测 ~27s，别调太低）
-        catalog: 30000      # tools/list
-      tools: ["get-sum"]    # 只注册这一个（13 个全注册 = 每步多付约 9000 字符）
-      auto_approve: true    # 这个 server 是你在自己的配置里声明的
+        startup: 30000
+        catalog: 30000
+      auto_approve: true
+
+    # npx 形状（需要能联网、且包本身可用），字段与上面相同：
+    # - name: something
+    #   command: ["npx", "-y", "@scope/server-name"]
+    #   timeout:
+    #     startup: 120000     # 冷启动实测 ~27s；装包慢时再放大
+    #     catalog: 30000
+    #   tools: ["tool_name"]  # 只注册需要的工具（每步都会重发 schema）
+    #   auto_approve: true
 ```
+
+> **R2-7 提醒**：`@modelcontextprotocol/server-everything` 在真机上能启动进程，
+> 但 `initialize` 不返回，行会一直停在 `connecting` 直至 `startup` 上限。
+> 面板现在会显示“第 N 次 / 已等待 Xs / 上限 Ys”，超过一半上限时提示多半是
+> 命令或协议不兼容。曾经能用的 npx 包请固定版本，别依赖 `latest`。
 
 行为上的三处可见变化：
 
