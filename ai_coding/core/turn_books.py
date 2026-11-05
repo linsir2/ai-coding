@@ -85,7 +85,19 @@ RETRIEVAL_TOOLS = frozenset(
 #: ``mcp_call`` and ``subAgent`` are here because both can change the world and the
 #: harness cannot tell which way they went; assuming "not an action" would keep the
 #: streak climbing after real work.
-ACTION_TOOLS = frozenset({"write", "edit", "bash", "mcp_call", "subAgent"})
+ACTION_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "bash",
+        "mcp_call",
+        "subAgent",
+        # A successful plan/task update is progress, not another look.  Without
+        # this, update_plan left the search streak armed and the next iteration
+        # injected the look-only gate forever.
+        "update_plan",
+    }
+)
 
 #: Errors that are verdicts rather than breakage (R8c D-11 cancel; 20 §批次3
 #: plan-validation refusals -- ``update_plan``'s ``invalid_plan``).  A round
