@@ -748,3 +748,19 @@ def test_rescan_rebases_an_old_relative_log_path(tmp_path):
     job = JobRegistry(root=root).get("job_old")
     assert job is not None
     assert job.log_path == str(root / "job_old.log")
+
+
+def test_descendants_walks_the_proc_ppid_tree():
+    """``no-proc`` has no pid namespace and ``--new-session`` moves the shell
+    out of our group, so ``kill`` must find children by PPid."""
+    import os
+    import subprocess
+
+    from ai_coding.core.jobs import _descendants
+
+    child = subprocess.Popen(["sleep", "5"])
+    try:
+        assert child.pid in _descendants(os.getpid())
+    finally:
+        child.kill()
+        child.wait()

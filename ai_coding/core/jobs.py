@@ -633,12 +633,17 @@ class JobRegistry:
         # reports a kill we caused as the command's own "exit -15".
         job.stop_reason = f"已停止：{reason}" if reason else "已停止"
         job.detail = job.stop_reason
-        _kill_group(job.pid, signal.SIGTERM)
+        # ``no-proc`` drops ``--unshare-pid`` (A.1 pairs it with ``--proc``), so
+        # the sandboxed shell's children can outlive bwrap and keep writing.
+        # Kill the descendant tree as well, not just the group: measured on a
+        # host that falls back to ``no-proc``, a killed job kept appending.
+        tree = _descendants(job.pid)
+        _signal_tree(job.pid, signal.SIGTERM, tree)
         if job.proc is not None:
             try:
                 job.proc.wait(timeout=_KILL_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
-                _kill_group(job.pid)
+                _signal_tree(job.pid, signal.SIGKILL, tree)
                 try:
                     job.proc.wait(timeout=_KILL_GRACE_SECONDS)
                 except subprocess.TimeoutExpired:  # pragma: no cover
@@ -646,7 +651,7 @@ class JobRegistry:
         else:
             _wait_gone(job.pid, _KILL_GRACE_SECONDS)
             if _pid_alive(job.pid):  # pragma: no cover - a trapped SIGTERM
-                _kill_group(job.pid)
+                _signal_tree(job.pid, signal.SIGKILL, tree)
         # Settle here rather than leaving it to the watcher.  ``kill`` has just
         # waited for the process to go, so everything the settlement needs is
         # known; returning before the row said ``killed`` meant the tool could
@@ -877,6 +882,55 @@ def _kill_group(pid: int, sig: int = signal.SIGKILL) -> None:
         os.kill(pid, sig)
     except OSError:  # pragma: no cover - already gone
         pass
+
+
+def _descendants(pid: int) -> list[int]:
+    """Every live descendant of ``pid``, from ``/proc`` (Linux only).
+
+    The ``no-proc`` sandbox tier does not unshare the pid namespace, and
+    ``--new-session`` puts the sandboxed shell in its own process group, so
+    ``killpg`` cannot reach it.  Walking PPid catches it (and grandchildren).
+    A platform without ``/proc`` returns nothing and keeps the old behaviour.
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    parent: dict[int, list[int]] = {}
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/status", encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("PPid:"):
+                        ppid = int(line.split()[1])
+                        parent.setdefault(ppid, []).append(int(entry))
+                        break
+        except (OSError, ValueError):
+            continue
+    found: list[int] = []
+    frontier = [pid]
+    seen = {pid}
+    while frontier:
+        current = frontier.pop()
+        for child in parent.get(current, ()):
+            if child in seen:
+                continue
+            seen.add(child)
+            found.append(child)
+            frontier.append(child)
+    return found
+
+
+def _signal_tree(pid: int, sig: int, children: Sequence[int]) -> None:
+    """Signal the known descendants first, then the group/leader."""
+    for child in reversed(children):
+        try:
+            os.kill(child, sig)
+        except OSError:
+            continue
+    _kill_group(pid, sig)
 
 
 def _wait_gone(pid: int, seconds: float) -> None:
