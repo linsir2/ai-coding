@@ -1611,7 +1611,25 @@ class ContextManager:
         previous, used = read_checkpoint(session, messages)
         if not previous or used <= 0 or used > len(messages):
             return None
-        out = [_checkpoint_note(previous), *messages[used:]]
+        # 2026-11 real machine: the messages after a checkpoint are not a small
+        # tail — they are everything the turn added since, and during exploration
+        # that is a wall of tool output.  Measured on a continued session: a
+        # compaction left the request at 32k tokens, and **twelve seconds later**
+        # the next iteration assembled 407k characters again from this very
+        # function, so the gate fired a second time (two 40s compactions in one
+        # 129s turn).  ``compress`` had shrunk that wall for the request that
+        # paid for a summary, but this view is rebuilt from the append-only
+        # history every iteration and knew nothing about it.
+        #
+        # L0 is stateless, idempotent and free (content-addressed artifacts, no
+        # model call), which is exactly what a per-request view can afford.
+        tail = microcompact_old_results(
+            list(messages[used:]),
+            elide_root=self._root,
+            window_chars=self._l2_window_chars,
+            window_budget=self._l2_window_budget,
+        )
+        out = [_checkpoint_note(previous), *tail]
         out = _ensure_pinned(out, pinned)
         out = sanitize_pairs(out)
         if _history_tokens(out) >= _history_tokens(list(messages)):

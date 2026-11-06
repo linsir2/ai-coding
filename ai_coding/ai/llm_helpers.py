@@ -39,8 +39,16 @@ _MIN_SUMMARY_CHARS = 1_200
 #: this (eval-08 T2) touched 20+ files.  The checkpoint is the *only* thing
 #: carrying those facts forward, and the window it saves is 48k — a 2.4k-token
 #: summary is 5% of it, not a budget problem.
-_CREATE_TOKENS = 2_400
-_MERGE_TOKENS = 2_800
+#:
+#: 2026-11: 2,800 was a budget problem after all.  A real delta of 22k prompt
+#: tokens produced an answer that hit the cap exactly (completion == 2,800),
+#: the last section was cut off, ``summary_shape_ok`` rejected it, both
+#: attempts failed, and the checkpoint never advanced — so the model kept
+#: re-reading what the old checkpoint merely named.  The measured answers that
+#: did pass were 2,600–2,700 tokens, i.e. the cap was one section short.  4,000
+#: is the same summary with room to finish.
+_CREATE_TOKENS = 4_000
+_MERGE_TOKENS = 4_000
 _TRUNCATION_NOTE = "\n[历史过长，此处截断]"
 
 #: OpenCode's shrink ladder (compaction.ts:120): when the provider rejects a
@@ -64,9 +72,10 @@ _SHRINK_STEPS = (0.85, 0.7, 0.5, 0.35)
 #:
 #: So the summariser gets a wall-clock budget of its own, independent of the
 #: turn deadline it used to borrow, and each attempt gets a ceiling well below
-#: the model default (60s).
-_SUMMARY_BUDGET_SECONDS = 90.0
-_SUMMARY_ATTEMPT_SECONDS = 30.0
+#: the model default (60s).  Measured on a 126k-token input: 17.5s for one
+#: attempt, 19.9s on a 22k-token one — so 30s was also too tight to be safe.
+_SUMMARY_BUDGET_SECONDS = 150.0
+_SUMMARY_ATTEMPT_SECONDS = 60.0
 
 #: ``enable_thinking: false`` on the DashScope compatible endpoint.  Only that
 #: provider has the switch; an unknown endpoint gets no extra body rather than
