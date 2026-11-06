@@ -596,6 +596,7 @@ def test_a_settled_child_can_open_a_follow_up_turn(tmp_path):
     message was drained unread.  Only the fence decides turn admission.
     """
     scheduler, _ = _scheduler()
+    scheduler._journal = TaskJournal(tmp_path)
     request = TaskRequest.for_child(_task(), name="probe")
     record = scheduler._begin(request, kind="child")
 
@@ -613,6 +614,9 @@ def test_a_settled_child_can_open_a_follow_up_turn(tmp_path):
         record.task_id, record.run_id, "completed", record.fence,
     )
     assert record.state == "settled"
+    # settled -> running -> settled folds to a closed task, not a pending one.
+    assert scheduler.journal.records("")[0].last_event == "settled"
+    assert scheduler.journal.records("")[0].is_terminal is True
 
 
 @pytest.mark.asyncio

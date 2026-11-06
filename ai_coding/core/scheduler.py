@@ -735,7 +735,11 @@ class Scheduler:
         ``send_message`` reported ``running``.  Only the fence is the turn
         admission: it names the run, and a mismatched fence still belongs to a
         different claim.  Late settlements stay gated in ``on_runner_event``
-        because a *reopened* record is no longer terminal.
+        because a *reopened* record is no longer terminal — and there is no
+        cross-turn race to gate: every settlement is written by
+        ``_finish_background`` synchronously, before ``_run_followup``
+        schedules the next turn, so turn N's event always lands before turn
+        N+1 starts.
         """
         record = self._records.get(task_id)
         if record is None:
