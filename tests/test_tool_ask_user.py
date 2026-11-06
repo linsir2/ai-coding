@@ -55,7 +55,7 @@ async def test_answered_question_is_structured_data():
 async def test_no_human_tells_the_model_to_decide():
     result = await _tool(UnavailableUserPromptCallback()).execute({"question": "改哪个？"})
     assert result.success is False
-    assert result.error == "no_user"
+    assert result.detail == "no_user"
     assert "假设" in result.output  # 教模型写清假设后自己收尾
 
 
@@ -64,7 +64,7 @@ async def test_a_silent_human_is_not_an_answer_either():
     prompt = _FixedPrompt(UserAnswer(answered=False, reason="eof"))
     result = await _tool(prompt).execute({"question": "改哪个？"})
     assert result.success is False
-    assert result.error == "no_answer"
+    assert result.detail == "no_answer"
     assert "假设" in result.output
 
 
@@ -72,7 +72,7 @@ async def test_a_silent_human_is_not_an_answer_either():
 async def test_callback_failure_is_a_tool_failure():
     result = await _tool(_Boom()).execute({"question": "在吗？"})
     assert result.success is False
-    assert result.error == "user_prompt_error"
+    assert result.detail == "user_prompt_error"
     assert result.data["reason"] == "no tty"
 
 
@@ -81,7 +81,7 @@ async def test_missing_question_is_rejected():
     prompt = _FixedPrompt(UserAnswer(answered=True, text="x"))
     result = await _tool(prompt).execute({"question": "   "})
     assert result.success is False
-    assert result.error == "missing_question"
+    assert result.detail == "missing_question"
     assert "question" in result.output
     assert "options" in result.output
     assert prompt.seen == []  # 没问就不该打扰人
@@ -123,7 +123,7 @@ async def test_plan_mode_ask_user_cannot_stand_in_for_plan_approval():
     )
 
     assert result.success is False
-    assert result.error == "plan_approval_not_ask_user"
+    assert result.detail == "plan_approval_not_ask_user"
     assert "<proposed_plan>" in result.output
     assert prompt.seen == []
 
@@ -160,7 +160,7 @@ async def test_common_plan_approval_phrasings_are_refused(question):
         {"question": question}, ToolContext(mode="plan")
     )
 
-    assert result.error == "plan_approval_not_ask_user"
+    assert result.detail == "plan_approval_not_ask_user"
     assert prompt.seen == []
 
 
@@ -225,7 +225,7 @@ async def test_more_approval_shapes_are_refused(question):
     result = await _tool(prompt).execute(
         {"question": question}, ToolContext(mode="plan")
     )
-    assert result.error == "plan_approval_not_ask_user"
+    assert result.detail == "plan_approval_not_ask_user"
     assert prompt.seen == []
 
 

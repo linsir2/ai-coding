@@ -88,7 +88,7 @@ async def test_todo_write_maps_the_directory_code(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "directory_unsupported"
+    assert result.detail == "directory_unsupported"
 
 
 def test_head_era_effect_keys_are_not_misclassified_as_legacy():
@@ -125,7 +125,7 @@ async def test_legacy_completed_step_is_regated_instead_of_inherited(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "legacy_session_unverified"
+    assert result.detail == "legacy_session_unverified"
 
 
 def test_legacy_marker_survives_new_effects_and_round_trip():

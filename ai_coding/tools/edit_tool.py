@@ -147,7 +147,11 @@ class EditTool(BaseTool):
         replace_all = bool(params.get("replace_all", False))
 
         if not old:
-            return ToolResult(success=False, output="old_string must not be empty")
+            return ToolResult(
+                success=False,
+                output="old_string must not be empty",
+                error="missing_old_string",
+            )
 
         try:
             target = self._sandbox.resolve(path_str)
@@ -155,7 +159,9 @@ class EditTool(BaseTool):
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
 
         if not target.is_file():
-            return ToolResult(success=False, output=f"file not found: {path_str}")
+            return ToolResult(
+                success=False, output=f"file not found: {path_str}", error="file_not_found"
+            )
 
         if ctx is not None and ctx.mode == "plan":
             relative = self._plan_relative(path_str)
@@ -196,7 +202,9 @@ class EditTool(BaseTool):
         try:
             text = target.read_text(encoding="utf-8")
         except OSError as exc:
-            return ToolResult(success=False, output=f"read error: {exc}")
+            return ToolResult(
+                success=False, output=f"read error: {exc}", error="read_error"
+            )
 
         count = text.count(old)
         adjusted = False
@@ -212,13 +220,16 @@ class EditTool(BaseTool):
                     f"old_string not found in {path_str}"
                     f"{_nearest_line_hint(text, old)}"
                 ),
+                error="old_string_not_found",
             )
         if not replace_all and count > 1:
             msg = (
                 f"old_string appears {count} times in {path_str}; "
                 "it must be unique or set replace_all=true"
             )
-            return ToolResult(success=False, output=msg)
+            return ToolResult(
+                success=False, output=msg, error="old_string_not_unique"
+            )
 
         new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
 
@@ -231,7 +242,9 @@ class EditTool(BaseTool):
                 error="stale_read",
             )
         except OSError as exc:
-            return ToolResult(success=False, output=f"write error: {exc}")
+            return ToolResult(
+                success=False, output=f"write error: {exc}", error="write_error"
+            )
 
         self._tracker.record(target)
         note_effect = resolve_ctx(ctx).note_effect
@@ -315,6 +328,7 @@ class EditTool(BaseTool):
                 return ToolResult(
                     success=False,
                     output=f"old_string not found in {path_str}",
+                    error="old_string_not_found",
                 )
             if not replace_all and count > 1:
                 return ToolResult(
@@ -323,6 +337,7 @@ class EditTool(BaseTool):
                         f"old_string appears {count} times in {path_str}; "
                         "it must be unique or set replace_all=true"
                     ),
+                    error="old_string_not_unique",
                 )
             new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
             data = new_text.encode("utf-8")
@@ -333,7 +348,9 @@ class EditTool(BaseTool):
                 data = data[written:]
             post = os.fstat(opened.fd)
         except (OSError, UnicodeDecodeError) as exc:
-            return ToolResult(success=False, output=f"edit error: {exc}")
+            return ToolResult(
+                success=False, output=f"edit error: {exc}", error="edit_error"
+            )
         finally:
             os.close(opened.fd)
 

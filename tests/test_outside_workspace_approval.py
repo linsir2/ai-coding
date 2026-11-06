@@ -46,7 +46,7 @@ def test_precheck_offers_the_gate_instead_of_a_wall(tmp_path, name):
     verdict = _tools(tmp_path)[name].precheck({"path": "/outside/x.py"})
     assert verdict is not None
     assert verdict.success is False
-    assert verdict.error == "sandbox_violation"
+    assert verdict.detail == "sandbox_violation"
     assert "bash" not in verdict.output, "the old advice walks the model around the gate"
 
 

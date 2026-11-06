@@ -27,7 +27,7 @@ async def test_r8_the_tool_hands_the_note_to_the_turn_and_echoes_it():
 async def test_r8_a_missing_note_is_a_structured_error():
     result = await CheckpointTool().execute({}, ToolContext(note_checkpoint=lambda _t: None))
     assert result.success is False
-    assert result.error == "missing_note"
+    assert result.detail == "missing_note"
     assert result.data == {"note": ""}
 
 
@@ -38,7 +38,7 @@ async def test_r8_blank_notes_are_rejected_not_stored():
         {"note": "   \n "}, ToolContext(note_checkpoint=seen.append)
     )
     assert result.success is False
-    assert result.error == "missing_note"
+    assert result.detail == "missing_note"
     assert seen == []
 
 
@@ -47,7 +47,7 @@ async def test_r8_the_tool_reports_when_the_turn_cannot_be_reached():
     """A sub-agent (or a bare unit call) has no turn book to write into."""
     result = await CheckpointTool().execute({"note": "n"}, ToolContext())
     assert result.success is False
-    assert result.error == "checkpoint_unavailable"
+    assert result.detail == "checkpoint_unavailable"
 
 
 def test_r8_the_gate_allows_it_and_it_may_run_parallel():

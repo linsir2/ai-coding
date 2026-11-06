@@ -8,12 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
 
-Role = Literal["user", "assistant", "tool", "system"]
+from ai_coding.domain.error_codes import CANCELLED_BY_USER as CANCELLED_BY_USER
+from ai_coding.domain.error_codes import normalize
 
-#: ``ToolResult.error`` when the user cancelled this one call (R8c, D-7).  The
-#: call still gets a result - the declared tool_calls must pair up - and the turn
-#: carries on, so the model can change approach.
-CANCELLED_BY_USER = "cancelled_by_user"
+Role = Literal["user", "assistant", "tool", "system"]
 
 #: The first line of a compaction checkpoint note.  The note is stored as a
 #: user-role message (so the model reads it as history and replies pair up),
@@ -80,6 +78,14 @@ class ToolResult:
     ``output`` is what the model reads; ``data`` is the machine-readable result
     (R1a/D9) so callers never have to parse prose.  ``data is None`` keeps the
     legacy shape valid, which is what makes the R1a migration incremental.
+
+    ``error`` is the canonical gRPC family (``INVALID_ARGUMENT``,
+    ``FAILED_PRECONDITION``, ``UNAVAILABLE`` ...).  ``detail`` keeps the
+    specific reason a tool named (``stale_read``, ``old_string_not_found``) for
+    the operator, the trace and the policy layer; it is never the contract.
+    Producers may keep writing the old leaf into ``error`` -- the constructor
+    normalises it into ``(family, detail)``, so all ~180 construction sites and
+    every older tool keep working unchanged.
     """
 
     success: bool
@@ -87,6 +93,14 @@ class ToolResult:
     data: dict[str, Any] | None = None
     artifacts: tuple[ToolArtifact, ...] = ()
     error: str | None = None
+    detail: str | None = None
+
+    def __post_init__(self) -> None:
+        family, detail = normalize(self.error, success=self.success)
+        if family != self.error:
+            object.__setattr__(self, "error", family)
+        if self.detail is None and detail is not None:
+            object.__setattr__(self, "detail", detail)
 
 
 @dataclass(frozen=True)
@@ -95,6 +109,8 @@ class ToolOutput:
 
     Captured from the SDK's ``tool_output`` stream event so the session can
     persist ``role=tool`` messages (strict-pairing contract of the Java shape).
+    ``error``/``detail`` travel with it so the transcript (the model's next
+    request) names both the family and the specific reason.
     """
 
     call_id: str
@@ -103,6 +119,8 @@ class ToolOutput:
     success: bool = True
     data: dict[str, Any] | None = None
     artifacts: tuple[ToolArtifact, ...] = ()
+    error: str | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)

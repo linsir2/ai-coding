@@ -126,16 +126,22 @@ class GrepTool(BaseTool):
     ) -> ToolResult:
         pattern = str(params.get("pattern", ""))
         if not pattern:
-            return ToolResult(success=False, output="pattern must not be empty")
+            return ToolResult(
+                success=False, output="pattern must not be empty", error="missing_pattern"
+            )
         target_raw = str(params.get("path", "") or "")
         if ".." in target_raw.replace("\\", "/").split("/"):
             return ToolResult(
-                success=False, output="path must not contain '..' (workspace escape blocked)"
+                success=False,
+                output="path must not contain '..' (workspace escape blocked)",
+                error="workspace_escape",
             )
         try:
             target = self._sandbox.resolve(target_raw or ".")
         except SandboxViolation as exc:
-            return ToolResult(success=False, output=str(exc))
+            return ToolResult(
+                success=False, output=str(exc), error="sandbox_violation"
+            )
 
         approved = resolve_ctx(ctx).credential_approved
         workspace = getattr(self._sandbox, "workspace", None)
@@ -182,10 +188,16 @@ class GrepTool(BaseTool):
                 skip_credentials=skip_credentials,
             )
         except re.error as exc:
-            return ToolResult(success=False, output=f"invalid pattern: {exc}")
+            return ToolResult(
+                success=False,
+                output=f"invalid pattern: {exc}",
+                error="invalid_pattern",
+            )
         except TimeoutError:
             return ToolResult(
-                success=False, output=f"search timed out after {self._timeout:g} seconds"
+                success=False,
+                output=f"search timed out after {self._timeout:g} seconds",
+                error="timeout",
             )
 
     # ---- rendering ---------------------------------------------------------
@@ -254,7 +266,9 @@ class GrepTool(BaseTool):
         # premise (r18/F9).  rg exits 0 on a hit, 1 on none, 2 on an error.
         if outcome.error or outcome.returncode is None:
             return ToolResult(
-                success=False, output=f"grep runner failed: {outcome.error or 'no exit status'}"
+                success=False,
+                output=f"grep runner failed: {outcome.error or 'no exit status'}",
+                error="grep_error",
             )
         parse_error = "regex parse error" in (outcome.stderr or "").lower()
         if outcome.returncode not in (0, 1):
@@ -264,6 +278,7 @@ class GrepTool(BaseTool):
                 success=False,
                 output=f"grep failed (rg exit {outcome.returncode}): "
                 f"{(outcome.stderr or '').strip()[:200]}",
+                error="grep_error",
             )
         hits: list[tuple[str, int, str]] = []
         for raw in (outcome.stdout or "").splitlines():

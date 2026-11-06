@@ -65,7 +65,7 @@ async def test_write_without_prior_read_denied(setup):
     # never read → stale check fails
     result = await tool.execute({"path": "f.txt", "content": "new"})
     assert result.success is False
-    assert result.error == "must_read_first"
+    assert result.detail == "must_read_first"
     out = result.output.lower()
     assert "read" in out or "stale" in out or "never" in out
     assert "edit" in out, "the hint must name the targeted alternative"
@@ -87,7 +87,7 @@ async def test_write_reports_stale_when_the_file_changed_during_the_call(
     result = await tool.execute({"path": "f.txt", "content": "new"})
 
     assert result.success is False
-    assert result.error == "stale_read"
+    assert result.detail == "stale_read"
     assert p.read_text() == "v1"
     assert list(tmp_path.glob(".f.txt.*.tmp")) == []
 
@@ -101,6 +101,6 @@ async def test_write_stale_after_external_modification(setup):
     p.write_text("v2 externally changed")  # external modification
     result = await tool.execute({"path": "f.txt", "content": "overwrite"})
     assert result.success is False
-    assert result.error == "stale_read", "the card must say why, not a bare '?'"
+    assert result.detail == "stale_read", "the card must say why, not a bare '?'"
     assert "stale" in result.output.lower() or "modified" in result.output.lower()
     assert "older version" in result.output, "name why the context copy is useless"

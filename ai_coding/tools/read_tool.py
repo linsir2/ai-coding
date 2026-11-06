@@ -129,7 +129,9 @@ class ReadTool(BaseTool):
             )
 
         if not target.is_file():
-            return ToolResult(success=False, output=f"file not found: {path_str}")
+            return ToolResult(
+                success=False, output=f"file not found: {path_str}", error="file_not_found"
+            )
 
         # Read and stat the same descriptor.  The old read-then-stat order
         # could pair old bytes with a newer version when a writer raced us,
@@ -142,11 +144,15 @@ class ReadTool(BaseTool):
                         f"file too large ({stat.st_size} bytes > "
                         f"{self._max_file_size} limit)"
                     )
-                    return ToolResult(success=False, output=msg)
+                    return ToolResult(
+                        success=False, output=msg, error="file_too_large"
+                    )
                 raw = handle.read()
                 post = os.fstat(handle.fileno())
         except OSError as exc:
-            return ToolResult(success=False, output=f"read error: {exc}")
+            return ToolResult(
+                success=False, output=f"read error: {exc}", error="read_error"
+            )
         if (
             stat.st_mtime_ns,
             stat.st_size,

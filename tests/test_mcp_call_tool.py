@@ -127,7 +127,7 @@ async def test_an_unknown_server_comes_back_naming_the_real_ones():
     result = await tool.execute({"server": "nope", "tool": "read_file", "input": {}})
 
     assert result.success is False
-    assert result.error == "mcp_error"
+    assert result.detail == "mcp_error"
     assert "fs" in result.output
     await manager.aclose()
 
@@ -227,7 +227,7 @@ async def test_a_remote_error_result_is_not_an_exception():
 
     assert isinstance(result, ToolResult)
     assert result.success is False
-    assert result.error == "mcp_error"
+    assert result.detail == "mcp_error"
     await manager.aclose()
 
 

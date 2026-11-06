@@ -30,7 +30,7 @@ def test_precheck_refuses_outside_paths(tmp_path, name):
     verdict = _tools(tmp_path)[name].precheck({"path": "/outside/x.py"})
     assert verdict is not None
     assert verdict.success is False
-    assert verdict.error == "sandbox_violation"
+    assert verdict.detail == "sandbox_violation"
     assert "approval" in verdict.output
 
 

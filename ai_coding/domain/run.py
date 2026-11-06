@@ -60,18 +60,31 @@ def wrap_tool_output(
     *,
     success: bool = True,
     data: dict[str, Any] | None = None,
+    error: str | None = None,
+    detail: str | None = None,
 ) -> str:
     """Wrap a tool output in the ``<tool_output>`` feedback envelope.
 
     Invariants:
       - ``success=True`` and ``data is None`` produces exactly the M0–M6
         envelope byte-for-byte, so replays and the L2 stage are unaffected;
-      - a failed result adds ``ok="false"``;
+      - a failed result adds ``ok="false"``, plus the canonical family
+        (``error="FAILED_PRECONDITION"``) and the specific reason
+        (``code="stale_read"``) when they are known -- the model can branch on
+        the family, the operator can search the code;
       - structured results add a machine-readable ``<data>`` JSON block that the
         model can read and the runtime can parse back without regexes.
     """
-    ok_attr = "" if success else ' ok="false"'
-    head = f'<tool_output tool="{tool_name}"{ok_attr}>'
+    attrs = f' tool="{tool_name}"'
+    if not success:
+        attrs += ' ok="false"'
+        # A failure with no code is an unclassified one; naming the family keeps
+        # the wire self-describing even for a direct caller that forgot to pass
+        # one (``tool_message`` always passes the normalised pair).
+        attrs += f' error="{error or "INTERNAL"}"'
+        if detail:
+            attrs += f' code="{detail}"'
+    head = f"<tool_output{attrs}>"
     blocks: list[str] = []
     if data is not None:
         payload = json.dumps(data, ensure_ascii=False, default=str)
@@ -90,6 +103,8 @@ def tool_message(out: ToolOutput, timestamp: str) -> ChatMessage:
             out.output,
             success=out.success,
             data=out.data,
+            error=out.error,
+            detail=out.detail,
         ),
         timestamp=timestamp,
         tool_call_id=out.call_id,

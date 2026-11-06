@@ -101,7 +101,7 @@ async def test_one_question_is_refused_with_guidance():
     tool = ParallelResearchTool(_Runner())
     r = await tool.execute({"questions": [{"question": "只有一个"}]}, _ctx())
     assert r.success is False
-    assert r.error == "too_few_questions"
+    assert r.detail == "too_few_questions"
     assert "subagent" in r.output
 
 
@@ -112,7 +112,7 @@ async def test_five_questions_are_refused():
         {"questions": [{"question": f"q{i}"} for i in range(5)]}, _ctx()
     )
     assert r.success is False
-    assert r.error == "too_many_questions"
+    assert r.detail == "too_many_questions"
 
 
 @pytest.mark.asyncio
@@ -123,7 +123,7 @@ async def test_duplicate_explicit_ids_are_refused():
         _ctx(),
     )
     assert r.success is False
-    assert r.error == "duplicate_question_id"
+    assert r.detail == "duplicate_question_id"
 
 
 @pytest.mark.asyncio
@@ -134,7 +134,7 @@ async def test_long_context_is_refused_not_truncated():
         _ctx(),
     )
     assert r.success is False
-    assert r.error == "context_too_long"
+    assert r.detail == "context_too_long"
 
 
 @pytest.mark.asyncio
@@ -144,7 +144,7 @@ async def test_a_long_question_is_refused_not_truncated():
         {"questions": [{"question": "x" * 900}, {"question": "b"}]}, _ctx()
     )
     assert r.success is False
-    assert r.error == "bad_questions"
+    assert r.detail == "bad_questions"
 
 
 @pytest.mark.asyncio
@@ -159,7 +159,7 @@ async def test_all_children_failing_is_a_failed_tool_result():
         _ctx(),
     )
     assert r.success is False
-    assert r.error == "all_children_failed"
+    assert r.detail == "all_children_failed"
     assert "child_timeout" in r.output and "boom" in r.output
 
 

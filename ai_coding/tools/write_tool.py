@@ -194,7 +194,9 @@ class WriteTool(BaseTool):
                 error="stale_read",
             )
         except OSError as exc:
-            return ToolResult(success=False, output=f"write error: {exc}")
+            return ToolResult(
+                success=False, output=f"write error: {exc}", error="write_error"
+            )
 
         self._tracker.record(target)
         note_effect = resolve_ctx(ctx).note_effect
@@ -285,7 +287,9 @@ class WriteTool(BaseTool):
             post = os.fstat(opened.fd)
             size = post.st_size
         except OSError as exc:
-            return ToolResult(success=False, output=f"write error: {exc}")
+            return ToolResult(
+                success=False, output=f"write error: {exc}", error="write_error"
+            )
         finally:
             os.close(opened.fd)
 

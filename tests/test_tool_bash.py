@@ -145,7 +145,8 @@ async def test_r8_cancelling_a_bash_call_kills_the_command(tmp_path: Path):
 
     result = batches[0][0].result
     assert result.success is False
-    assert result.error == CANCELLED_BY_USER
+    assert result.detail == CANCELLED_BY_USER
+    assert result.error == "CANCELLED"
     pgid = int(pid_file.read_text(encoding="utf-8").strip())
     deadline = time.monotonic() + 3.0
     while True:
@@ -175,7 +176,7 @@ async def test_bash_default_timeout_still_applies():
     tool = BashTool(timeout_seconds=1)
     result = await tool.execute({"command": "sleep 2"})
     assert result.success is False
-    assert result.error == "timeout"
+    assert result.detail == "timeout"
 
 
 @pytest.mark.asyncio
@@ -199,7 +200,7 @@ async def test_bash_timeout_result_teaches_self_widening():
     tool = BashTool(timeout_seconds=1)
     result = await tool.execute({"command": "sleep 5"})
     assert result.success is False
-    assert result.error == "timeout"
+    assert result.detail == "timeout"
     assert "timeout_seconds" in result.output
     assert "600" in result.output
 
@@ -216,7 +217,7 @@ async def test_bash_timeout_at_ceiling_suggests_splitting():
     tool = BashTool(timeout_seconds=1, max_timeout_seconds=2)
     result = await tool.execute({"command": "sleep 3", "timeout_seconds": 999})
     assert result.success is False
-    assert result.error == "timeout"
+    assert result.detail == "timeout"
     lowered = result.output.lower()
     assert "ceiling" in lowered
     assert "split" in lowered
@@ -234,7 +235,7 @@ async def test_bash_invalid_timeout_is_rejected():
     for bad in (0, -5, "abc", True):
         result = await tool.execute({"command": "echo hi", "timeout_seconds": bad})
         assert result.success is False, bad
-        assert result.error == "invalid_params", bad
+        assert result.detail == "invalid_params", bad
         assert "timeout_seconds" in result.output, bad
 
 
@@ -317,7 +318,7 @@ async def test_a_background_call_without_a_registry_says_so_rather_than_blocking
     )
 
     assert result.success is False
-    assert result.error == "no_jobs"
+    assert result.detail == "no_jobs"
     assert "foreground" in result.output, "the model needs to know what to do instead"
 
 
@@ -403,7 +404,7 @@ async def test_the_foreground_result_keeps_its_exit_code_under_the_job_path(tmp_
     )
 
     assert result.success is False
-    assert result.error == "nonzero_exit"
+    assert result.detail == "nonzero_exit"
     assert result.data["exit_code"] == 7
 
 
@@ -484,7 +485,7 @@ async def test_bash_without_a_registry_keeps_the_pipe_based_foreground_path(tmp_
     result = await BashTool(timeout_seconds=1).execute({"command": "sleep 30"}, cancel_free)
 
     assert result.success is False
-    assert result.error == "timeout"
+    assert result.detail == "timeout"
     assert time.monotonic() - started < 8.0
 
 
@@ -683,7 +684,7 @@ def test_bash_precheck_rejects_bad_network_permissions(tmp_path: Path):
     )
     assert result is not None
     assert result.success is False
-    assert result.error == "invalid_params"
+    assert result.detail == "invalid_params"
 
 
 def test_bash_precheck_requires_network_justification(tmp_path: Path):
@@ -693,7 +694,7 @@ def test_bash_precheck_requires_network_justification(tmp_path: Path):
     )
     assert result is not None
     assert result.success is False
-    assert result.error == "invalid_params"
+    assert result.detail == "invalid_params"
     assert "justification" in result.output
 
 

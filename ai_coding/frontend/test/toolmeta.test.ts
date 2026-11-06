@@ -123,59 +123,45 @@ describe("toolTitle", () => {
 })
 
 /**
- * A5 T1/T2: the card must never show a machine code.  The table is transcribed
- * from docs/data-contracts.md:159,167,347 — the documented `ToolResult.error`
- * contract — not invented here; a code the backend adds later shows up as
- * `未知原因（code）` rather than disappearing.
+ * A5 T1/T2 + 2026-11: `ToolResult.error` is the gRPC status family, so the card
+ * translates exactly 16 values.  The specific legacy reason travels as
+ * `detailCode` for the trace/operator, never as the card's one-line label.
  */
 describe("toolFailure", () => {
-  test("every documented code maps to a label and a tone", () => {
-    const denied: Array<[string, string]> = [
-      ["denied", "被拒绝"],
-      ["not_approved", "未获批准"],
-      ["guard_denied", "门卫拦截"],
-      ["hook_blocked", "钩子拦截"],
-      ["approval_timeout", "审批超时"],
-      ["stopped", "已停止"],
-      ["skipped", "已跳过"],
-      ["no_user", "无人回答"],
-      // 内化批次: the readonly gate's own code was the last live 未知原因
-      // (found in session 7ad86804's transcript).
-      ["readonly_denied", "只读拒绝"],
-      // The research exit's posture gates -- a plain session calling it gets
-      // a verdict, not 未知原因.
-      ["not_in_plan", "非计划模式"],
-      ["task_busy", "任务运行中"],
-      // R21 §3: a plan-step turn has no running goal, so update_goal there is
-      // misplaced rather than an unknown cause.
-      ["no_goal", "无运行中的目标"],
-      // Trace 2026-10-31: a sub-agent's absolute main-repo paths hit the
-      // session workspace boundary; the old table showed 未知原因.
-      ["sandbox_violation", "路径越界（沙箱拒绝）"],
+  test("each of the 16 gRPC families maps to a label and a tone", () => {
+    const families: Array<[string, string, "denied" | "failed"]> = [
+      ["CANCELLED", "已取消 / 已停止", "denied"],
+      ["UNKNOWN", "未分类错误", "failed"],
+      ["INVALID_ARGUMENT", "参数错误", "failed"],
+      ["DEADLINE_EXCEEDED", "超时", "failed"],
+      ["NOT_FOUND", "目标不存在", "failed"],
+      ["ALREADY_EXISTS", "目标已存在", "denied"],
+      ["PERMISSION_DENIED", "被拒绝", "denied"],
+      ["RESOURCE_EXHAUSTED", "超出配额 / 尺寸上限", "failed"],
+      ["FAILED_PRECONDITION", "前置条件不满足", "denied"],
+      ["ABORTED", "并发冲突，已中止", "denied"],
+      ["OUT_OF_RANGE", "超出范围", "failed"],
+      ["UNIMPLEMENTED", "工具不存在或未实现", "failed"],
+      ["INTERNAL", "工具内部错误", "failed"],
+      ["UNAVAILABLE", "依赖不可用", "failed"],
+      ["DATA_LOSS", "数据损坏或读写失败", "failed"],
+      ["UNAUTHENTICATED", "未认证", "denied"],
     ]
-    for (const [code, label] of denied) {
-      expect(toolFailure(code)).toEqual({ label, tone: "denied" })
-    }
-    const failed: Array<[string, string]> = [
-      ["nonzero_exit", "命令返回非零"],
-      ["timeout", "命令超时"],
-      ["spawn_failed", "命令无法启动"],
-      ["tool_timeout", "工具调用超时"],
-      ["tool_error", "工具异常"],
-      ["unknown_tool", "未知工具"],
-      ["mcp_error", "MCP 调用失败"],
-      ["subagent_error", "子代理失败"],
-      ["user_prompt_error", "提问通道异常"],
-      ["child_timeout", "子代理超时"],
-    ]
-    for (const [code, label] of failed) {
-      expect(toolFailure(code)).toEqual({ label, tone: "failed" })
+    for (const [code, label, tone] of families) {
+      expect(toolFailure(code)).toEqual({ label, tone })
     }
   })
 
   test("a code the table does not know still surfaces it", () => {
     expect(toolFailure("brand_new_code")).toEqual({
       label: "未知原因（brand_new_code）",
+      tone: "failed",
+    })
+  })
+
+  test("a legacy leaf is not a card label any more", () => {
+    expect(toolFailure("denied")).toEqual({
+      label: "未知原因（denied）",
       tone: "failed",
     })
   })
@@ -191,17 +177,6 @@ describe("formatDuration", () => {
     expect(formatDuration(820)).toBe("820ms")
     expect(formatDuration(1500)).toBe("1.5s")
     expect(formatDuration(125000)).toBe("2m 5s")
-  })
-})
-
-describe("toolFailure", () => {
-  test("a sandbox that cannot run is an environment failure, not a refusal (A-4)", () => {
-    expect(toolFailure("sandbox_unavailable")).toEqual({
-      label: "沙箱不可用（命令未执行）",
-      tone: "failed",
-    })
-    // A real refusal keeps its own words and its own tone.
-    expect(toolFailure("denied")).toEqual({ label: "被拒绝", tone: "denied" })
   })
 })
 
@@ -303,34 +278,3 @@ describe("the open line's budget", () => {
   })
 })
 
-
-describe("toolFailure: plan and merge codes", () => {
-  test("a missing question is a named failure, not 未知原因", () => {
-    expect(toolFailure("missing_question")).toEqual({
-      label: "缺少问题",
-      tone: "denied",
-    })
-  })
-
-  test("every merge-queue status has a Chinese label", () => {
-    const labels: Array<[string, string]> = [
-      ["verify_failed", "验证失败"],
-      ["verify_unavailable", "验证不可用"],
-      ["not_settled", "子代理未收敛"],
-      ["commit_failed", "提交失败"],
-      ["branch_moved", "分支已变化"],
-      ["head_moved", "主分支已前移"],
-      ["dirty", "主工作区有未提交改动"],
-      ["conflict", "合并冲突"],
-      ["busy", "合并队列忙"],
-      ["journal_failed", "合并日志写入失败"],
-      ["unavailable", "合并不可用"],
-      ["merge_skipped", "无需合并"],
-      ["nothing_to_merge", "无内容可合并"],
-      ["invalid_ref", "无效的引用或分支"],
-    ]
-    for (const [code, label] of labels) {
-      expect(toolFailure(code).label).toBe(label)
-    }
-  })
-})

@@ -202,13 +202,21 @@ class WebfetchTool(BaseTool):
     ) -> ToolResult:
         url = str(params.get("url", "")).strip()
         if not url:
-            return ToolResult(success=False, output="url must not be empty")
+            return ToolResult(
+                success=False, output="url must not be empty", error="missing_url"
+            )
         ok, reason = _is_public_url(url)
         if not ok:
-            return ToolResult(success=False, output=f"refused: {reason}")
+            return ToolResult(
+                success=False, output=f"refused: {reason}", error="url_not_allowed"
+            )
         fmt = str(params.get("format", "text") or "text").lower()
         if fmt not in ("text", "markdown"):
-            return ToolResult(success=False, output="format must be 'text' or 'markdown'")
+            return ToolResult(
+                success=False,
+                output="format must be 'text' or 'markdown'",
+                error="invalid_format",
+            )
         try:
             timeout = min(float(params.get("timeout", self._timeout) or self._timeout), 120.0)
         except (TypeError, ValueError):
@@ -217,11 +225,19 @@ class WebfetchTool(BaseTool):
             outcome = self._opener(url, timeout)
             content_type, body = await outcome if inspect.isawaitable(outcome) else outcome
         except FetchRefused as exc:
-            return ToolResult(success=False, output=str(exc))
+            return ToolResult(success=False, output=str(exc), error="fetch_refused")
         except httpx.HTTPError as exc:
-            return ToolResult(success=False, output=f"fetch failed: {exc}")
+            return ToolResult(
+                success=False, output=f"fetch failed: {exc}", error="fetch_failed"
+            )
         except (OSError, TimeoutError) as exc:
-            return ToolResult(success=False, output=f"fetch failed: {exc}")
+            return ToolResult(
+                success=False,
+                output=f"fetch failed: {exc}",
+                error=(
+                    "fetch_timeout" if isinstance(exc, TimeoutError) else "fetch_failed"
+                ),
+            )
         text = body.decode("utf-8", errors="replace")
         if "html" in content_type:
             text = html_to_markdown(text) if fmt == "markdown" else html_to_text(text)

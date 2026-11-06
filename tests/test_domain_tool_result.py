@@ -49,8 +49,38 @@ def test_wrap_tool_output_data_then_text():
 
 
 def test_wrap_tool_output_marks_failure_with_ok_false():
+    # A failure with no code is INTERNAL; the family is always on the wire so
+    # the model never has to infer it from prose.
     out = wrap_tool_output("bash", "boom", success=False)
-    assert out == '<tool_output tool="bash" ok="false">\nboom\n</tool_output>'
+    assert out == (
+        '<tool_output tool="bash" ok="false" error="INTERNAL">\nboom\n</tool_output>'
+    )
+
+
+def test_wrap_tool_output_names_the_family_and_the_specific_code():
+    out = wrap_tool_output(
+        "edit",
+        "old_string not found",
+        success=False,
+        error="FAILED_PRECONDITION",
+        detail="old_string_not_found",
+    )
+    assert out.startswith(
+        '<tool_output tool="edit" ok="false" '
+        'error="FAILED_PRECONDITION" code="old_string_not_found">'
+    )
+
+
+def test_tool_result_normalizes_a_legacy_leaf_into_family_plus_detail():
+    result = ToolResult(success=False, output="x", error="stale_read")
+    assert result.error == "FAILED_PRECONDITION"
+    assert result.detail == "stale_read"
+
+
+def test_tool_result_without_a_code_on_failure_is_internal():
+    result = ToolResult(success=False, output="x")
+    assert result.error == "INTERNAL"
+    assert result.detail is None
 
 
 def test_tool_output_carries_structured_payload():

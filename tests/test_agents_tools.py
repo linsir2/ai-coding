@@ -185,7 +185,7 @@ async def test_spawn_rejects_an_empty_task():
     result = await SpawnAgentTool(_FakeRunner()).execute({"task": "   "}, _ctx())
 
     assert result.success is False
-    assert result.error == "missing_task"
+    assert result.detail == "missing_task"
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_spawn_reports_an_exhausted_pool_as_agents_exhausted():
     result = await SpawnAgentTool(runner).execute({"task": "t"}, _ctx())
 
     assert result.success is False
-    assert result.error == "agents_exhausted"
+    assert result.detail == "agents_exhausted"
     assert "4 busy" in result.output
 
 
@@ -301,7 +301,7 @@ async def test_close_agent_rejects_an_unknown_id():
     )
 
     assert result.success is False
-    assert result.error == "unknown_agent"
+    assert result.detail == "unknown_agent"
 
 
 @pytest.mark.asyncio
@@ -311,7 +311,7 @@ async def test_spawn_rejects_an_unknown_fork_mode():
     )
 
     assert result.success is False
-    assert result.error == "invalid_fork_turns"
+    assert result.detail == "invalid_fork_turns"
 
 
 @pytest.mark.asyncio
@@ -322,7 +322,7 @@ async def test_spawn_reports_a_failed_start_separately_from_exhaustion():
     result = await SpawnAgentTool(runner).execute({"task": "t"}, _ctx())
 
     assert result.success is False
-    assert result.error == "agent_start_failed"
+    assert result.detail == "agent_start_failed"
 
 
 # ---- P1b: the read-only spawn switch ---------------------------------------
@@ -378,7 +378,7 @@ async def test_spawn_rejects_a_non_boolean_readonly(value):
     result = await tool.execute({"task": "t", "readonly": value}, _ctx())
 
     assert result.success is False
-    assert result.error == "invalid_readonly"
+    assert result.detail == "invalid_readonly"
     assert runner.spawns == []
 
 

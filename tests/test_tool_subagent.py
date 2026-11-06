@@ -190,7 +190,7 @@ async def test_subagent_runner_error_is_tool_failure():
     result = await tool.execute({"task": "t"}, _ctx())
 
     assert result.success is False
-    assert result.error == "subagent_error"
+    assert result.detail == "subagent_error"
     assert "boom" in result.output
 
 
@@ -293,7 +293,7 @@ async def test_a_non_boolean_readonly_is_refused_before_the_runner(value):
     result = await tool.execute({"task": "t", "readonly": value}, _ctx())
 
     assert result.success is False
-    assert result.error == "invalid_readonly"
+    assert result.detail == "invalid_readonly"
     assert runner.calls == []
 
 

@@ -49,7 +49,7 @@ async def test_empty_query_is_a_structured_error(tmp_path):
     tool = MemorySearchTool(_service(tmp_path))
     result = await tool.execute({"query": "   "})
     assert result.success is False
-    assert result.error == "empty_query"
+    assert result.detail == "empty_query"
     assert result.data == {"query": ""}
 
 
@@ -95,7 +95,7 @@ async def test_tool_survives_a_broken_memory(tmp_path):
     result = await tool.execute({"query": "anything"})
     assert isinstance(result, ToolResult)
     assert result.success is False
-    assert result.error == "memory_error"
+    assert result.detail == "memory_error"
 
 
 @pytest.mark.asyncio
@@ -171,7 +171,7 @@ async def test_r8_unknown_evidence_is_an_error_not_a_silent_pass(tmp_path):
     result = await tool.execute({"query": "构建用什么", "evidence": "maybe"})
 
     assert result.success is False
-    assert result.error == "bad_evidence"
+    assert result.detail == "bad_evidence"
     assert result.data == {"evidence": "maybe"}
 
 

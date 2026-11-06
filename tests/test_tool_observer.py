@@ -53,13 +53,14 @@ class TestToolObserver:
         observations = []
         observer = ToolObserver(observations)
         event = ToolFinished(call_id="c1", tool_name="write", success=False,
-                             error="resolves outside workspace", output_preview="",
-                             duration_ms=100, iteration=0)
+                             error="PERMISSION_DENIED", detail="resolves outside workspace",
+                             output_preview="", duration_ms=100, iteration=0)
         observer.on_event(event)
         assert len(observations) == 1
         assert observations[0].tool_name == "write"
         assert observations[0].success is False
-        assert observations[0].error == "resolves outside workspace"
+        assert observations[0].error == "PERMISSION_DENIED"
+        assert observations[0].detail == "resolves outside workspace"
 
     def test_records_successful_tool_call(self):
         from ai_coding.core.sop_router import ToolObserver

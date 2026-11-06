@@ -216,7 +216,7 @@ def test_a_workspace_file_is_refused_and_the_reason_names_the_plan_directory(
         )
     )[0]
     assert outcome.denied is True
-    assert outcome.result.error == "denied"
+    assert outcome.result.detail == "denied"
     assert ".ai-coding/plan" in outcome.result.output
     assert not (tmp_path / "src" / "app.py").exists()
 
@@ -323,7 +323,7 @@ async def test_a_symlink_to_a_dotenv_is_not_an_example(tmp_path):
     )[0]
     # Without an approval callback a WARN is a refusal; the point is that the
     # call is a question at all, not that the file happened to be unreadable.
-    assert outcome.result.error == "not_approved", outcome.result.output
+    assert outcome.result.detail == "not_approved", outcome.result.output
 
 
 def test_grep_over_a_dotenv_is_not_a_free_read(tmp_path):

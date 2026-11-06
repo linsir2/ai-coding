@@ -40,10 +40,10 @@ const render = async (value: ToolPart, waiting = false) => {
 
 describe("ToolCard", () => {
   test("a failure reads as a sentence, never as the machine code", async () => {
-    const setup = await render(part({ error: "nonzero_exit", durationMs: 820 }))
+    const setup = await render(part({ error: "FAILED_PRECONDITION", durationMs: 820 }))
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("命令返回非零")
-    expect(frame).not.toContain("nonzero_exit")
+    expect(frame).toContain("前置条件不满足")
+    expect(frame).not.toContain("FAILED_PRECONDITION")
     expect(frame).toContain("820ms")
     setup.renderer.destroy()
   })
@@ -68,7 +68,7 @@ describe("ToolCard", () => {
   })
 
   test("a denial is struck through", async () => {
-    const setup = await render(part({ verb: "编辑文件", target: "a.py", error: "denied" }))
+    const setup = await render(part({ verb: "编辑文件", target: "a.py", error: "PERMISSION_DENIED" }))
     const spans = setup.captureSpans()
     const struck = spans.lines.some((line) =>
       line.spans.some(
@@ -84,15 +84,15 @@ describe("ToolCard", () => {
     setup.renderer.destroy()
   })
 
-  // R22 A-17: A-4's real frame read "✗ 已运行命令 · ls" over "沙箱不可用（命令未执行）",
+  // R22 A-17: A-4's real frame read "✗ 已运行命令 · ls" over a failure line,
   // which says the command ran and did not run in the same card.
   test("a failed card says it tried, not that it ran", async () => {
     const setup = await render(
-      part({ target: "ls", error: "sandbox_unavailable" }),
+      part({ target: "ls", error: "UNAVAILABLE" }),
     )
     const frame = setup.captureCharFrame()
     expect(frame).toContain("已尝试运行命令 · ls")
-    expect(frame).toContain("沙箱不可用（命令未执行）")
+    expect(frame).toContain("依赖不可用")
     expect(frame).not.toContain("已运行命令")
     setup.renderer.destroy()
   })
@@ -190,11 +190,11 @@ describe("ToolCard", () => {
 
   test("a failed todo_write still draws its card", async () => {
     const setup = await render(
-      part({ toolName: "todo_write", verb: "更新计划", target: "", error: "guard_denied" }),
+      part({ toolName: "todo_write", verb: "更新计划", target: "", error: "PERMISSION_DENIED" }),
     )
     const frame = setup.captureCharFrame()
     expect(frame).toContain("更新计划")
-    expect(frame).toContain("门卫拦截")
+    expect(frame).toContain("被拒绝")
     setup.renderer.destroy()
   })
 
@@ -225,12 +225,12 @@ describe("ToolCard", () => {
         toolName: "finish_research",
         verb: "运行工具",
         target: "finish_research",
-        error: "implementation_request",
+        error: "PERMISSION_DENIED",
       }),
     )
     const frame = setup.captureCharFrame()
     expect(frame).toContain("finish_research")
-    expect(frame).toContain("该请求要实现")
+    expect(frame).toContain("被拒绝")
     setup.renderer.destroy()
   })
 })

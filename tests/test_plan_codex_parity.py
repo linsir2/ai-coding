@@ -76,7 +76,7 @@ async def test_update_plan_refuses_in_plan_mode() -> None:
         ToolContext(task=task, mode="plan"),
     )
     assert result.success is False
-    assert result.error == "plan_mode"
+    assert result.detail == "plan_mode"
     assert task.items == []
 
 

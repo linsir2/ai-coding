@@ -268,8 +268,12 @@ class ToolObservation:
 
     tool_name: str
     success: bool
+    #: The gRPC family (``FAILED_PRECONDITION`` ...); None on success.
     error: str | None
     timestamp: str
+    #: The specific reason (``stale_read`` ...).  Kept so "the same failure
+    #: twice" still means the same *cause*, not merely the same family.
+    detail: str = ""
 
 
 # ---- F3: Intervention ------------------------------------------------------
@@ -305,6 +309,7 @@ class ToolObserver:
             success=event.success,
             error=event.error,
             timestamp=now_utc(),
+            detail=event.detail,
         )
         self._observations.append(obs)
         if len(self._observations) > MAX_OBSERVATIONS:
@@ -540,6 +545,8 @@ class SOPRouter:
         # Check if any recent observation has a similar error
         for obs in observations[-10:]:  # last 10 observations
             if obs.error and obs.error == error:
+                return True
+            if getattr(obs, "detail", "") and obs.detail == error:
                 return True
         return False
 

@@ -36,8 +36,8 @@ from typing import Any
 
 from ai_coding.core.dispatch import DispatchOutcome
 from ai_coding.core.turn_policy import TurnSnapshot
+from ai_coding.domain.error_codes import is_neutral, severity_of
 from ai_coding.domain.ledger import UncertaintyItem, build_ledger
-from ai_coding.domain.message import CANCELLED_BY_USER
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.domain.turn_digest import DEFAULT_NOTE_CHARS, one_line
 from ai_coding.infra.deadline import Deadline
@@ -181,29 +181,24 @@ def _bash_is_inspection(command: str) -> bool:
 #: a failure nor keeps the burn -- the strategy window's helped-signal is
 #: ``failed_streak == 0``, so an all-neutral round must reset (24d7109b: a
 #: parked validation refusal kept the L1 window "failed" and L2 spent its
-#: nudge on a duplicate report).
+#: nudge on a duplicate report).  The pair now lives in
+#: ``domain.error_codes._NEUTRAL_DETAILS`` so the tool contract and the policy
+#: cannot disagree.
 #:
-#: ``guard_denied`` is deliberately NOT here, though it looks like the same kind
-#: of thing.  Measured: exempting it makes the strategy ladder read a refusal as
-#: *progress*.  A refused call still means the model did not get what it asked
-#: for, so ``failed_streak`` should keep its burn; making it neutral hands the
-#: loop a streak of 0, the L1 window closes "helped", and the same L1 nudge is
-#: re-injected every iteration until the iteration budget dies -- a worse ending
-#: than the one it was meant to prevent.  The fix for an over-eager guard is to
-#: stop the guard firing on calls that produced nothing to reuse
-#: (``guard.DuplicateCallGuard``), not to discount the refusal afterwards.
-_NOT_EVIDENCE_ERRORS = frozenset({CANCELLED_BY_USER, "invalid_plan"})
+#: ``guard_denied`` is deliberately NOT neutral, though it looks like the same
+#: kind of thing.  Measured: exempting it makes the strategy ladder read a
+#: refusal as *progress*.  A refused call still means the model did not get
+#: what it asked for, so ``failed_streak`` should keep its burn; making it
+#: neutral hands the loop a streak of 0, the L1 window closes "helped", and the
+#: same L1 nudge is re-injected every iteration until the iteration budget dies
+#: -- a worse ending than the one it was meant to prevent.  The fix for an
+#: over-eager guard is to stop the guard firing on calls that produced nothing
+#: to reuse (``guard.DuplicateCallGuard``), not to discount the refusal
+#: afterwards.
 
 # F2: Paris' Law fatigue tracking — accumulated error damage.
 _FATIGUE_C = 1.0
 _FATIGUE_M = 2.0
-
-_SEVERITY_KEYWORDS: dict[int, tuple[str, ...]] = {
-    5: ("timeout", "context overflow", "out of memory", "token limit"),
-    4: ("rate limit", "too many requests", "quota exceeded"),
-    3: ("permission denied", "access forbidden", "unauthorized"),
-    2: ("not found", "invalid", "malformed", "bad request", "error", "failed"),
-}
 
 _FAILURE_EXCERPT = 160
 
@@ -643,7 +638,11 @@ class TurnBooks:
         # an Escape).  An all-neutral round now also resets the burn: the
         # strategy window closes "helped" exactly when the streak is 0, so
         # parking it here would read a working loop as a failing one.
-        counted = [item for item in outcomes if item.result.error not in _NOT_EVIDENCE_ERRORS]
+        counted = [
+            item
+            for item in outcomes
+            if not is_neutral(item.result.error, item.result.detail)
+        ]
         if not counted:
             self.failed_streak = 0
             self.neutral_streak += 1
@@ -652,14 +651,16 @@ class TurnBooks:
         self.neutral_streak = 0
         for item in counted:
             if not item.result.success:
-                error = str(item.result.error or "failed")
+                # The detail is what the operator needs in the ledger id; the
+                # family alone ("FAILED_PRECONDITION") repeats across causes.
+                error = str(item.result.detail or item.result.error or "failed")
                 self.failures.append((
                     item.call.name,
                     error,
                     (item.result.output or "")[:_FAILURE_EXCERPT],
                 ))
                 # F2: incremental fatigue accumulation (Paris' Law: ΔD = C × s^m)
-                severity = self._severity_of(error)
+                severity = severity_of(item.result.error, item.result.detail)
                 self.fatigue_index += _FATIGUE_C * (severity ** _FATIGUE_M)
 
     # ---- I1/R-7: evidence fingerprints ----------------------------------
@@ -735,14 +736,9 @@ class TurnBooks:
 
     # ---- F2: Paris' Law fatigue ------------------------------------------
 
-    @staticmethod
-    def _severity_of(error: str) -> int:
-        """Derive error severity from error text (1-5, 5 = most severe)."""
-        error_lower = error.lower()
-        for level in (5, 4, 3, 2):
-            if any(kw in error_lower for kw in _SEVERITY_KEYWORDS.get(level, ())):
-                return level
-        return 1
+    # Severity now lives in ``domain.error_codes.severity_of`` (family default,
+    # legacy detail keyword fallback), so the tool contract and the ladder read
+    # the same table.
 
     # ---- what a decision needs -------------------------------------------
 

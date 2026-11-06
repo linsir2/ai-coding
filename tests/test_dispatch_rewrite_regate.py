@@ -142,7 +142,7 @@ async def test_a_denying_guard_never_reaches_the_gate_or_the_tool():
         ToolContext(workspace="/tmp/ws"),
     )
 
-    assert outcomes[0].result.error == "guard_denied"
+    assert outcomes[0].result.detail == "guard_denied"
     assert outcomes[0].result.data["guard"] == "nope"
     assert tool.commands == []
     assert len(gate.calls) == 1  # the gate still ran first (it was ALLOW)

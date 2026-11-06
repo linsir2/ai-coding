@@ -243,7 +243,7 @@ async def c6_duplicate_guard(root: Path) -> tuple[bool, str]:
 
     rows = _turn_lines(root)
     denied = [
-        r for r in rows if r["evt"] == "ToolFinished" and r["data"].get("error") == "guard_denied"
+        r for r in rows if r["evt"] == "ToolFinished" and r["data"].get("detail") == "guard_denied"
     ]
     status = loop.last_outcome.status if loop.last_outcome else None
     detail = f"executed={len(tool.calls)} denied={len(denied)} status={status}"
@@ -349,7 +349,7 @@ async def c7_hook_blocks_a_call(root: Path) -> tuple[bool, str]:
 
     rows = _turn_lines(root)
     blocked = [
-        r for r in rows if r["evt"] == "ToolFinished" and r["data"].get("error") == "hook_blocked"
+        r for r in rows if r["evt"] == "ToolFinished" and r["data"].get("detail") == "hook_blocked"
     ]
     tool_messages = [m for m in session.messages if m.role == "tool"]
     ok = (

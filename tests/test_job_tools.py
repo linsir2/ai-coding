@@ -152,7 +152,7 @@ async def test_a_workspace_with_no_registry_says_the_tools_are_not_wired(tmp_pat
     result = await JobListTool().execute({}, _ctx(tmp_path, None))
 
     assert result.success is False
-    assert result.error == "no_jobs"
+    assert result.detail == "no_jobs"
 
 
 # ---- job_kill --------------------------------------------------------------
@@ -165,7 +165,7 @@ async def test_killing_an_unknown_id_is_an_error_not_a_silent_success(tmp_path):
     result = await JobKillTool().execute({"job_id": "job_nope"}, _ctx(tmp_path, registry))
 
     assert result.success is False
-    assert result.error == "unknown_job"
+    assert result.detail == "unknown_job"
     assert "job_nope" in result.output
 
 
@@ -230,7 +230,7 @@ async def test_killing_a_job_this_platform_cannot_verify_is_refused_outright(tmp
         )
 
         assert result.success is False
-        assert result.error == "unverifiable_job"
+        assert result.detail == "unverifiable_job"
         os.kill(job.pid, 0)  # still alive: nothing was signalled
     finally:
         _killpid(job.pid)
@@ -241,7 +241,7 @@ async def test_killing_without_a_registry_is_an_error_not_a_no_op(tmp_path):
     result = await JobKillTool().execute({"job_id": "job_x"}, _ctx(tmp_path, None))
 
     assert result.success is False
-    assert result.error == "no_jobs"
+    assert result.detail == "no_jobs"
 
 
 # ---- job_output: waiting for a result without a cursor ---------------------
@@ -327,7 +327,7 @@ async def test_waiting_on_an_unknown_id_is_an_error_not_an_empty_read(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "unknown_job"
+    assert result.detail == "unknown_job"
 
 
 @pytest.mark.asyncio
@@ -345,7 +345,7 @@ async def test_waiting_on_an_inherited_job_is_refused_because_nothing_will_wake_
         )
 
         assert result.success is False
-        assert result.error == "adopted_job"
+        assert result.detail == "adopted_job"
         assert "earlier run" in result.output
     finally:
         _killpid(job.pid)
@@ -428,4 +428,4 @@ async def test_job_output_without_a_registry_says_so(tmp_path):
     result = await JobOutputTool().execute({"job_id": "job_x"}, _ctx(tmp_path, None))
 
     assert result.success is False
-    assert result.error == "no_jobs"
+    assert result.detail == "no_jobs"

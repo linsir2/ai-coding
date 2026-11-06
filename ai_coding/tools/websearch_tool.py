@@ -84,12 +84,15 @@ class WebsearchTool(BaseTool):
     ) -> ToolResult:
         query = str(params.get("query", "")).strip()
         if not query:
-            return ToolResult(success=False, output="query must not be empty")
+            return ToolResult(
+                success=False, output="query must not be empty", error="missing_query"
+            )
         if not self._api_key:
             return ToolResult(
                 success=False,
                 output="web search is not configured: set ai.websearch_api_key "
                 "(Tavily) in your config",
+                error="not_configured",
             )
         try:
             limit = int(params.get("max_results", self._max_results) or self._max_results)
@@ -112,18 +115,32 @@ class WebsearchTool(BaseTool):
             except OSError:
                 pass
             return ToolResult(
-                success=False, output=f"search failed: HTTP {exc.code} {detail}".strip()
+                success=False,
+                output=f"search failed: HTTP {exc.code} {detail}".strip(),
+                error="websearch_error",
             )
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
-            return ToolResult(success=False, output=f"search failed: {exc}")
+            return ToolResult(
+                success=False,
+                output=f"search failed: {exc}",
+                error=(
+                    "fetch_timeout" if isinstance(exc, TimeoutError) else "websearch_error"
+                ),
+            )
         try:
             data = json.loads(body.decode("utf-8", errors="replace"))
         except ValueError:
             return ToolResult(
-                success=False, output="search failed: provider returned invalid JSON"
+                success=False,
+                output="search failed: provider returned invalid JSON",
+                error="websearch_error",
             )
         if isinstance(data, dict) and data.get("error"):
-            return ToolResult(success=False, output=f"search failed: {data['error']}")
+            return ToolResult(
+                success=False,
+                output=f"search failed: {data['error']}",
+                error="websearch_error",
+            )
         # A provider that changes its contract is not "nothing found": r17
         # reported both as "(no results)", so the model concluded the web had no
         # answer (r18/F12).
@@ -132,6 +149,7 @@ class WebsearchTool(BaseTool):
             return ToolResult(
                 success=False,
                 output="search failed: provider response had no 'results' list",
+                error="websearch_error",
             )
         items = [item for item in results if isinstance(item, dict)]
         if not items:
@@ -139,6 +157,7 @@ class WebsearchTool(BaseTool):
                 success=False,
                 output=f"search failed: provider returned {len(results)} entries "
                 "in an unexpected shape (no objects)",
+                error="websearch_error",
             )
         lines = [f"Search results for: {query}"]
         for item in items[:limit]:

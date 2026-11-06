@@ -189,6 +189,8 @@ class TurnCloser:
                         success=item.result.success,
                         data=item.result.data,
                         artifacts=item.result.artifacts,
+                        error=item.result.error,
+                        detail=item.result.detail,
                     ),
                     now_utc(),
                 )

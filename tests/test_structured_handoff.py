@@ -213,7 +213,7 @@ async def test_tool_rejects_oversize_schema_without_calling_runner():
     out = await tool.execute({"task": "t", "output_schema": big}, _ctx())
 
     assert out.success is False
-    assert out.error == "schema_too_large"
+    assert out.detail == "schema_too_large"
     assert runner.run_calls == []
 
 
@@ -225,7 +225,7 @@ async def test_tool_rejects_non_dict_schema():
     out = await tool.execute({"task": "t", "output_schema": "[1]"}, _ctx())
 
     assert out.success is False
-    assert out.error == "schema_invalid"
+    assert out.detail == "schema_invalid"
     assert runner.run_calls == []
 
 

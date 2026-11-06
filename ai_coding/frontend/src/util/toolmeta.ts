@@ -107,98 +107,31 @@ export function toolTitle(
 export type FailureTone = "denied" | "failed"
 
 /**
- * The failure code → human label (A5 §4).  Transcribed from the documented
- * `ToolResult.error` contract (docs/data-contracts.md:159,167,347) so the
- * screen never shows a machine code; an unknown code keeps itself visible
- * rather than being swallowed, so a new backend code is visible when it lands.
+ * The failure family → human label (A5 §4, re-cut 2026-11).
+ *
+ * `ToolResult.error` is the gRPC status family now, so this table is the
+ * closed set of 16 values: a new family cannot appear without a reader noticing
+ * the `未知原因` fallback.  The specific reason travels beside it as
+ * `detailCode` (``stale_read`` …) and is for the operator/trace, not for the
+ * card's one-line label.
  */
 const FAILURES: Record<string, { label: string; tone: FailureTone }> = {
-  denied: { label: "被拒绝", tone: "denied" },
-  not_approved: { label: "未获批准", tone: "denied" },
-  guard_denied: { label: "门卫拦截", tone: "denied" },
-  hook_blocked: { label: "钩子拦截", tone: "denied" },
-  approval_timeout: { label: "审批超时", tone: "denied" },
-  stopped: { label: "已停止", tone: "denied" },
-  skipped: { label: "已跳过", tone: "denied" },
-  nonzero_exit: { label: "命令返回非零", tone: "failed" },
-  timeout: { label: "命令超时", tone: "failed" },
-  spawn_failed: { label: "命令无法启动", tone: "failed" },
-  // A-4: the process sandbox cannot run here (no bwrap / namespaces).  It is
-  // an environment failure, so it gets ✗ rather than the ⊘ a refusal wears --
-  // "被拒绝" said a human had said no, which is not what happened.
-  sandbox_unavailable: { label: "沙箱不可用（命令未执行）", tone: "failed" },
-  // The file tools' boundary: a path outside the session's workspace (trace
-  // 2026-10-31: a sub-agent in its worktree was handed absolute main-repo
-  // paths and four calls were refused).  It is an environment refusal, not
-  // breakage, and "未知原因（sandbox_violation）" said nothing.
-  sandbox_violation: { label: "路径越界（沙箱拒绝）", tone: "denied" },
-  // R0-3's machine code for a delegated run that used up its clock.
-  child_timeout: { label: "子代理超时", tone: "failed" },
-  tool_timeout: { label: "工具调用超时", tone: "failed" },
-  // The stale-read protection's two refusals.  They reached the wire with
-  // ``error = None`` before, so the card showed a bare "write: ?" and the
-  // transcript never said why (measured 2026-10-31: one item looped 75
-  // iterations on this).
-  stale_read: { label: "文件已被外部修改，需重读", tone: "denied" },
-  must_read_first: { label: "需先读取文件", tone: "denied" },
-  read_only_shell_required: { label: "只允许只读命令", tone: "denied" },
-  tool_error: { label: "工具异常", tone: "failed" },
-  unknown_tool: { label: "未知工具", tone: "failed" },
-  mcp_error: { label: "MCP 调用失败", tone: "failed" },
-  subagent_error: { label: "子代理失败", tone: "failed" },
-  no_user: { label: "无人回答", tone: "denied" },
-  user_prompt_error: { label: "提问通道异常", tone: "failed" },
-  // 内化批次: the readonly gate's own code was the last live 未知原因
-  // (7ad86804's transcript).
-  readonly_denied: { label: "只读拒绝", tone: "denied" },
-  // P2-B1: a writer waited for another writer's claim and gave up; the call
-  // never ran, so it reads as a refusal, not breakage.
-  write_conflict: { label: "等待其它写者超时", tone: "denied" },
-  // The question tool: a call without its required param was a model guess,
-  // and the old fallback read 未知原因（missing_question）.
-  missing_question: { label: "缺少问题", tone: "denied" },
-  // The research exit's posture gates -- a plain session calling it gets a
-  // verdict, not 未知原因.
-  not_in_plan: { label: "非计划模式", tone: "denied" },
-  task_busy: { label: "任务运行中", tone: "denied" },
-  // N1: the research exit -- one turn, one exit, and a conclusion that was
-  // never written down is a model mistake, not breakage.
-  already_concluded: { label: "本回合已收尾", tone: "denied" },
-  missing_summary: { label: "结论为空", tone: "denied" },
-  plan_already_approved: { label: "计划已批准", tone: "denied" },
-  // N1: the request asks for work, so the conclusion exit is not the way out.
-  implementation_request: { label: "该请求要实现", tone: "denied" },
-  // R21 §3: a plan-step turn has no running goal (``armed_profile == "plan"``),
-  // so ``update_goal`` there is a misplaced call, not breakage.  The fallback
-  // drew it as 未知原因（no_goal） in the middle of execution.
-  no_goal: { label: "无运行中的目标", tone: "denied" },
-  // P2-C3: every status the merge queue can hand back as ``error``.  Without
-  // these the merge card said 未知原因（verify_failed） and the operator had to
-  // read the code to learn what happened.
-  verify_failed: { label: "验证失败", tone: "failed" },
-  verify_unavailable: { label: "验证不可用", tone: "failed" },
-  completion_unverified: { label: "完成缺少回执", tone: "failed" },
-  completion_blocked: { label: "完成被阻断", tone: "denied" },
-  directory_unsupported: { label: "目录需用 verify", tone: "failed" },
-  legacy_session_unverified: { label: "旧会话需重新验证", tone: "failed" },
-  missing_override_reason: { label: "缺少 override 原因", tone: "failed" },
-  override_unavailable: { label: "override 需人工批准", tone: "denied" },
-  override_denied: { label: "override 被拒绝", tone: "denied" },
-  not_settled: { label: "子代理未收敛", tone: "denied" },
-  commit_failed: { label: "提交失败", tone: "failed" },
-  branch_moved: { label: "分支已变化", tone: "denied" },
-  head_moved: { label: "主分支已前移", tone: "denied" },
-  dirty: { label: "主工作区有未提交改动", tone: "denied" },
-  conflict: { label: "合并冲突", tone: "failed" },
-  busy: { label: "合并队列忙", tone: "denied" },
-  journal_failed: { label: "合并日志写入失败", tone: "failed" },
-  unavailable: { label: "合并不可用", tone: "failed" },
-  // ``merge_skipped`` is a successful no-op (there was nothing to merge); it is
-  // not breakage.  The card's only non-failure tone is ``denied`` (⊘), which is
-  // closer to "nothing happened" than the red ✗.
-  merge_skipped: { label: "无需合并", tone: "denied" },
-  nothing_to_merge: { label: "无内容可合并", tone: "denied" },
-  invalid_ref: { label: "无效的引用或分支", tone: "denied" },
+  CANCELLED: { label: "已取消 / 已停止", tone: "denied" },
+  UNKNOWN: { label: "未分类错误", tone: "failed" },
+  INVALID_ARGUMENT: { label: "参数错误", tone: "failed" },
+  DEADLINE_EXCEEDED: { label: "超时", tone: "failed" },
+  NOT_FOUND: { label: "目标不存在", tone: "failed" },
+  ALREADY_EXISTS: { label: "目标已存在", tone: "denied" },
+  PERMISSION_DENIED: { label: "被拒绝", tone: "denied" },
+  RESOURCE_EXHAUSTED: { label: "超出配额 / 尺寸上限", tone: "failed" },
+  FAILED_PRECONDITION: { label: "前置条件不满足", tone: "denied" },
+  ABORTED: { label: "并发冲突，已中止", tone: "denied" },
+  OUT_OF_RANGE: { label: "超出范围", tone: "failed" },
+  UNIMPLEMENTED: { label: "工具不存在或未实现", tone: "failed" },
+  INTERNAL: { label: "工具内部错误", tone: "failed" },
+  UNAVAILABLE: { label: "依赖不可用", tone: "failed" },
+  DATA_LOSS: { label: "数据损坏或读写失败", tone: "failed" },
+  UNAUTHENTICATED: { label: "未认证", tone: "denied" },
 }
 
 export function toolFailure(error: string): { label: string; tone: FailureTone } {

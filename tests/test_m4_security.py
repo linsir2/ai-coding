@@ -203,7 +203,7 @@ async def test_auto_approval_does_not_authorize_a_credential_read(tmp_path):
     )[0]
 
     assert outcome.denied is True
-    assert outcome.result.error == "credential_approval_required"
+    assert outcome.result.detail == "credential_approval_required"
     assert "TOKEN=secret" not in outcome.result.output
 
 
@@ -297,10 +297,10 @@ async def test_explicit_credential_name_needs_approval_even_when_linked_to_plain
     g1 = await grep_tool.execute({"pattern": "plain", "path": ".env"})
     g2 = await grep_tool.execute({"pattern": "plain", "path": "id_rsa"})
 
-    assert r1.error == "credential_approval_required"
-    assert r2.error == "credential_approval_required"
-    assert g1.error == "credential_approval_required"
-    assert g2.error == "credential_approval_required"
+    assert r1.detail == "credential_approval_required"
+    assert r2.detail == "credential_approval_required"
+    assert g1.detail == "credential_approval_required"
+    assert g2.detail == "credential_approval_required"
 
 
 def test_allow_once_does_not_remember_a_credential_alias(tmp_path):
@@ -376,7 +376,7 @@ async def test_grep_explicit_credential_requires_the_call_approval(tmp_path):
     )
 
     assert refused.success is False
-    assert refused.error == "credential_approval_required"
+    assert refused.detail == "credential_approval_required"
     assert approved.success is True
     assert "TOKEN=secret" in approved.output
 

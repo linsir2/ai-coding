@@ -115,7 +115,7 @@ async def test_it_says_when_the_transcript_is_not_there(tmp_path: Path) -> None:
     result = await HistorySearchTool().execute({"query": "x"}, _ctx([], str(tmp_path)))
 
     assert result.success is False
-    assert result.error == "no_transcript"
+    assert result.detail == "no_transcript"
 
 
 @pytest.mark.asyncio
@@ -123,7 +123,7 @@ async def test_an_empty_query_is_refused() -> None:
     result = await HistorySearchTool().execute({"query": "   "}, _ctx([_message("user", "hi")]))
 
     assert result.success is False
-    assert result.error == "empty_query"
+    assert result.detail == "empty_query"
 
 
 def _ctx(messages: list, workspace: str = ".") -> ToolContext:

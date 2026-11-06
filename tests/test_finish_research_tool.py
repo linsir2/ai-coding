@@ -45,10 +45,10 @@ async def test_it_refuses_outside_plan_mode():
     tool = FinishResearchTool()
 
     r = await tool.execute({"summary": "结论"}, _ctx(mode="normal"))
-    assert r.success is False and r.error == "not_in_plan"
+    assert r.success is False and r.detail == "not_in_plan"
 
     r2 = await tool.execute({"summary": "结论"}, None)
-    assert r2.success is False and r2.error == "not_in_plan"
+    assert r2.success is False and r2.detail == "not_in_plan"
 
 
 @pytest.mark.asyncio
@@ -56,7 +56,7 @@ async def test_it_refuses_an_empty_summary():
     tool = FinishResearchTool()
 
     r = await tool.execute({"summary": "   "}, _ctx())
-    assert r.success is False and r.error == "missing_summary"
+    assert r.success is False and r.detail == "missing_summary"
 
 
 @pytest.mark.asyncio
@@ -85,7 +85,7 @@ async def test_it_refuses_when_the_turn_already_concluded():
 
     r = await tool.execute({"summary": "结论"}, _ctx(conclusion=conclusion))
 
-    assert r.success is False and r.error == "already_concluded"
+    assert r.success is False and r.detail == "already_concluded"
     assert "finish_research" in r.output
 
 
@@ -100,7 +100,7 @@ async def test_it_refuses_while_a_plan_is_approved():
 
     r = await tool.execute({"summary": "结论"}, ctx)
 
-    assert r.success is False and r.error == "plan_already_approved"
+    assert r.success is False and r.detail == "plan_already_approved"
 
 
 @pytest.mark.asyncio
@@ -114,7 +114,7 @@ async def test_it_refuses_while_a_goal_is_armed():
 
     r = await tool.execute({"summary": "结论"}, ctx)
 
-    assert r.success is False and r.error == "task_busy"
+    assert r.success is False and r.detail == "task_busy"
 
 
 @pytest.mark.asyncio
@@ -145,7 +145,7 @@ async def test_it_refuses_a_request_that_asks_for_implementation():
 
     r = await tool.execute({"summary": "结论"}, ctx)
 
-    assert r.success is False and r.error == "implementation_request"
+    assert r.success is False and r.detail == "implementation_request"
     assert "<proposed_plan>" in r.output
 
 
@@ -207,7 +207,7 @@ async def test_it_refuses_the_obvious_implementation_requests(utterance):
 
     r = await tool.execute({"summary": "结论"}, ctx)
 
-    assert r.success is False and r.error == "implementation_request"
+    assert r.success is False and r.detail == "implementation_request"
 
 
 @pytest.mark.parametrize(
@@ -250,6 +250,6 @@ async def test_the_implementation_request_names_the_text_block_not_a_tool():
         {"summary": "结论"}, _ctx(messages=(_user("实现一个登录接口"),))
     )
 
-    assert r.error == "implementation_request"
+    assert r.detail == "implementation_request"
     assert PLAN_TEXT_RULE in r.output
     assert "not a tool" in r.output

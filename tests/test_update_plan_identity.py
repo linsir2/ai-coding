@@ -46,7 +46,7 @@ async def test_position_does_not_inherit_completed_proof(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "completion_unverified"
+    assert result.detail == "completion_unverified"
     assert session.task.items[0].content == "old step"
 
 
@@ -115,7 +115,7 @@ async def test_duplicate_step_ids_are_refused(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "invalid_plan"
+    assert result.detail == "invalid_plan"
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_completed_without_matched_proof_is_regated(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "completion_unverified"
+    assert result.detail == "completion_unverified"
     assert session.task.items[0].status != "completed" or session.task.items[0].evidence == "done"
 
 
@@ -177,7 +177,7 @@ async def test_two_entries_matching_the_same_prior_are_refused(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "invalid_plan"
+    assert result.detail == "invalid_plan"
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,7 @@ async def test_completion_without_a_receipt_is_rejected(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "completion_unverified"
+    assert result.detail == "completion_unverified"
     assert session.task.items[0].status == "pending"
     assert session.task.items[0].completion_failures == 1
 
@@ -137,7 +137,7 @@ async def test_a_denied_override_does_not_complete(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "override_denied"
+    assert result.detail == "override_denied"
     assert session.task.items[0].status == "pending"
 
 
@@ -158,7 +158,7 @@ async def test_two_rejections_block_the_item(tmp_path):
 
     assert first.success is False
     assert second.success is False
-    assert second.error == "completion_blocked"
+    assert second.detail == "completion_blocked"
     assert second.data["recoverable"] is True
     assert "complete it again" in second.output
     assert session.task.items[0].status == "blocked"
@@ -279,9 +279,9 @@ async def test_add_refuses_completed_and_skipped(tmp_path):
     )
 
     assert completed.success is False
-    assert completed.error == "invalid_status"
+    assert completed.detail == "invalid_status"
     assert skipped.success is False
-    assert skipped.error == "runner_only_status"
+    assert skipped.detail == "runner_only_status"
     assert session.task.items == []
 
 
@@ -302,5 +302,5 @@ async def test_auto_approval_cannot_grant_a_completion_override(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "override_unavailable"
+    assert result.detail == "override_unavailable"
     assert session.task.items[0].status == "pending"

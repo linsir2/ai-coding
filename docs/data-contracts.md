@@ -206,35 +206,44 @@ R1 新增/变更的契约集中在四处。
 
 | 类型 | 字段 |
 |---|---|
-| `ToolResult` | `success`、`output`（给模型读）、`data`（给程序读）、`artifacts`、`error` |
+| `ToolResult` | `success`、`output`（给模型读）、`data`（给程序读）、`artifacts`、`error`（16 个 gRPC family）、`detail`（旧叶子码） |
 | `ToolArtifact` | `path`、`kind`、`bytes`、`description` |
-| `ToolOutput` | `call_id`、`tool_name`、`output`、`success`、`data`、`artifacts` |
+| `ToolOutput` | `call_id`、`tool_name`、`output`、`success`、`data`、`artifacts`、`error`、`detail` |
 
 `ToolResult(success, output)` 的旧形态仍然合法——这是 R1a 各步能保持增量的原因。
-各拒绝路径有固定 `error` 码：`denied` / `not_approved` / `stopped` / `skipped` /
-`unknown_tool` / `tool_error` / `mcp_error` / `subagent_error`。
+
+**2026-11 错误码契约**：`error` 只取
+`CANCELLED / UNKNOWN / INVALID_ARGUMENT / DEADLINE_EXCEEDED / NOT_FOUND /
+ALREADY_EXISTS / PERMISSION_DENIED / RESOURCE_EXHAUSTED / FAILED_PRECONDITION /
+ABORTED / OUT_OF_RANGE / UNIMPLEMENTED / INTERNAL / UNAVAILABLE / DATA_LOSS /
+UNAUTHENTICATED`（见 `domain/error_codes.py`）。旧的 snake_case 码降级为
+`detail`，仅在诊断/策略/trace 中使用；`ToolResult.__post_init__` 会把旧码
+归一化为 `(family, detail)`，无码失败归一化为 `INTERNAL`。
+下游表中的旧码（`denied` / `not_approved` / `stopped` / `skipped` /
+`unknown_tool` / `tool_error` / `mcp_error` / `subagent_error` 等）现在应读作
+`ToolResult.detail`。
 
 20 §批次2 补 `present_plan` 的四个码（19 §3.2 的评判通道）：
 
 | 新增 | 取值 | 含义 |
 |---|---|---|
-| `ToolResult.error` | `no_plan_items` / `missing_plan` | 计划校验拒绝：条目未写成 / plan 文本为空。是回给模型的**指令**而非故障——`turn_books` 不计入失败链（20 §批次3） |
-| `ToolResult.error` | `user_prompt_error` | 评审问答通道异常（真故障，照常计数） |
-| `ToolResult.error` | `no_user` | 没有可评审的人（fail-closed，照常计数） |
+| `ToolResult.detail` | `no_plan_items` / `missing_plan` | 计划校验拒绝：条目未写成 / plan 文本为空。是回给模型的**指令**而非故障——`turn_books` 不计入失败链（20 §批次3） |
+| `ToolResult.detail` | `user_prompt_error` | 评审问答通道异常（真故障，照常计数） |
+| `ToolResult.detail` | `no_user` | 没有可评审的人（fail-closed，照常计数） |
 
 R2 补两个码与一个字段：
 
 | 新增 | 取值 | 含义 |
 |---|---|---|
-| `ToolResult.error` | `tool_timeout` | 分发器的**调用预算**耗尽：工具没跑完（或没启动），没有结果 |
-| `ToolResult.error` | `timeout` / `nonzero_exit` / `spawn_failed` | `bash` 自身的命令超时 / 非零退出 / 起不来（此时 `data` 带 `exit_code`、`timed_out`、`duration_seconds`） |
+| `ToolResult.detail` | `tool_timeout` | 分发器的**调用预算**耗尽：工具没跑完（或没启动），没有结果 |
+| `ToolResult.detail` | `timeout` / `nonzero_exit` / `spawn_failed` | `bash` 自身的命令超时 / 非零退出 / 起不来（此时 `data` 带 `exit_code`、`timed_out`、`duration_seconds`） |
 | `ToolResult.data`（超时） | `{tool, timeout_seconds, reason}` | `reason` = `call_budget_exhausted`（跑着被掐）或 `turn_budget_exhausted`（没预算，压根没启动） |
 
 R22/A-4 再补一个码：
 
 | 新增 | 取值 | 含义 |
 |---|---|---|
-| `ToolResult.error` | `sandbox_unavailable` | 进程沙箱机制在本机不可用（`SandboxGap`，原因码在 `data.reason`，如 `bwrap.unavailable`）——命令未执行，是**环境失败**而不是审批/门禁拒绝；区别于 `sandbox_violation`（文件工具的路径越界）与 `spawn_failed`（沙箱通过后 exec 失败）。后台 job 同源：`Job.denied_reason` 存原因码，`detail` 为 `未执行 · <原因>` |
+| `ToolResult.detail` | `sandbox_unavailable` | 进程沙箱机制在本机不可用（`SandboxGap`，原因码在 `data.reason`，如 `bwrap.unavailable`）——命令未执行，是**环境失败**而不是审批/门禁拒绝；区别于 `sandbox_violation`（文件工具的路径越界）与 `spawn_failed`（沙箱通过后 exec 失败）。后台 job 同源：`Job.denied_reason` 存原因码，`detail` 为 `未执行 · <原因>` |
 
 ### 工具上下文与子智能体
 
@@ -257,8 +266,10 @@ R2 再加一个只读属性 `max_duration_seconds: float | None`：工具自报�
 `ToolApprovalRequested`、`ToolStarted`、`ToolFinished`、`TaskUpdated`、`TurnFinished`。
 `LoopObserver.on_event` 是同步入口；观测者抛异常不会中断回合（`_SafeObserver` 兜底并记日志）。
 
-R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（与 `ToolResult.error` 同源），
-让事件流也能区分「失败」与「超时」而不必解析文本。
+R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（2026-11 起是 gRPC
+family，与 `ToolResult.error` 同源），并追加 `detail: str = ""`（旧叶子码；
+`server/bridge.py` 仅非空时写成 `detailCode`）。让事件流也能区分「失败」与
+「超时」而不必解析文本。
 
 A-10 给 `ToolFinished` 追加 `approval_ms: int = 0`（在 `duration_ms` 之后）：等人按审批的毫秒数，
 是 `duration_ms` 的**一部分**而不是另一个并列时长（轨迹/OTLP 仍按墙钟跨度）。线上
@@ -366,7 +377,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 | `hooks.plugin_dir` 默认值（N-4b） | `~/.config/ai-coding/hooks` | 原默认是 `<workspace>/.ai-coding/hooks`，位于不可信仓库树内：用户层写 `module: X` 时 `exec_module` 的是仓库里的文件。改到用户级；显式 `plugin_dir`（用户层）仍生效 |
 | `parse_iso8601`（`infra/time_utils.py`） | `str -> datetime \| None` | ISO-8601 解析的**唯一**入口（CI 修复：4 个消费者共用）。内部把 `Z` 归一成 `+00:00`，因为 `datetime.fromisoformat` 到 3.11 才认 `Z`，而 3.10 是本项目声明下限（`pyproject` 的 `python_version`/`target-version` 与 CI 矩阵）。**纯解析器**：无偏移的值返回 naive——"裸 wall clock 算哪一区"是各调用方自己的策略（OTLP 交给 `timestamp()` 按本地，`memory/relevance.parse_time` 补 UTC），在函数里二选一会静默改变另一方的数字。`memory/relevance.parse_time` 仍是导出契约（`service.py`/`store.py` 从那里 import），只是改成薄封装 |
 | `SubagentResult` 扩展 | `truncated`、`exit_reason`、`usage` | 未完成必须明说；ledger 文件（`to_dict`）保留新字段 |
-| `ToolResult.error`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
+| `ToolResult.detail`（子跑） | `child_timeout` / `child_max_iterations` / `child_error` | 非完成态恒为机器码；max_iterations 仍算成功（streak 照 reset），细节在 `error_detail` 与输出文本 |
 
 `TurnSnapshot` 扩展（全带默认值，老决策表不受影响）：`acceptance`、`acceptance_nudges`、`search_streak`、`search_calls`、`repeat_streak`。`TurnPolicyConfig` 扩展：`max_acceptance_nudges=2`（均可经 `AIConfig` 同名键覆盖，无 schema 变更）。`TurnBooks` 扩展：`verify`、`tool_success`（名集合）、`ledger_signature`、`step_latencies_ms/abandoned_steps/last_step_latency_ms`、`search_streak/search_calls/static_check_ran`、`last_success_digest/repeat_streak`。`repeat_streak` 只统计动作工具（`ACTION_TOOLS`，含 `bash`）的输出在本回合**已见过**的重复（忽略行序，不要求相邻；用户 steering 清空全部已见输出）；检索工具已有 `search_streak`/`stale_streak`，状态工具与失败调用不计。SEARCH 在 `repeat_streak >= 1` 时只发建议 nudge，不强制收尾。SEARCH 在 `repeat_streak >= 2` 时只发建议 nudge，不强制收尾。`AIConfig` 新增 `static_check{commands,timeout_seconds,max_chars}`（B1）。
 
@@ -463,7 +474,7 @@ R4 加了三层，但只动了**两处既有对外契约**，其余全是新增�
 
 ### 新的结构化拒绝码
 
-| `ToolResult.error` | 含义 | `data` |
+| `ToolResult.detail` | 含义 | `data` |
 |---|---|---|
 | `guard_denied` | 门卫拒绝（重复调用、配置红线、路径逃逸） | `{decision, reason, guard, tool}` |
 | `guard_error` | 门卫自身抛异常 → 失败关闭 | 同上（`guard` 为出错守卫名） |
@@ -545,7 +556,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `UnavailableUserPromptCallback` | 立即返回 `no_user` |
 | `AskUserTool` | `name="ask_user"`、`parallel_safe=False`、`max_duration_seconds=timeout+15` |
 
-`ToolResult.error` 新增：`missing_question`、`no_user`、`no_answer`、`user_prompt_error`。
+`ToolResult.detail` 新增：`missing_question`、`no_user`、`no_answer`、`user_prompt_error`。
 **注册规则**：`include_subagent and tools.ask_user.enabled and user_prompt is not None` 三者同时成立才注册。
 
 ### `AIConfig` / `ToolsConfig` 新增项
@@ -624,7 +635,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `ProcessOutcome.cancelled` | 同上 | 取消语义（与 `timed_out` 区分）；取消/超时仍返回 `returncode=None` 与部分输出 |
 | `RunCancelled(label)` | `infra/deadline.py` | 「用户不要等了」——与 `DeadlineExpired`（时钟到点）并列的第二种放弃理由 |
 | `run_with_deadline(..., cancel=None)` | 同上 | 事件置位即放弃并抛 `RunCancelled` |
-| `CANCELLED_BY_USER = "cancelled_by_user"` | `domain/message.py` | `ToolResult.error` 的取值（D-7：调用级结果，不是回合状态） |
+| `CANCELLED_BY_USER = "cancelled_by_user"` | `domain/message.py` | `ToolResult.detail` 的取值（D-7：调用级结果，不是回合状态） |
 | `TurnBooks.note_outcomes` 的失败计数 | `core/turn_books.py` | `cancelled_by_user` 的调用**不计入** `failed_streak`、不进 `failures`（D-11） |
 | `ToolDispatcher(..., cancel=None)` / `AgentLoop(..., cancel=None)` | `core/dispatch.py` / `core/agent_loop.py` | 取消事件一路贯通；`_run_tools` 在每批开始前 `clear()`（一次 Esc 只影响一批） |
 | `InteractiveReader.cancel_requested` / `request_cancel()` / `key_bindings()` | `ui/reader.py` | **已删除（R10）**；历史契约：Esc 键的落点（`for_terminal` 负责把它装进 `PromptSession`） |

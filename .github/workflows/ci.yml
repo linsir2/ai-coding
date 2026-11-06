@@ -59,6 +59,12 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # 2026-11: ToolResult.error is now the 16-value gRPC family.  A failed
+      # result without a code, an unregistered literal, or a frontend label
+      # table that drifted from the registry all turn the build red.
+      - name: Tool error-code contract
+        run: python scripts/check_error_codes.py
+
       - name: Type-check
         run: mypy ai_coding
 

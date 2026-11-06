@@ -87,7 +87,7 @@ async def test_glob_absolute_outside_workspace_structured(setup):
     tmp_path, sb, tool = setup
     result = await tool.execute({"pattern": "/etc/*.py"})
     assert result.success is False
-    assert result.error == "workspace_escape"
+    assert result.detail == "workspace_escape"
     assert str(sb.workspace) in result.output
 
 

@@ -268,7 +268,7 @@ async def test_execute_marks_is_error():
     result = await adapter.execute({})
 
     assert result.success is False
-    assert result.error == "mcp_error"
+    assert result.detail == "mcp_error"
     assert "boom" in result.output
 
 
@@ -280,7 +280,7 @@ async def test_execute_call_failure_is_tool_result():
     result = await adapter.execute({})
 
     assert result.success is False
-    assert result.error == "mcp_error"
+    assert result.detail == "mcp_error"
     assert "transport died" in result.output
 
 
@@ -481,7 +481,7 @@ async def test_an_execution_timeout_bounds_one_hanging_tool_call():
     elapsed = time.monotonic() - started
 
     assert result.success is False
-    assert result.error == "mcp_error"
+    assert result.detail == "mcp_error"
     assert elapsed < 2.0
 
 

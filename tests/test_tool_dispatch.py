@@ -220,7 +220,7 @@ async def test_warn_tool_approval_no_returns_not_approved():
     )
     result = outcomes[0].result
     assert result.success is False
-    assert result.error == "not_approved"
+    assert result.detail == "not_approved"
     assert tool.executed is False
     assert outcomes[0].denied is True
 
@@ -233,7 +233,7 @@ async def test_warn_tool_without_callback_is_denied():
     )
     result = outcomes[0].result
     assert result.success is False
-    assert result.error == "not_approved"
+    assert result.detail == "not_approved"
     assert result.data is not None
     assert result.data["reason"] == "no approval callback"
     assert tool.executed is False
@@ -246,7 +246,7 @@ async def test_deny_tool_never_executes():
         [_ref("c1", "bash", '{"command":"rm -rf /"}')], _ctx()
     )
     assert outcomes[0].result.success is False
-    assert outcomes[0].result.error == "denied"
+    assert outcomes[0].result.detail == "denied"
     assert tool.executed is False
     assert outcomes[0].denied is True
 
@@ -270,7 +270,7 @@ async def test_deny_does_not_ask_approval():
     outcomes = await _dispatcher([tool], approval=approval).dispatch_batch(
         [_ref("c1", "bash", '{"command":"reboot"}')], _ctx()
     )
-    assert outcomes[0].result.error == "denied"
+    assert outcomes[0].result.detail == "denied"
     assert approval.calls == []
 
 
@@ -282,7 +282,7 @@ async def test_approval_callback_exception_is_fail_closed():
         [_ref("c1", "write")], _ctx()
     )
     assert outcomes[0].result.success is False
-    assert outcomes[0].result.error == "not_approved"
+    assert outcomes[0].result.detail == "not_approved"
     assert tool.executed is False
 
 
@@ -296,7 +296,7 @@ async def test_unknown_tool_returns_error_result():
     )
     result = outcomes[0].result
     assert result.success is False
-    assert result.error == "unknown_tool"
+    assert result.detail == "unknown_tool"
     assert "nope" in result.output
 
 
@@ -310,7 +310,7 @@ async def test_an_invented_plan_tool_says_the_block_is_text():
         )
         result = outcomes[0].result
         assert result.success is False
-        assert result.error == "unknown_tool"
+        assert result.detail == "unknown_tool"
         assert "<proposed_plan>" in result.output
         assert "文本块" in result.output
         assert "不存在" in result.output
@@ -322,7 +322,7 @@ async def test_unknown_tool_does_not_ask_approval():
     outcomes = await _dispatcher([_FakeTool("read")], approval=approval).dispatch_batch(
         [_ref("c1", "hallucinated")], _ctx()
     )
-    assert outcomes[0].result.error == "unknown_tool"
+    assert outcomes[0].result.detail == "unknown_tool"
     assert approval.calls == []
 
 
@@ -337,7 +337,7 @@ async def test_malformed_arguments_are_refused_not_run():
         [_ref("c1", "read", "{not json")], _ctx()
     )
     assert tool.params_seen == []
-    assert outcomes[0].result.error == "invalid_arguments"
+    assert outcomes[0].result.detail == "invalid_arguments"
     assert outcomes[0].denied is True
 
 
@@ -347,7 +347,7 @@ async def test_tool_exception_becomes_failed_result():
     outcomes = await _dispatcher([tool]).dispatch_batch([_ref("c1", "read")], _ctx())
     result = outcomes[0].result
     assert result.success is False
-    assert result.error == "tool_error"
+    assert result.detail == "tool_error"
     assert "disk on fire" in result.output
 
 
@@ -380,7 +380,7 @@ async def test_approval_stop_halts_batch():
         [_ref("c1", "write"), _ref("c2", "read")], _ctx()
     )
     assert outcomes[0].halted is True
-    assert outcomes[0].result.error == "stopped"
+    assert outcomes[0].result.detail == "stopped"
     assert outcomes[1].halted is False
     assert reader.executed is False
 
@@ -396,7 +396,7 @@ async def test_stopped_batch_marks_remaining_calls_skipped():
     )
     for outcome in outcomes[1:]:
         assert outcome.result.success is False
-        assert outcome.result.error == "skipped"
+        assert outcome.result.detail == "skipped"
         assert outcome.result.data is not None
         assert outcome.result.data["skipped"] is True
 
@@ -525,7 +525,7 @@ async def test_a_halt_stops_the_batch_at_its_group_boundary():
     assert probe.peak == 2
     assert [o.call.id for o in outcomes] == ["c1", "c2", "c3", "c4"]
     assert outcomes[2].halted is True
-    assert outcomes[3].result.error == "skipped"
+    assert outcomes[3].result.detail == "skipped"
     assert not tail.executed
 
 
@@ -654,7 +654,7 @@ async def test_call_timeout_returns_structured_tool_timeout():
     result = outcomes[0].result
     assert outcomes[0].denied is False
     assert result.success is False
-    assert result.error == "tool_timeout"
+    assert result.detail == "tool_timeout"
     assert result.data is not None
     assert result.data["tool"] == "read"
     assert result.data["timeout_seconds"] == pytest.approx(0.05)
@@ -668,7 +668,7 @@ async def test_expired_deadline_skips_execution():
     )
 
     assert tool.executed is False
-    assert outcomes[0].result.error == "tool_timeout"
+    assert outcomes[0].result.detail == "tool_timeout"
     assert outcomes[0].result.data is not None
     assert outcomes[0].result.data["reason"] == "turn_budget_exhausted"
 
@@ -682,7 +682,7 @@ async def test_max_duration_is_capped_by_remaining_turn_budget():
         [_ref("t1", "read")], _ctx(), deadline=Deadline.after(0.05)
     )
 
-    assert outcomes[0].result.error == "tool_timeout"
+    assert outcomes[0].result.detail == "tool_timeout"
     assert outcomes[0].result.data is not None
     # The budget comes from a live clock, so compare with a sane tolerance.
     assert outcomes[0].result.data["timeout_seconds"] == pytest.approx(0.05, abs=0.01)
@@ -705,7 +705,7 @@ async def test_parallel_batch_each_call_gets_its_own_budget():
         [_ref("t1", "read"), _ref("t2", "glob")], _ctx()
     )
 
-    assert [outcome.result.error for outcome in outcomes] == [
+    assert [outcome.result.detail for outcome in outcomes] == [
         "tool_timeout",
         "tool_timeout",
     ]
@@ -725,7 +725,7 @@ async def test_tool_finished_event_carries_the_error_code():
     finished = observer.of_type(ToolFinished)
     assert len(finished) == 1
     assert finished[0].success is False
-    assert finished[0].error == "tool_timeout"
+    assert finished[0].detail == "tool_timeout"
 
 
 # ---- R8c: cancelling one batch, not the turn (docs/r8-analysis.md 3.3-S2) ---
@@ -778,7 +778,8 @@ async def test_r8_a_cancelled_call_comes_back_structured():
     outcome = batches[0][0]
 
     assert outcome.result.success is False
-    assert outcome.result.error == CANCELLED_BY_USER
+    assert outcome.result.error == "CANCELLED"
+    assert outcome.result.detail == CANCELLED_BY_USER
     assert outcome.denied is False
     assert outcome.halted is False  # the turn carries on
 
@@ -822,7 +823,8 @@ async def test_r8_a_cancelled_call_does_not_disturb_its_siblings():
     )
     outcomes = batches[0]
 
-    assert outcomes[0].result.error == CANCELLED_BY_USER
+    assert outcomes[0].result.error == "CANCELLED"
+    assert outcomes[0].result.detail == CANCELLED_BY_USER
     # Both are in the same parallel batch, so the sibling is abandoned too - but
     # it still gets a *result*: the declared tool_calls must pair up.
     assert all(outcome.result is not None for outcome in outcomes)
@@ -856,7 +858,7 @@ async def test_precheck_refusal_skips_approval_and_execution():
         [_ref("c1", "write", '{"path": "/outside/x.py"}')], _ctx()
     )
 
-    assert outcomes[0].result.error == "tool_error"
+    assert outcomes[0].result.detail == "tool_error"
     assert outcomes[0].denied is True
     assert tool.executed is False
 
@@ -1116,7 +1118,7 @@ async def test_a_write_conflict_is_structured_and_abandons_the_intent():
     assert tool.executed is False
     assert outcomes[0].denied is True
     assert result.success is False
-    assert result.error == "write_conflict"
+    assert result.detail == "write_conflict"
     assert result.data is not None
     assert result.data["paths"] == ["/tmp/ws/a.py"]
     assert result.data["owner"] == "sid"
@@ -1133,7 +1135,7 @@ async def test_a_claim_is_released_when_the_tool_raises():
         [_ref("c1", "read")], _ctx()
     )
 
-    assert outcomes[0].result.error == "tool_error"
+    assert outcomes[0].result.detail == "tool_error"
     assert len(coordinator.releases) == 1
 
 
@@ -1158,8 +1160,8 @@ async def test_a_replayed_call_takes_no_claim():
 @pytest.mark.asyncio
 async def test_a_refusal_speaks_chinese_but_keeps_its_code():
     """A7 T5: two halves of the same result, asserted together — changing one
-    without the other is a half-done fix.  `error` is the machine code the TUI
-    maps through toolFailure(); `output` is what the model reads and what the
+    without the other is a half-done fix.  `detail` is the machine code the TUI
+    shows beside the family; `output` is what the model reads and what the
     ledger's evidence line shows the human."""
     for approval, expected_code, expected_text in (
         (ApprovalResult.NO, "not_approved", "未批准"),
@@ -1171,7 +1173,8 @@ async def test_a_refusal_speaks_chinese_but_keeps_its_code():
         )
         result = outcomes[0].result
         assert result.success is False
-        assert result.error == expected_code
+        assert result.detail == expected_code
+        assert result.error in ("PERMISSION_DENIED", "CANCELLED")
         assert expected_text in result.output
         assert result.output.isascii() is False  # no English boilerplate left
 
@@ -1334,7 +1337,7 @@ async def test_a_write_conflict_names_the_blocking_session_not_a_job():
     )
 
     result = outcomes[0].result
-    assert result.error == "write_conflict"
+    assert result.detail == "write_conflict"
     assert "s2" in result.output
     assert "job_kill" not in result.output
     assert result.data is not None
@@ -1350,7 +1353,7 @@ async def test_a_write_conflict_without_an_owner_does_not_name_a_job():
     )
 
     result = outcomes[0].result
-    assert result.error == "write_conflict"
+    assert result.detail == "write_conflict"
     assert "job_kill" not in result.output
     assert result.data is not None
     assert result.data["blockers"] == []
@@ -1366,7 +1369,7 @@ async def test_a_conflict_with_a_blocker_does_not_mention_killing_a_job():
     )
 
     result = outcomes[0].result
-    assert result.error == "write_conflict"
+    assert result.detail == "write_conflict"
     assert "阻塞会话：s2" in result.output
     assert "job_kill" not in result.output
 
@@ -1379,7 +1382,7 @@ async def test_an_unknown_tool_points_at_the_nearest_real_tool():
     )
 
     result = outcomes[0].result
-    assert result.error == "unknown_tool"
+    assert result.detail == "unknown_tool"
     assert "edit" in result.output
     assert result.data is not None
     assert result.data["suggestions"] == ["edit"]
@@ -1419,7 +1422,7 @@ async def test_an_unknown_tool_does_not_suggest_a_plan_only_tool_outside_plan_mo
     )
 
     result = outcomes[0].result
-    assert result.error == "unknown_tool"
+    assert result.detail == "unknown_tool"
     assert "did you mean" not in result.output
     assert result.data is not None
     assert result.data["suggestions"] == []

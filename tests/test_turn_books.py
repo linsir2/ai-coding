@@ -113,7 +113,9 @@ def test_note_outcomes_ignores_an_empty_batch():
 def test_note_outcomes_records_failures_with_a_160_char_excerpt():
     books = TurnBooks()
     books.note_outcomes([_outcome("edit", success=False, error=None, output="x" * 400)])
-    assert books.failures == [("edit", "failed", "x" * 160)]
+    # No code at all is an unclassified failure: ``ToolResult`` normalises it to
+    # INTERNAL, and the ledger/handoff name that family.
+    assert books.failures == [("edit", "INTERNAL", "x" * 160)]
 
 
 def test_note_outcomes_keeps_successful_calls_out_of_the_failure_list():

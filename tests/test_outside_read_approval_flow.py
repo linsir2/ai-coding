@@ -69,7 +69,7 @@ async def test_a_declined_outside_read_is_refused(tmp_path):
         [_ref(f'{{"path": "{outside}"}}')], _ctx(workspace)
     )
     assert outcomes[0].result.success is False
-    assert outcomes[0].result.error in ("sandbox_violation", "not_approved")
+    assert outcomes[0].result.detail in ("sandbox_violation", "not_approved")
 
 
 @pytest.mark.asyncio

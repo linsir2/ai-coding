@@ -75,7 +75,7 @@ class ToolSearchTool(BaseTool):
         context = resolve_ctx(ctx)
         query = str((params or {}).get("query") or "").strip()
         if not query:
-            return ToolResult(success=False, output="query is empty")
+            return ToolResult(success=False, output="query is empty", error="empty_query")
 
         loaded = set(getattr(context, "loaded_tools", ()) or ())
         searchable = set(getattr(context, "searchable_names", ()) or ())

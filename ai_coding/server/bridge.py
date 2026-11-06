@@ -148,6 +148,10 @@ def to_wire(event: LoopEvent) -> dict[str, Any] | None:
             "error": event.error,
             "iteration": event.iteration,
         }
+        # Additive: the family is the contract, the code is the specific reason.
+        # Old payloads (and old clients) keep working because both are optional.
+        if event.detail:
+            tool_data["detailCode"] = event.detail
         # A-10: written only when a human actually waited, the way ``agent`` and
         # ``readonly`` are -- an auto-approved call keeps its exact old payload.
         if event.approval_ms > 0:

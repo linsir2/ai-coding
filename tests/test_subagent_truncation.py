@@ -82,16 +82,16 @@ def test_tool_result_carries_machine_readable_child_codes():
 
     timed_out = _to_tool_result(_result(status="timeout", error="exceeded 25s"), "t")
     assert timed_out.success is False
-    assert timed_out.error == "child_timeout"
+    assert timed_out.detail == "child_timeout"
 
     budgeted = _to_tool_result(_result(status="max_iterations"), "t")
     # Partial work still beats discarding it: success stays, but the code
     # travels with it so the parent can tell "done" from "cut".
     assert budgeted.success is True
-    assert budgeted.error == "child_max_iterations"
+    assert budgeted.detail == "child_max_iterations"
 
     done = _to_tool_result(_result(status="completed"), "t")
-    assert done.success is True and done.error is None
+    assert done.success is True and done.detail is None
 
 
 def test_tool_render_names_truncation_not_cost():

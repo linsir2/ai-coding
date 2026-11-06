@@ -464,7 +464,7 @@ async def test_send_message_rejects_an_empty_or_oversized_message(message):
     )
 
     assert result.success is False
-    assert result.error == "invalid_message"
+    assert result.detail == "invalid_message"
 
 
 @pytest.mark.asyncio
@@ -477,7 +477,7 @@ async def test_send_message_reports_an_unknown_target():
     )
 
     assert result.success is False
-    assert result.error == "unknown_agent"
+    assert result.detail == "unknown_agent"
     assert result.data == {"target": "nope", "status": "unknown"}
 
 
@@ -514,7 +514,7 @@ async def test_resume_renders_idle_and_refuses_a_missing_agent():
     runner.resume_result = ("not_found", "run_9")
     missing = await ResumeAgentTool(runner).execute({"agent_id": "run_9"})
     assert missing.success is False
-    assert missing.error == "not_found"
+    assert missing.detail == "not_found"
     assert missing.data == {"agent_id": "run_9", "status": "not_found"}
 
 

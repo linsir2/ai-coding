@@ -46,7 +46,7 @@ async def test_start_goal_refuses_a_second_goal_while_armed():
     task = TaskState(armed=True, armed_profile="goal")
     result = await StartGoalTool().execute({"objective": "another"}, _ctx(task))
     assert result.success is False
-    assert result.error == "already_armed"
+    assert result.detail == "already_armed"
     assert task.goal == ""
 
 
@@ -56,7 +56,7 @@ async def test_start_goal_refuses_in_readonly():
     result = await StartGoalTool().execute(
         {"objective": "x"}, _ctx(task, readonly=True)
     )
-    assert result.success is False and result.error == "readonly_session"
+    assert result.success is False and result.detail == "readonly_session"
     assert task.armed is False
 
 
@@ -64,7 +64,7 @@ async def test_start_goal_refuses_in_readonly():
 async def test_start_goal_requires_an_objective():
     task = TaskState()
     result = await StartGoalTool().execute({"objective": "   "}, _ctx(task))
-    assert result.success is False and result.error == "missing_objective"
+    assert result.success is False and result.detail == "missing_objective"
 
 
 @pytest.mark.asyncio
@@ -179,7 +179,7 @@ async def test_update_goal_blocked_is_refused_before_three_rounds():
         {"status": "blocked", "note": "waiting on CI"}, _ctx(task)
     )
     assert result.success is False
-    assert result.error == "block_threshold"
+    assert result.detail == "block_threshold"
     assert task.goal_phase == ""
 
 
@@ -197,18 +197,18 @@ async def test_update_goal_blocked_is_accepted_from_round_three():
 async def test_update_goal_blocked_requires_a_note():
     task = TaskState(goal="g", armed=True, armed_profile="goal", rounds_run=3)
     result = await UpdateGoalTool().execute({"status": "blocked"}, _ctx(task))
-    assert result.success is False and result.error == "missing_note"
+    assert result.success is False and result.detail == "missing_note"
 
 
 @pytest.mark.asyncio
 async def test_update_goal_refuses_without_an_armed_goal():
     result = await UpdateGoalTool().execute({"status": "complete"}, _ctx(TaskState()))
-    assert result.success is False and result.error == "no_goal"
+    assert result.success is False and result.detail == "no_goal"
 
 
 @pytest.mark.asyncio
 async def test_update_goal_refuses_on_a_plan_armed_task():
     task = TaskState(goal="g", armed=True, armed_profile="plan")
     result = await UpdateGoalTool().execute({"status": "complete"}, _ctx(task))
-    assert result.success is False and result.error == "no_goal"
+    assert result.success is False and result.detail == "no_goal"
     assert task.goal_phase == ""

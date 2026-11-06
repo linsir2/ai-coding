@@ -1039,7 +1039,9 @@ class BashTool(BaseTool):
     ) -> ToolResult:
         command = str(params.get("command", ""))
         if not command.strip():
-            return ToolResult(success=False, output="error: empty command")
+            return ToolResult(
+                success=False, output="error: empty command", error="missing_command"
+            )
 
         network = self._requested_network(params)
         # D-1: the same command without the waiting. Everything below this branch

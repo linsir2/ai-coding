@@ -77,7 +77,7 @@ async def test_a_duplicate_name_is_reported_as_ambiguous(tmp_path):
             params["message"] = "hi"
         result = await tool.execute(params, _ctx())
         assert result.success is False, tool.name
-        assert result.error == "ambiguous_target", tool.name
+        assert result.detail == "ambiguous_target", tool.name
         assert set((result.data or {}).get("candidates") or []) == {first, second}
 
     runner.cancel(first)

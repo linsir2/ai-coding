@@ -124,7 +124,7 @@ async def test_clear_is_refused(tool, ctx):
     await tool.execute({"action": "add", "content": "a"}, ctx)
     r = await tool.execute({"action": "clear"}, ctx)
     assert r.success is False
-    assert r.error == "unknown_action"
+    assert r.detail == "unknown_action"
     assert ctx.task.total == 1  # the list was not touched
 
 
@@ -132,7 +132,7 @@ async def test_clear_is_refused(tool, ctx):
 async def test_add_returns_error_on_blank_content(tool, ctx):
     r = await tool.execute({"action": "add", "content": "   "}, ctx)
     assert r.success is False
-    assert r.error == "missing_content"
+    assert r.detail == "missing_content"
     assert ctx.task.total == 0
 
 
@@ -141,7 +141,7 @@ async def test_update_returns_error_on_bad_status(tool, ctx):
     await tool.execute({"action": "add", "content": "a"}, ctx)
     r = await tool.execute({"action": "update", "id": "1", "status": "done"}, ctx)
     assert r.success is False
-    assert r.error == "invalid_status"
+    assert r.detail == "invalid_status"
     assert ctx.task.get("1") is not None and ctx.task.get("1").status == "pending"
 
 
@@ -150,7 +150,7 @@ async def test_update_returns_error_on_unknown_id(tool, ctx):
     ctx.task.add("do the thing")
     r = await tool.execute({"action": "update", "id": "99", "status": "completed"}, ctx)
     assert r.success is False
-    assert r.error == "unknown_id"
+    assert r.detail == "unknown_id"
     # R4-5: the error names the ids that do exist, so a model that guessed
     # ``t1`` does not have to guess again.
     assert "现有 id" in r.output
@@ -195,7 +195,7 @@ async def test_r9_add_refuses_an_unknown_dependency(ctx):
         {"action": "add", "content": "b", "depends_on": ["9"]}, ctx
     )
     assert r.success is False
-    assert r.error == "unknown_dependency"
+    assert r.detail == "unknown_dependency"
     assert ctx.task.items == []
 
 
@@ -205,7 +205,7 @@ async def test_r9_add_refuses_a_self_dependency(ctx):
         {"action": "add", "content": "a", "depends_on": ["1"]}, ctx
     )
     assert r.success is False
-    assert r.error == "self_dependency"
+    assert r.detail == "self_dependency"
     assert ctx.task.items == []
 
 
@@ -226,7 +226,7 @@ async def test_r9_completing_a_blocked_item_is_refused(ctx):
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
     r = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
     assert r.success is False
-    assert r.error == "blocked_by_dependencies"
+    assert r.detail == "blocked_by_dependencies"
     assert r.data is not None and r.data["open"] == ["1"]
     assert ctx.task.get("2").status == "pending"  # state untouched
 
@@ -237,7 +237,7 @@ async def test_r9_starting_a_blocked_item_is_refused_too(ctx):
     await tool.execute({"action": "add", "content": "dep"}, ctx)
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
     r = await tool.execute({"action": "update", "id": "2", "status": "in_progress"}, ctx)
-    assert r.error == "blocked_by_dependencies"
+    assert r.detail == "blocked_by_dependencies"
     assert ctx.task.get("2").status == "pending"
 
 
@@ -334,7 +334,7 @@ async def test_readonly_refuses_marking_an_item_completed(tool, readonly_ctx):
         {"action": "update", "id": "1", "status": "completed"}, readonly_ctx
     )
     assert r.success is False
-    assert r.error == "readonly_completion"
+    assert r.detail == "readonly_completion"
     assert readonly_ctx.task.get("1").status == "pending"
 
 
@@ -356,7 +356,7 @@ async def test_model_cannot_mark_an_item_skipped(tool, ctx):
     await tool.execute({"action": "add", "content": "work"}, ctx)
     r = await tool.execute({"action": "update", "id": "1", "status": "skipped"}, ctx)
     assert r.success is False
-    assert r.error == "runner_only_status"
+    assert r.detail == "runner_only_status"
     assert ctx.task.get("1").status == "pending"
 
 

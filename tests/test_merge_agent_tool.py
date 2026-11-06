@@ -57,7 +57,7 @@ async def test_failure_maps_to_tool_error_and_preserves_target():
                                                 "conflicting_paths": ["a.py"]}))
     result = await tool.execute({"target": "run-1"}, ctx=None)
     assert result.success is False
-    assert result.error == "conflict"
+    assert result.detail == "conflict"
     assert result.data["conflicting_paths"] == ["a.py"]
 
 
@@ -75,4 +75,4 @@ async def test_no_scheduler_is_unavailable():
     tool = MergeAgentTool(scheduler=None)
     result = await tool.execute({"target": "run-1"}, ctx=None)
     assert result.success is False
-    assert result.error == "unavailable"
+    assert result.detail == "unavailable"

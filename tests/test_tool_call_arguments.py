@@ -135,7 +135,7 @@ async def test_a_truncated_call_is_refused_and_never_runs():
     )
     assert tool.seen == []                     # nothing was written
     assert outcomes[0].result.success is False
-    assert outcomes[0].result.error == "invalid_arguments"
+    assert outcomes[0].result.detail == "invalid_arguments"
     assert outcomes[0].denied is True
     # The model must be told what to do, not just that it failed.
     assert "拆" in outcomes[0].result.output or "分段" in outcomes[0].result.output
@@ -152,7 +152,7 @@ async def test_a_truncated_step_refuses_every_call_in_the_batch():
         truncated=True,
     )
     assert tool.seen == []
-    assert outcomes[0].result.error == "truncated_arguments"
+    assert outcomes[0].result.detail == "truncated_arguments"
     assert outcomes[0].denied is True
 
 

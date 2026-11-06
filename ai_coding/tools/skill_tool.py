@@ -99,13 +99,23 @@ class SkillTool(BaseTool):
             name = str(params.get("name", "")).strip()
             if not name:
                 return ToolResult(
-                    success=False, output="error: 'name' is required for 'read'"
+                    success=False,
+                    output="error: 'name' is required for 'read'",
+                    error="missing_name",
                 )
             if "/" in name or "\\" in name or ".." in name:
-                return ToolResult(success=False, output="error: invalid skill name")
+                return ToolResult(
+                    success=False,
+                    output="error: invalid skill name",
+                    error="invalid_skill_name",
+                )
             skill = self._registry.resolve(name)
             if skill is None:
-                return ToolResult(success=False, output=f"skill '{name}' not found")
+                return ToolResult(
+                    success=False,
+                    output=f"skill '{name}' not found",
+                    error="unknown_skill",
+                )
             if self._on_loaded:
                 self._on_loaded(skill.id)
             if not skill.is_healthy:
@@ -117,6 +127,7 @@ class SkillTool(BaseTool):
                     success=False,
                     output=f"skill '{skill.id}' 无法解析 frontmatter: {skill.error}",
                     data={"name": skill.id, "version": skill.version, "status": skill.status},
+                    error="invalid_skill",
                 )
             # An archived skill still reads: refusing would be a policy, and this
             # tool has no gate. It only says what it is — it does not recommend a
@@ -134,6 +145,7 @@ class SkillTool(BaseTool):
         return ToolResult(
             success=False,
             output=f"error: unknown action '{action}' (valid: list, read)",
+            error="unknown_action",
         )
 
 

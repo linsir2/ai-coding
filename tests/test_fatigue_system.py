@@ -12,6 +12,7 @@ from ai_coding.core.turn_policy import (
     TurnPolicyConfig,
     TurnSnapshot,
 )
+from ai_coding.domain.error_codes import severity_of
 from ai_coding.domain.message import CANCELLED_BY_USER, ToolCall, ToolResult
 
 
@@ -284,35 +285,35 @@ class TestFatigueIntegration:
 
 
 class TestSeverityClassification:
-    """TurnBooks._severity_of() — error severity classification."""
+    """``severity_of`` — error severity classification (detail keyword path)."""
 
     def test_severity_timeout(self):
-        assert TurnBooks._severity_of("connection timeout") == 5
+        assert severity_of(None, "connection timeout") == 5
 
     def test_severity_context_overflow(self):
-        assert TurnBooks._severity_of("context overflow") == 5
+        assert severity_of(None, "context overflow") == 5
 
     def test_severity_rate_limit(self):
-        assert TurnBooks._severity_of("rate limit exceeded") == 4
+        assert severity_of(None, "rate limit exceeded") == 4
 
     def test_severity_permission_denied(self):
-        assert TurnBooks._severity_of("permission denied") == 3
+        assert severity_of(None, "permission denied") == 3
 
     def test_severity_not_found(self):
-        assert TurnBooks._severity_of("file not found") == 2
+        assert severity_of(None, "file not found") == 2
 
     def test_severity_error(self):
-        assert TurnBooks._severity_of("some error occurred") == 2
+        assert severity_of(None, "some error occurred") == 2
 
     def test_severity_failed(self):
-        assert TurnBooks._severity_of("operation failed") == 2
+        assert severity_of(None, "operation failed") == 2
 
     def test_severity_default(self):
-        assert TurnBooks._severity_of("unknown problem") == 1
+        assert severity_of(None, "unknown problem") == 1
 
     def test_severity_empty_string(self):
-        assert TurnBooks._severity_of("") == 1
+        assert severity_of(None, "") == 1
 
     def test_severity_case_insensitive(self):
-        assert TurnBooks._severity_of("TIMEOUT") == 5
-        assert TurnBooks._severity_of("Permission Denied") == 3
+        assert severity_of(None, "TIMEOUT") == 5
+        assert severity_of(None, "Permission Denied") == 3

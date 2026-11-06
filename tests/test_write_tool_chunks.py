@@ -52,7 +52,7 @@ async def test_one_call_over_the_chunk_cap_is_refused_before_writing(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "content_too_large"
+    assert result.detail == "content_too_large"
     assert "mode='append'" in result.output
     assert not (tmp_path / "doc.md").exists()
 
@@ -67,7 +67,7 @@ async def test_append_to_an_unread_existing_file_is_refused(tmp_path):
     )
 
     assert result.success is False
-    assert result.error == "must_read_first"
+    assert result.detail == "must_read_first"
 
 
 @pytest.mark.asyncio

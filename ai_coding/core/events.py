@@ -110,9 +110,13 @@ class ToolFinished:
     # A-10: how much of that was spent waiting for a human to answer.  It is a
     # *part* of duration_ms, not a fourth number: traces keep the real span.
     approval_ms: int = 0
-    # Machine-readable failure code (R2a): "tool_timeout", "denied", "unknown_tool",
-    # "not_approved", "stopped", "skipped", "tool_error"… None means success.
+    #: The gRPC family (R2a + 2026-11 unification): "tool_timeout",
+    #: "denied", ... became "DEADLINE_EXCEEDED", "PERMISSION_DENIED".  None
+    #: means success.
     error: str | None = None
+    #: The specific legacy reason behind the family (``stale_read``,
+    #: ``unknown_tool``).  Empty when the producer emitted a family directly.
+    detail: str = ""
     # R4a: the iteration this call belonged to (see ``ToolStarted``).
     iteration: int = 0
 

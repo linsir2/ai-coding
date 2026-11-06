@@ -462,7 +462,7 @@ async def test_enforce_refuses_when_the_mechanism_is_missing(tmp_path):
         {"command": "echo must-not-run"}, ToolContext(workspace=str(tmp_path))
     )
     assert result.success is False
-    assert result.error == "sandbox_unavailable"
+    assert result.detail == "sandbox_unavailable"
     assert result.data is not None
     assert result.data["reason"] == "bwrap.unavailable"
 
@@ -483,7 +483,7 @@ async def test_a4_the_waiting_path_names_the_sandbox_not_a_denial(tmp_path):
         {"command": "echo x"},
         ToolContext(workspace=str(tmp_path), jobs=registry),
     )
-    assert result.error == "sandbox_unavailable"
+    assert result.detail == "sandbox_unavailable"
     assert result.data is not None and result.data["reason"] == "bwrap.unavailable"
 
 
@@ -502,7 +502,7 @@ async def test_a4_the_background_path_names_the_sandbox_not_a_denial(tmp_path):
         {"command": "echo x", "run_in_background": True},
         ToolContext(workspace=str(tmp_path), jobs=registry),
     )
-    assert result.error == "sandbox_unavailable"
+    assert result.detail == "sandbox_unavailable"
     assert result.data is not None and result.data["reason"] == "bwrap.unavailable"
     # A refused job never arms: nothing to list, stop or wake.
     assert registry.snapshot() == []
@@ -631,7 +631,7 @@ async def test_the_gap_reaches_the_model_as_sandbox_unavailable(tmp_path):
         policy=ProcessSandboxPolicy(mode="enforce"), backend=_UnavailableBackend()
     )
     result = await tool.execute({"command": "echo x"}, ToolContext(workspace=str(tmp_path)))
-    assert result.error == "sandbox_unavailable"
+    assert result.detail == "sandbox_unavailable"
     assert result.data is not None
     assert result.data["reason"] == "bwrap.unavailable"
 
@@ -1632,6 +1632,8 @@ def test_off_keeps_the_old_proxy_env_cleanup(tmp_path):
 
 def test_spawn_argv_per_call_inherit_overrides_deny(tmp_path):
     backend = BwrapBackend(writable_paths=(), network=NetworkConfig(mode="deny"))
+    if not backend.available():
+        pytest.skip("bwrap unavailable: enforce cannot build the argv to inspect")
     policy = ProcessSandboxPolicy(mode="enforce")
     argv = spawn_argv("true", policy, backend, [tmp_path], network="inherit")
     assert "--unshare-net" not in argv

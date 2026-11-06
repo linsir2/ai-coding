@@ -124,7 +124,7 @@ async def test_plan_mode_refuses_and_leaves_the_task_alone() -> None:
     )
 
     assert result.success is False
-    assert result.error == "plan_mode"
+    assert result.detail == "plan_mode"
     assert result.output == (
         "update_plan is unavailable in Plan mode; present the plan as text."
     )
@@ -151,7 +151,7 @@ async def test_invalid_plans_are_refused(plan: list[Any]) -> None:
     result = await UpdatePlanTool().execute({"plan": plan}, ctx)
 
     assert result.success is False
-    assert result.error == "invalid_plan"
+    assert result.detail == "invalid_plan"
 
 
 @pytest.mark.asyncio
@@ -199,7 +199,7 @@ async def test_a_failed_verify_reverts_that_item_to_in_progress() -> None:
     )
 
     assert result.success is False
-    assert result.error == "verify_failed"
+    assert result.detail == "verify_failed"
     assert result.output == "verify failed: exit 1"
     # A failed gate must not install a half-applied plan.
     assert task.items == []
@@ -221,7 +221,7 @@ async def test_verify_is_not_run_when_the_switch_is_off() -> None:
     )
 
     assert result.success is False
-    assert result.error == "completion_unverified"
+    assert result.detail == "completion_unverified"
     assert calls == []
     assert task.items == []
 

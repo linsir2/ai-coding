@@ -489,7 +489,7 @@ async def test_a_job_that_was_never_started_does_not_lock_the_workspace(tmp_path
     )
 
     assert result.success is False
-    assert result.error == "job_limit"
+    assert result.detail == "job_limit"
     claimed = await coordinator.claim("other", str(tmp_path), (), timeout=0.5)
     assert claimed is not None
     claimed.release()

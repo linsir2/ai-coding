@@ -87,7 +87,7 @@ async def test_threaded_approval_is_bounded_by_the_turn_clock():
     )
     elapsed = time.monotonic() - started
     assert elapsed < 2.0
-    assert outcomes[0].result.error == "approval_timeout"
+    assert outcomes[0].result.detail == "approval_timeout"
 
 
 async def test_an_expired_approval_says_so_and_is_not_a_user_refusal():
@@ -96,7 +96,7 @@ async def test_an_expired_approval_says_so_and_is_not_a_user_refusal():
         _CALL, ToolContext(workspace="."), deadline=Deadline.after(1.0)
     )
     result = outcomes[0].result
-    assert result.error == "approval_timeout"  # not "not_approved": the human never spoke
+    assert result.detail == "approval_timeout"  # not "not_approved": the human never spoke
     assert result.data is not None
     assert result.data["approved"] is False
     assert result.data["reason"] == "approval_timeout"
@@ -133,7 +133,7 @@ async def test_a_configured_approval_timeout_bounds_a_turn_without_a_clock():
     started = time.monotonic()
     outcomes = await dispatcher.dispatch_batch(_CALL, ToolContext(workspace="."))
     assert time.monotonic() - started < 2.0
-    assert outcomes[0].result.error == "approval_timeout"
+    assert outcomes[0].result.detail == "approval_timeout"
 
 
 async def test_no_configured_timeout_and_no_clock_still_waits_for_the_human():
@@ -150,7 +150,7 @@ async def test_an_answered_approval_is_used_as_before():
     outcomes = await dispatcher.dispatch_batch(
         _CALL, ToolContext(workspace="."), deadline=Deadline.after(5.0)
     )
-    assert outcomes[0].result.error == "not_approved"  # a real refusal, not a timeout
+    assert outcomes[0].result.detail == "not_approved"  # a real refusal, not a timeout
 
 
 async def test_a_stopping_answer_still_stops_the_turn():
@@ -159,7 +159,7 @@ async def test_a_stopping_answer_still_stops_the_turn():
         _CALL, ToolContext(workspace="."), deadline=Deadline.after(5.0)
     )
     assert outcomes[0].halted is True
-    assert outcomes[0].result.error == "stopped"
+    assert outcomes[0].result.detail == "stopped"
 
 
 async def test_the_synchronous_cli_callback_no_longer_freezes_the_loop():
@@ -175,4 +175,4 @@ async def test_the_synchronous_cli_callback_no_longer_freezes_the_loop():
         _CALL, ToolContext(workspace="."), deadline=Deadline.after(0.5)
     )
     assert time.monotonic() - started < 1.0
-    assert outcomes[0].result.error == "approval_timeout"
+    assert outcomes[0].result.detail == "approval_timeout"

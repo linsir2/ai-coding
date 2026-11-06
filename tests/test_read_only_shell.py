@@ -100,7 +100,7 @@ def test_the_tool_returns_a_machine_code_for_a_refused_command():
     result = tool.precheck({"command": "rm -rf /"})
 
     assert result is not None and result.success is False
-    assert result.error == "read_only_shell_required"
+    assert result.detail == "read_only_shell_required"
 
 
 @pytest.mark.asyncio
@@ -110,7 +110,7 @@ async def test_an_outside_path_is_a_sandbox_violation():
 
     result = await tool.execute({"command": "ls /etc"}, ctx)
 
-    assert result.success is False and result.error == "sandbox_violation"
+    assert result.success is False and result.detail == "sandbox_violation"
 
 
 def test_the_tool_is_plan_only_and_read_only():

@@ -66,13 +66,16 @@ class GlobTool(BaseTool):
         max_results = int(params.get("max_results", self._max_results) or self._max_results)
 
         if not pattern:
-            return ToolResult(success=False, output="pattern must not be empty")
+            return ToolResult(
+                success=False, output="pattern must not be empty", error="missing_pattern"
+            )
 
         # Reject patterns that try to escape the workspace (defense in depth)
         if ".." in pattern.split("/"):
             return ToolResult(
                 success=False,
                 output="glob pattern must not contain '..' (workspace escape blocked)",
+                error="workspace_escape",
             )
 
         # P0-1: absolute patterns are relativized when inside the workspace,
@@ -103,9 +106,13 @@ class GlobTool(BaseTool):
             # Use Path.glob which operates relative to start
             matches: list[Path] = list(start.glob(pattern))
         except SandboxViolation as exc:
-            return ToolResult(success=False, output=str(exc))
+            return ToolResult(
+                success=False, output=str(exc), error="sandbox_violation"
+            )
         except (ValueError, OSError, NotImplementedError) as exc:
-            return ToolResult(success=False, output=f"glob error: {exc}")
+            return ToolResult(
+                success=False, output=f"glob error: {exc}", error="glob_error"
+            )
 
         # Filter: only files, only inside workspace (defense in depth)
         files: list[Path] = []

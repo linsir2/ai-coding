@@ -122,7 +122,7 @@ async def test_readonly_refuses_a_mutating_tool_before_approval():
     result = outcomes[0].result
     assert outcomes[0].denied is True
     assert result.success is False
-    assert result.error == "readonly_denied"
+    assert result.detail == "readonly_denied"
     assert "只读" in result.output
     # 内化批次: the denial redirects the model to the real tools and the plan
     # exit -- it used to teach the /plan family (the old assertions here pinned
@@ -163,7 +163,7 @@ async def test_a_tool_that_never_declared_the_attribute_is_refused_by_default():
         [_ref("c1", "fresh")], _ctx(readonly=True)
     )
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
 
 
 @pytest.mark.asyncio
@@ -180,7 +180,7 @@ async def test_a_real_write_tool_is_refused_before_approval_and_touches_nothing(
         _ctx(readonly=True, workspace=str(tmp_path)),
     )
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert approval.calls == []
     assert not (tmp_path / "x.txt").exists()
 
@@ -268,7 +268,7 @@ async def test_the_plan_rule_refuses_before_the_overlay():
     )
     result = outcomes[0].result
     assert outcomes[0].denied is True
-    assert result.error == "denied"
+    assert result.detail == "denied"
     assert "edit" in result.output
 
 
@@ -281,7 +281,7 @@ async def test_the_overlay_still_answers_when_no_rule_says_otherwise():
     )
     result = outcomes[0].result
     assert outcomes[0].denied is True
-    assert result.error == "readonly_denied"
+    assert result.detail == "readonly_denied"
     assert "只读" in result.output
 
 
@@ -402,7 +402,7 @@ async def test_a_readonly_session_refuses_a_writable_subagent_call():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.runs == []
 
 
@@ -415,7 +415,7 @@ async def test_an_absent_readonly_subagent_call_is_writable_and_refused():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.runs == []
 
 
@@ -445,7 +445,7 @@ async def test_a_readonly_session_refuses_a_writable_spawn():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.spawns == []
 
 
@@ -459,7 +459,7 @@ async def test_an_absent_readonly_is_writable_and_refused():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.spawns == []
 
 
@@ -472,7 +472,7 @@ async def test_a_string_readonly_value_is_writable_and_refused():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.spawns == []
 
 
@@ -505,7 +505,7 @@ async def test_a_guard_rewrite_that_removes_readonly_is_refused():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.spawns == [], "the rewritten call must not start a writable child"
 
 
@@ -536,7 +536,7 @@ async def test_a_hook_rewrite_that_removes_readonly_is_refused():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "readonly_denied"
+    assert outcomes[0].result.detail == "readonly_denied"
     assert runner.spawns == []
 
 
@@ -550,5 +550,5 @@ async def test_the_plan_posture_still_denies_spawn_agent_under_its_own_code():
     )
 
     assert outcomes[0].denied is True
-    assert outcomes[0].result.error == "denied"
+    assert outcomes[0].result.detail == "denied"
     assert runner.spawns == []

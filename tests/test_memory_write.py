@@ -132,7 +132,7 @@ async def test_the_tool_requires_text(tmp_path: Path):
 
     tool, _service_obj = _tool(tmp_path)
     result = await tool.execute({}, ToolContext())
-    assert result.success is False and result.error == "missing_text"
+    assert result.success is False and result.detail == "missing_text"
 
 
 @pytest.mark.asyncio
@@ -141,7 +141,7 @@ async def test_the_tool_rejects_an_unknown_kind(tmp_path: Path):
 
     tool, _service_obj = _tool(tmp_path)
     result = await tool.execute({"text": "x", "kind": "gossip"}, ToolContext())
-    assert result.success is False and result.error == "unknown_kind"
+    assert result.success is False and result.detail == "unknown_kind"
 
 
 @pytest.mark.asyncio
@@ -189,7 +189,7 @@ async def test_the_tool_survives_a_service_exception(tmp_path: Path):
             raise RuntimeError("boom")
 
     result = await MemoryWriteTool(_Broken()).execute({"text": "x"}, ToolContext())
-    assert result.success is False and result.error == "memory_error"
+    assert result.success is False and result.detail == "memory_error"
 
 
 @pytest.mark.asyncio

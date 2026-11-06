@@ -47,7 +47,7 @@ async def test_credential_refusal_marks_denied_without_halt(tmp_path):
         )
     )[0]
 
-    assert outcome.result.error == "credential_approval_required"
+    assert outcome.result.detail == "credential_approval_required"
     assert outcome.denied is True
     # Not a halt: the batch ends normally, and the refusal carries no secret.
     assert outcome.halted is False

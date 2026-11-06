@@ -207,7 +207,7 @@ def plan_text_from_unknown_call(call: ToolCall, result: ToolResult) -> str:
     shape, but the model keeps retrying; the loop uses this body to close the
     turn instead of spending the budget on the same unknown tool.
     """
-    if result.error != "unknown_tool" or call.name not in _PLAN_TEXT_NAMES:
+    if result.detail != "unknown_tool" or call.name not in _PLAN_TEXT_NAMES:
         return ""
     plan = call.params.get("plan") if isinstance(call.params, dict) else None
     return str(plan or "").strip()
@@ -550,6 +550,7 @@ class ToolDispatcher:
                 duration_ms=int((time.monotonic() - started) * 1000),
                 approval_ms=approval_ms,
                 error=result.error,
+                detail=result.detail or "",
                 iteration=item.iteration,
             )
         )
@@ -689,7 +690,7 @@ class ToolDispatcher:
         # never had.  The distinction is the error code the tool reports, which
         # is why this checks the result instead of calling precheck twice.
         early = tool.precheck(call.params)
-        if early is not None and early.error != "sandbox_violation":
+        if early is not None and early.detail != "sandbox_violation":
             return early, True, False
 
         if verdict is PermissionDecision.WARN:
@@ -842,7 +843,7 @@ class ToolDispatcher:
             )
             if tool.mutates_world and log is not None:
                 log.settle(call, result)
-            return result, result.error == "credential_approval_required", False
+            return result, result.detail == "credential_approval_required", False
         finally:
             # Every exit -- success, tool error, cancellation, a raising guard
             # or hook -- releases.  Background jobs take no lifetime hold (see
