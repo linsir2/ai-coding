@@ -157,6 +157,7 @@ LEGACY_TO_FAMILY: dict[str, ToolError] = {
     "nonzero_exit": ToolError.FAILED_PRECONDITION,
     "old_string_not_found": ToolError.FAILED_PRECONDITION,
     "old_string_not_unique": ToolError.FAILED_PRECONDITION,
+    "overwrite_would_truncate": ToolError.FAILED_PRECONDITION,
     "not_configured": ToolError.FAILED_PRECONDITION,
     "invalid_plan": ToolError.FAILED_PRECONDITION,
     # -- concurrency / races -------------------------------------------------

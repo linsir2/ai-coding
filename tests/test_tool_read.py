@@ -116,6 +116,22 @@ async def test_an_explicit_limit_above_the_cap_is_clamped(setup):
 
 
 @pytest.mark.asyncio
+async def test_a_one_line_read_names_the_offset_it_used(setup):
+    """2026-11 real run: the model wanted line 176, passed offset=176, got 177.
+
+    The header is 1-based and the parameter is 0-based; a one-line response
+    must say both so the same call is not repeated seven times.
+    """
+    tmp_path, sb, fst, tool = setup
+    _long_file(tmp_path, 300)
+    result = await tool.execute({"path": "long.py", "offset": 100, "limit": 1})
+    assert result.success is True
+    assert "showing lines 101-101 of 300" in result.output
+    assert "offset=100 is 0-based" in result.output
+    assert "pass offset=99" in result.output
+
+
+@pytest.mark.asyncio
 async def test_offset_plus_limit_past_the_end_does_not_record_a_bad_range(setup):
     """C4: the pre-existing bug.  ``offset + limit`` ran past the end, so the
     ledger would have recorded ``101-150`` for a 117-line file and ``covers``

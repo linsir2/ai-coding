@@ -268,6 +268,44 @@ def test_duplicate_guard_names_the_visible_call_not_the_summarised_one():
     assert "(call a)" not in denied.reason
 
 
+def test_advisory_guard_hard_stops_an_exact_read_loop():
+    """2026-11 real run: 7 identical reads, each only *advised*, never refused."""
+    guard = DuplicateCallGuard(threshold=2, advisory=True)
+    view, ctx = TurnView(), ToolContext()
+    for index in range(6):
+        call = _call("read", call_id=f"c{index}", path="main.py", offset=176, limit=1)
+        assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        guard.after(call, _ok(), ctx, view)
+
+    denied = guard.check(
+        _call("read", call_id="c6", path="main.py", offset=176, limit=1), ctx, view
+    )
+    assert denied.verdict is GuardVerdict.DENY
+    assert "byte-identical" in denied.reason
+
+
+def test_advisory_hard_cap_steps_aside_after_a_mutation():
+    """Re-reading after an edit is the repair loop, not a duplicate."""
+    guard = DuplicateCallGuard(threshold=2, advisory=True)
+    view = TurnView()
+    call = _call("read", call_id="c5", path="main.py")
+    for index in range(6):
+        guard.after(
+            _call("read", call_id=f"c{index}", path="main.py"), _ok(), None, view
+        )
+    history = (
+        _tool_msg("c5", '<tool_output tool="read">\nbody\n</tool_output>'),
+        ChatMessage(
+            role="assistant",
+            content="",
+            timestamp="t",
+            tool_calls=(ToolCall(id="w1", name="write", params={"path": "main.py"}),),
+        ),
+    )
+    ctx = ToolContext(messages=history)
+    assert guard.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+
+
 def test_duplicate_guard_caps_rereads_whose_output_is_gone():
     guard = DuplicateCallGuard(threshold=2)
     view, ctx = TurnView(), ToolContext()

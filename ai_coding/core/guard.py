@@ -222,6 +222,20 @@ _REREADABLE = frozenset({"read"})
 #: with a marker immediately, so "nothing to reuse" would be true every time.
 _UNVISIBLE_REREAD_FACTOR = 2
 
+#: 2026-11 real-machine finding: advisory mode only *advised* at 3/5/8, and a
+#: model ignored every line -- 7 identical ``read`` calls (qwen-plus) and 15
+#: identical ``grep`` calls (qwen-plus) inside one turn.  A non-mutating call
+#: that already succeeded this many times with byte-identical arguments cannot
+#: teach the model anything new, so the sixth repeat is refused.  Read-only
+#: calls after a mutation still pass (``_mutated_after_read``): re-reading a
+#: file you just edited is the repair loop, not a duplicate.
+_HARD_DUPLICATE_CAP = 6
+
+#: Same reasoning for failures: an identical call that failed six times will
+#: fail again (measured: nine ``edit`` refusals with ``must_read_first`` in one
+#: turn).  Kept higher than the 3/5 advice so the model gets two warnings first.
+_HARD_FAILED_CAP = 6
+
 
 #: Calls whose execution may change a file the model has already read.  A read
 #: after one of these may be a *necessary* refresh, not a duplicate.
@@ -323,6 +337,24 @@ class DuplicateCallGuard:
             fingerprint = call_fingerprint(call)
             succeeded = self._successes.get(fingerprint, [])
             count = len(succeeded)
+            if (
+                not view.mutates_world
+                and count >= _HARD_DUPLICATE_CAP
+                and not _mutated_after_read(
+                    ctx.messages, succeeded, ignore_call_id=call.id
+                )
+            ):
+                return GuardDecision(
+                    GuardVerdict.DENY,
+                    reason=(
+                        f"'{call.name}' has already succeeded {count} time(s) this "
+                        "turn with byte-identical arguments, and no file changed "
+                        "since.  The earlier result is still in the transcript: "
+                        "use it, or change the approach (edit/write instead of "
+                        "another read)."
+                    ),
+                    guard=self.name,
+                )
             # Side-effecting edits stay strict: a duplicate write is not a
             # harmless poll, and an earlier result is not a value to reuse.
             # Everything else gets advisory reminders only (DeepSeek parity).
@@ -492,6 +524,20 @@ class FailedRepeatGuard:
         fingerprint = call_fingerprint(call)
         failures = self._failures[fingerprint]
         if self.advisory:
+            # 2026-11: two warnings, then a refusal.  Measured: nine identical
+            # `edit` calls, each refused with "read the file first", and the
+            # model simply retried the refusal away.
+            if failures >= _HARD_FAILED_CAP:
+                return GuardDecision(
+                    GuardVerdict.DENY,
+                    reason=(
+                        f"'{call.name}' has already failed {failures} time(s) this "
+                        "turn with byte-identical arguments; repeating it cannot "
+                        "succeed.  Read the error, change the arguments or the "
+                        "approach, or ask the user."
+                    ),
+                    guard=self.name,
+                )
             if failures in (3, 5, 8):
                 return GuardDecision(
                     GuardVerdict.ALLOW,

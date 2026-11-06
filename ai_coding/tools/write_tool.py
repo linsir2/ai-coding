@@ -118,6 +118,33 @@ class WriteTool(BaseTool):
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
         return None
 
+    @staticmethod
+    def _mid_file_slice_message(target: Path, content: str) -> str | None:
+        """Refuse an overwrite whose body is an exact slice from mid-file.
+
+        The model's body is compared to the current file with surrounding
+        whitespace stripped: found at a positive offset and shorter than the
+        old text means "you copied a section and are about to replace the
+        whole file with it".  A legitimate rewrite is not an exact substring
+        of the old file, so it passes.
+        """
+        try:
+            old = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        body = content.strip()
+        if not body or len(body) >= len(old):
+            return None
+        offset = old.find(body)
+        if offset <= 0:
+            return None
+        line = old.count("\n", 0, offset) + 1
+        return (
+            f"error: 这次 write 的正文是现有文件中第 {line} 行起的片段，"
+            "直接 overwrite 会把整个文件截成这一段（文件未写入）。\n"
+            "要改这段就用 edit；要重写整个文件，请先 read 全文，再提交完整内容。"
+        )
+
     async def execute(
         self, params: dict[str, Any], ctx: ToolContext | None = None
     ) -> ToolResult:
@@ -174,6 +201,21 @@ class WriteTool(BaseTool):
                     success=False,
                     output=stale_message("write", path_str),
                     error="stale_read",
+                )
+
+        # 2026-11 real-machine finding: a model used ``mode=overwrite`` with a
+        # body that was an exact mid-file slice of the existing file, reducing
+        # a 217-line module to 31 lines (pytest then died on
+        # "NameError: name 'app' is not defined").  This is not a rewrite; it
+        # is an accidental splice.  Exact-slice only, so a genuine (even much
+        # shorter) rewrite still passes.
+        if mode == "overwrite" and target.exists():
+            slice_error = self._mid_file_slice_message(target, content)
+            if slice_error:
+                return ToolResult(
+                    success=False,
+                    output=slice_error,
+                    error="overwrite_would_truncate",
                 )
 
         # The version the stale check just approved.  ``write_text_atomic``

@@ -274,10 +274,31 @@ class GrepTool(BaseTool):
         if outcome.returncode not in (0, 1):
             if parse_error:
                 raise re.error((outcome.stderr or "").strip()[:200])
+            detail = (outcome.stderr or "").strip()
+            if not detail:
+                # ``--no-messages`` (used to silence permission noise) also
+                # silenced the fatal error: measured "grep failed (rg exit 2): "
+                # with nothing after it, which the model cannot act on.  One
+                # diagnostic rerun without that flag, only on failure.
+                diagnostic_argv = [arg for arg in argv if arg != "--no-messages"]
+                try:
+                    diagnostic = await self._runner(
+                        diagnostic_argv, cwd=str(self._sandbox.workspace),
+                        timeout=self._timeout,
+                    )
+                    detail = (diagnostic.stderr or "").strip() or (
+                        diagnostic.stdout or ""
+                    ).strip()[-400:]
+                except Exception:  # noqa: BLE001 — diagnostics must not mask the failure
+                    detail = ""
+            if not detail:
+                detail = (
+                    "rg rejected the request (invalid glob/path or an unreadable "
+                    "file); narrow the path or change the pattern"
+                )
             return ToolResult(
                 success=False,
-                output=f"grep failed (rg exit {outcome.returncode}): "
-                f"{(outcome.stderr or '').strip()[:200]}",
+                output=f"grep failed (rg exit {outcome.returncode}): {detail[:400]}",
                 error="grep_error",
             )
         hits: list[tuple[str, int, str]] = []

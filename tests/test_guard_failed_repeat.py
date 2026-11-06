@@ -54,6 +54,16 @@ def test_different_arguments_do_not_share_a_count():
     assert g.check(_call(command="a"), None, armed).verdict is GuardVerdict.ALLOW
 
 
+def test_advisory_failed_repeat_hard_stops_after_six_identical_failures():
+    """2026-11 real run: 9 identical ``edit`` refusals, retried away."""
+    g = FailedRepeatGuard(threshold=2, advisory=True)
+    for _ in range(6):
+        g.after(_call(), _fail(), None, TurnView())
+    d = g.check(_call(), None, TurnView())
+    assert d.verdict is GuardVerdict.DENY
+    assert "cannot succeed" in d.reason
+
+
 def test_reset_clears_counts_per_turn():
     g = FailedRepeatGuard(threshold=2)
     armed = TurnView(strict_repeats=True)

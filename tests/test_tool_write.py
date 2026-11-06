@@ -33,6 +33,44 @@ async def test_write_creates_file(setup):
 
 
 @pytest.mark.asyncio
+async def test_a_mid_file_slice_is_refused_as_an_overwrite(setup):
+    """2026-11 real run: a 217-line module became a 31-line fragment.
+
+    The model passed the route section alone with ``mode=overwrite``; that is
+    an exact slice of the old file, not a rewrite, so the tool refuses it.
+    """
+    tmp_path, _, fst, tool = setup
+    old = "import os\n\ndef a():\n    pass\n\ndef b():\n    pass\n"
+    target = tmp_path / "m.py"
+    target.write_text(old, encoding="utf-8")
+    fst.record(target)
+
+    result = await tool.execute({"path": "m.py", "content": "def b():\n    pass\n"})
+
+    assert result.success is False
+    assert result.error == "FAILED_PRECONDITION"
+    assert result.detail == "overwrite_would_truncate"
+    assert "edit" in result.output
+    assert target.read_text(encoding="utf-8") == old, "the file must be untouched"
+
+
+@pytest.mark.asyncio
+async def test_a_legitimate_shorter_rewrite_still_passes(setup):
+    tmp_path, _, fst, tool = setup
+    target = tmp_path / "m.py"
+    target.write_text("import os\n\ndef a():\n    pass\n\ndef b():\n    pass\n",
+                     encoding="utf-8")
+    fst.record(target)
+
+    result = await tool.execute(
+        {"path": "m.py", "content": "def a():\n    return 1\n"}
+    )
+
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == "def a():\n    return 1\n"
+
+
+@pytest.mark.asyncio
 async def test_write_overwrites(setup):
     tmp_path, sb, fst, tool = setup
     (tmp_path / "f.txt").write_text("old")

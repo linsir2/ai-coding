@@ -71,7 +71,10 @@ class ReadTool(BaseTool):
                 },
                 "offset": {
                     "type": "integer",
-                    "description": "0-based start line (default 0).",
+                    "description": (
+                        "0-based start line (default 0). Line 1 is offset 0; "
+                        "to read line N pass offset=N-1."
+                    ),
                     "default": 0,
                 },
                 "limit": {
@@ -270,6 +273,15 @@ class ReadTool(BaseTool):
             )
         elif offset > 0 or (limit is not None and end < len(lines)):
             output += f"\n[showing lines {offset + 1}-{page_end} of {len(lines)}]"
+        # 2026-11 real-machine finding: the model asked for "line 176" with
+        # offset=176, received line 177, and repeated the call seven times.
+        # The header is 1-based while the parameter is 0-based; say both so a
+        # one-line read cannot look like a failure.
+        if offset > 0 and page_end > offset:
+            output += (
+                f"\n[offset={offset} is 0-based: this response starts at line "
+                f"{offset + 1}. To read line {offset}, pass offset={offset - 1}]"
+            )
 
         # record snapshot for stale-read protection
         self._tracker.record(target)

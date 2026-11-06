@@ -76,6 +76,29 @@ async def test_include_literal_and_case_sensitivity(ws):
 
 
 @pytest.mark.asyncio
+async def test_a_suppressed_failure_still_names_the_reason(ws):
+    """``--no-messages`` hid rg's fatal error, leaving "rg exit 2: " empty."""
+    calls: list[tuple[str, ...]] = []
+
+    async def runner(argv, *, cwd, timeout):
+        calls.append(tuple(argv))
+        if "--no-messages" in argv:
+            return ProcessOutcome(returncode=2, stdout="", stderr="")
+        return ProcessOutcome(
+            returncode=2, stdout="", stderr="rg: error parsing glob '*.py['"
+        )
+
+    tool = GrepTool(Sandbox(ws), use_ripgrep=True, runner=runner, rg_path="/usr/bin/rg")
+
+    result = await tool.execute({"pattern": "x", "include": "*.py["})
+
+    assert result.success is False
+    assert result.detail == "grep_error"
+    assert "error parsing glob" in result.output
+    assert len(calls) == 2 and "--no-messages" not in calls[1]
+
+
+@pytest.mark.asyncio
 async def test_the_limit_is_reported_when_hit(ws):
     for n in range(5):
         (ws / f"f{n}.txt").write_text("needle\n", encoding="utf-8")
