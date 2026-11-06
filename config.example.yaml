@@ -42,7 +42,6 @@
 # literal.  A ${VAR} that is missing or empty is an error naming the variable.
 
 ai:
-  auto_process_tool_results: true
   max_tool_iterations: 100
   # C-5b: the iteration cap a delegated child gets.  0 (default) means no cap --
   # Codex/opencode/dsh/Claude Code all run sub-agents unbounded, bounded by

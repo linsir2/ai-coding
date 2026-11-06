@@ -846,7 +846,7 @@ class BashTool(BaseTool):
             settlement.apply_sync()
             raise
         duration = time.monotonic() - started
-        text, size = registry.read_head(job, self._max_output)
+        text, size = registry.read_head_tail(job, self._max_output)
         # Cancelled counts as settled: the job is already killed and settled, and
         # reporting a timeout here would promote a dead command.
         if outcome in (WAIT_SETTLED, WAIT_CANCELLED):

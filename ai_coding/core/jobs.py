@@ -750,6 +750,34 @@ class JobRegistry:
         text = blob[:limit].decode("utf-8", errors="replace")
         return text, size
 
+    def read_head_tail(self, job: Job, limit: int) -> tuple[str, int]:
+        """Both ends of a log, and its real length.
+
+        A finished command's conclusion is at the *tail* as often as the head:
+        pytest's ``FAILED`` lines, a traceback's last frames, ``fatal:``.  The
+        headline-only read silently dropped them (the front-end path already
+        used ``clip_head_tail``), so a foreground job and the same job in the
+        background reported different conclusions.
+        """
+        try:
+            size = Path(job.log_path).stat().st_size
+            with open(job.log_path, "rb") as handle:
+                if size <= limit:
+                    return handle.read().decode("utf-8", errors="replace"), size
+                keep = max(1, limit // 2)
+                head = handle.read(keep)
+                handle.seek(size - (limit - keep))
+                tail = handle.read(limit - keep)
+        except OSError:
+            return "", 0
+        omitted = size - len(head) - len(tail)
+        return (
+            head.decode("utf-8", errors="replace")
+            + f"\n... [{omitted} chars omitted] ...\n"
+            + tail.decode("utf-8", errors="replace"),
+            size,
+        )
+
     def forget(self, job_id: str) -> None:
         """Drop an in-process handle without touching the process.
 

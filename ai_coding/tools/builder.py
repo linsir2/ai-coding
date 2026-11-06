@@ -360,7 +360,14 @@ def _assemble_registry(
             ReadTool(sandbox, fst, max_file_size=tools_cfg.read.max_file_size)
         )
     if tools_cfg.write.enabled:
-        registry.register(WriteTool(sandbox, fst, plan_root=plan_root))
+        # ``write.max_file_size`` is this tool's per-call content cap; it was
+        # advertised in the config and never passed, so the constant won.  A
+        # non-positive value keeps the tool's own default.
+        max_chars = int(getattr(tools_cfg.write, "max_file_size", 0) or 0)
+        extra = {"max_chars": max_chars} if max_chars > 0 else {}
+        registry.register(
+            WriteTool(sandbox, fst, plan_root=plan_root, **extra)
+        )
     if tools_cfg.edit.enabled:
         registry.register(EditTool(sandbox, fst, plan_root=plan_root))
     if tools_cfg.glob.enabled:

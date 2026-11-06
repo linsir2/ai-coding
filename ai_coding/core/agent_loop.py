@@ -636,6 +636,16 @@ class AgentLoop:
             self._current_key_holder[0] = name
         self._retire(old)
 
+    @property
+    def current_model(self) -> str:
+        """The model a request would use *now* (``/model`` may have switched it).
+
+        ``default_model`` is what the config says; this is what is running.
+        Reading the default in ``/model`` made a switch invisible until the
+        process restarted.
+        """
+        return str(self._current_model_key or "")
+
     def add_model(self, key: str, cfg: ModelConfig) -> None:
         """Add a model to the switchable table at runtime (``/connect``).
 

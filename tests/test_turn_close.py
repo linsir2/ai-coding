@@ -171,6 +171,38 @@ def test_write_back_appends_a_tool_message_and_collects_artifacts():
     assert [artifact.path for artifact in closer.artifacts] == ["a.py"]
 
 
+def test_write_back_bounds_the_structured_data_block():
+    """``ai.max_result_data_bytes`` was advertised and read by nothing; the
+    ``<data>`` JSON is sent to the model on every step that follows."""
+    from types import SimpleNamespace
+
+    from ai_coding.core.dispatch import DispatchOutcome
+    from ai_coding.domain.message import ToolCall, ToolResult
+
+    closer = TurnCloser(
+        _Sessions(), _Reporter(),
+        SimpleNamespace(
+            max_result_data_bytes=200,
+            persist_checkpoint_messages=100,
+            working_memory_keep=12,
+        ),
+    )
+    session = SessionData(session_id="s1", title="", created_time="t", last_access_time="t")
+    big = {"rows": ["x" * 10 for _ in range(100)]}
+
+    closer.write_back(
+        session,
+        [DispatchOutcome(
+            call=ToolCall(id="c1", name="mcp_call"),
+            result=ToolResult(success=True, output="ok", data=big),
+        )],
+    )
+
+    body = session.messages[0].content or ""
+    assert "structured data exceeded 200 chars" in body
+    assert "x" * 100 not in body, "the oversized payload must not ride every request"
+
+
 def test_checkpoint_is_throttled_on_a_long_session():
     closer, session, _, sessions = _closer()
     closer.checkpoint(session, index=1)  # small session → saved

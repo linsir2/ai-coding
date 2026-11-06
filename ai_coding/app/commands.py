@@ -275,7 +275,17 @@ async def handle_input(
         if skills_reg is None:
             console.info("[skills] not available in this session")
             return REPLAction.CONTINUE, session
-        catalog = build_catalog(skills_reg.all())
+        # E-5: the listing is the same surface as the catalog and the model's
+        # ``skill`` tool, so a denied skill must not be advertised here either.
+        from ai_coding.skills.policy import denied_skill_ids
+
+        denied = denied_skill_ids(
+            skills_reg,
+            getattr(getattr(loop, "settings", None), "skill_permissions", None),
+        )
+        catalog = build_catalog(
+            [skill for skill in skills_reg.all() if skill.id not in denied]
+        )
         if catalog:
             console.info(f"[skills] available:\n{catalog}")
         else:
@@ -1317,7 +1327,11 @@ def _handle_model(
     # Read off the loop, not off ``settings``: the model table is an ``AppConfig``
     # field and ``loop.settings`` is an ``AIConfig``, which has never carried one.
     models = getattr(loop, "models", None) or {}
-    default_model = getattr(loop, "default_model", "") or ""
+    default_model = (
+        getattr(loop, "current_model", None)
+        or getattr(loop, "default_model", "")
+        or ""
+    )
     parts = raw.split()
     if len(parts) == 1:
         lines = [f"[model] current: {default_model or '(none)'}"]

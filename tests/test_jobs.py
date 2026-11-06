@@ -557,6 +557,26 @@ def test_read_head_reports_the_real_length_even_when_it_trims(tmp_path):
     registry.discard(job.id)
 
 
+def test_read_head_tail_keeps_the_conclusion_at_the_end(tmp_path):
+    """A build log's verdict is at the tail (pytest FAILED lines, the last
+    traceback frames); a head-only read reported success."""
+    registry = _registry(tmp_path)
+    job = registry.start("echo hi", cwd=str(tmp_path), session_id="s", emit=lambda e: None)
+    _wait_until(lambda: job.status != "running", what="settlement")
+
+    import pathlib as _pathlib
+
+    body = ("A" * 2000) + "\nFINAL: 3 failed\n"
+    _pathlib.Path(job.log_path).write_bytes(body.encode("utf-8"))
+    text, size = registry.read_head_tail(job, 200)
+
+    assert size == len(body.encode("utf-8"))
+    assert text.startswith("A"), "the head is still there"
+    assert "FINAL: 3 failed" in text, "the tail must survive the window"
+    assert "chars omitted" in text
+    registry.discard(job.id)
+
+
 def test_concurrent_reads_and_mutations_never_raise(tmp_path):
     """_publish runs on watcher threads while the table mutates elsewhere;
     iterating it unguarded hands the caller a RuntimeError ("dictionary changed

@@ -196,7 +196,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # runner is constructed *inside* it -- a queue nobody holds is a queue
     # nobody writes to, which is how a background completion used to reach the
     # operator and nobody else.
-    notices = SteeringQueue()
+    #
+    # R7e-2: the bounds are the configured ones.  ``SteeringQueue()`` used the
+    # class defaults, so ``ai.steering_max_messages/chars`` were read by
+    # nothing and a configured value silently did nothing.
+    notices = SteeringQueue(
+        max_messages=int(getattr(app_cfg.ai, "steering_max_messages", 5) or 5),
+        max_chars=int(getattr(app_cfg.ai, "steering_max_chars", 2_000) or 2_000),
+    )
     # D-1: one job table per workspace, beside the sessions and traces rather
     # than inside either -- a background command outlives the session that
     # started it, and the ledger that says so has to outlive it too.

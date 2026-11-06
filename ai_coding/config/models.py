@@ -361,7 +361,6 @@ class StaticCheckConfig(BaseModel):
 class AIConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    auto_process_tool_results: bool = True
     #: Per-turn tool-call ceiling.  Raised from 10 to 100 in r22: 10 ended real
     #: work mid-step ("budget exhausted, type continue"), which is not how the
     #: assistants this project is measured against behave.  Claude Code, Codex

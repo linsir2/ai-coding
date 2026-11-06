@@ -18,6 +18,7 @@ Two invariants from R6a survive verbatim and are the reason this file has tests:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
 from dataclasses import replace
@@ -146,6 +147,26 @@ def failed_outcome(
 # ---- the closing half ------------------------------------------------------
 
 
+def _bounded_data(data: dict[str, Any] | None, limit: int) -> dict[str, Any] | None:
+    """Cap the machine-readable ``<data>`` block (``ai.max_result_data_bytes``)."""
+    if not data or limit <= 0:
+        return data
+    try:
+        payload = json.dumps(data, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return data
+    if len(payload) <= limit:
+        return data
+    # Keep a description instead of a silent half-JSON blob: a reader that
+    # expects a dict still gets one, and the model learns why it is short.
+    return {
+        "truncated": True,
+        "chars": len(payload),
+        "keys": sorted(str(key) for key in data),
+        "note": f"structured data exceeded {limit} chars",
+    }
+
+
 class TurnCloser:
     """Persistence, write-back and closing for one loop.
 
@@ -180,6 +201,10 @@ class TurnCloser:
         """Append one tool message per outcome (the model's own words stay put)."""
         for item in outcomes:
             self.artifacts.extend(item.result.artifacts)
+            data = _bounded_data(
+                item.result.data,
+                int(getattr(self._settings, "max_result_data_bytes", 8_000) or 0),
+            )
             session.add_message(
                 tool_message(
                     ToolOutput(
@@ -187,7 +212,7 @@ class TurnCloser:
                         tool_name=item.call.name,
                         output=item.result.output,
                         success=item.result.success,
-                        data=item.result.data,
+                        data=data,
                         artifacts=item.result.artifacts,
                         error=item.result.error,
                         detail=item.result.detail,
