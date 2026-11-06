@@ -409,3 +409,71 @@ unconverged=false, reason="look-only streak"`。它实际是
 真正影响效率的两个问题（F1 永久 blocked、F2 白花 2 步）已修复并通过回归测试，
 F3/F4 是 trace 可观测性的确定性缺陷，建议下一批处理；F5/F6 是低频优化。
 
+---
+
+## 6. 修复后的两次真机复跑（ws7 / ws8）
+
+3 次运行使用同一个任务与配置，模型输出有随机性，结果只能做趋势对比：
+
+| 运行 | 代码状态 | 轮次 | 总耗时 | 工具调用 | 压缩 | todo_write 失败 |
+|---|---|---|---|---|---|---|
+| ws6 | R4 修复后 | 3 | 728.5s | 76 | 0 | 7 |
+| ws7 | + F1/F2 | 4 | 772.7s | 143 | 0 | 3 |
+| ws8 | + F1/F2/F7 | 6 | 1226.4s | 156 | 0 | 8 |
+
+### 6.1 F1/F2 在真机上的验证（ws7）
+
+- **F1 生效**：`turn-2` 的最后一个 todo_update 携带
+  `verify="... pytest ... && npm run build ... && ls README.md"`，返回
+  `True/None`，条目从 blocked 恢复为 completed。修复前同一调用得到
+  `verify 未接线`，条目永久卡死。
+- **F2 生效**：ws7 的 `turn-3` 里 `edit -> npm run build` 不再被
+  `duplicate_call` 拒绝；剩余的 `guard_denied` 都是**真正**的重复写/重复
+  `ls`（两次之间没有任何写操作），属于守卫该拦的。
+- 这两个修复没有把其他计数推高：两次复跑仍是 0 次压缩、0 条 ERROR/Traceback。
+
+### 6.2 F7（已在 `d152095` 修复）：空输出误触 look-only 阶梯
+
+ws7 的 `turn-1` 第 4 步 `SearchStalled` 的计数是
+`calls=0, streak=0, novel=0, repeated=0`，却报 `level=1 /
+reason="look-only streak"`。触发点是 `repeat_streak=1`，而它来自第 2、3 步
+两条 `bash` 的空输出（`mkdir`/`npm create` 本来就静默）。
+
+修复：`TurnBooks.note_outcomes` 只在输出 `strip()` 非空时才累计
+`repeat_streak`/写入 `seen_success_outputs`。回归测试
+`test_silent_actions_do_not_build_a_repeat_streak`。
+ws8 全轮 0 条零调用 `SearchStalled`，只剩真实的
+`calls=6/streak=5`、`calls=13/streak=9` 两条。
+
+### 6.3 F8（已在 `acfa292` 修复）：schema 把 evidence 说成「证明」
+
+ws8 的 8 次 todo_write 失败全是同一个模式：模型把路径/测试结果写进
+`evidence`，门禁要求 `files`/`verify`，于是
+`completion_unverified` → `completion_blocked`（第 2 次起永久 blocked）→
+`override_unavailable`。三次运行合计 18 次失败调用里，绝大多数是这一条。
+
+根因不在门禁，而在工具面：`description` 原文是
+"mark an item completed only with evidence (the file, command or finding
+that proves it)"，`evidence` 字段写的是 "What proves the item is done"。
+模型照着 schema 做，然后就撞墙。
+
+修复：description 与 `evidence` 字段都明确写出「完成需要 `files` 或
+`verify`；`evidence` 只是给人看的说明，单独不满足完成」。
+回归测试 `test_the_schema_names_files_or_verify_as_the_completion_proof`。
+ws8 在修复前启动，因此没有覆盖到这一条；下一次复跑应重点看
+`todo_write` 失败数是否从 8 降到 0–1。
+
+### 6.4 仍未解决
+
+- **F3/F4**（nudge 与 `SearchStalled` 的 trace 语义）未改。
+- **F5/F6** 未改。
+- 工具失败缺少稳定 `error` 码：`edit` 的 `old_string not found`、
+  `file not found`、`not unique` 都返回 `success=False, error=None`，
+  trace/ledger 只能读文案，无法按码统计（ws8 turn-5 三次）。建议补
+  `old_string_not_found` / `file_not_found` / `old_string_not_unique`。
+- 同一文件一轮内重复读 19 次（ws8 turn-5 的 `App.tsx`）：参数
+  `offset/limit` 不同时指纹不同，守卫不拦；模型在 `sed -i` 与重读之间
+  反复横跳。若下一轮想压这个，需要按「文件版本未变 + 本轮已读过该区间」
+  合并判定，而不是只看 `(tool, params)`。
+
+
