@@ -154,16 +154,22 @@ def test_persisted_marker_results_are_skipped(tmp_path: Path):
     assert PERSISTED_MARKER in (out[0].content or "")
 
 
-def test_a_write_failure_degrades_to_a_pathless_envelope(tmp_path: Path):
+def test_a_write_failure_keeps_the_body_instead_of_eliding_it(tmp_path: Path):
+    """R7b used to degrade to a *pathless* envelope here.
+
+    2026-11-06: that is a hard truncation with no way back.  The model is told
+    the body was "elided", the artifact was never written, and the only copy
+    that still exists is the session file — which the model has no reason to
+    search because nothing said the content was missing.  Keeping the body
+    costs tokens; dropping it costs the work.  So a body that cannot be written
+    where the model can read it stays exactly where it is.
+    """
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("x", encoding="utf-8")
-    out = placeholder_old_results(
-        [_tool(_long(), "c1"), _tool("r2", "c2")], keep_recent=1, elide_root=blocker
-    )
-    text = out[0].content or ""
-    assert text.startswith("[Previous: used bash")
-    assert "full output" not in text
-    assert "chars elided" in text
+    source = [_tool(_long(), "c1"), _tool("r2", "c2")]
+    out = placeholder_old_results(source, keep_recent=1, elide_root=blocker)
+    assert (out[0].content or "") == (source[0].content or "")
+    assert "chars elided" not in (out[0].content or "")
 
 
 # -------------------------------------------------------------- the pipeline

@@ -2382,10 +2382,19 @@ class AgentLoop:
         # ledger mark only suppresses a repeat while its own result is one of
         # these -- after a compaction the body is gone and the model must be
         # able to read it again.
+        #
+        # A body that *survived* the message list but was replaced by a
+        # recoverable envelope (L0/L2 elision, L3 persist) counts as gone: the
+        # bytes are on disk and only a preview is in the request, so answering
+        # the next read with a pointer would leave the model with neither the
+        # content nor a way to ask for it.
+        from ai_coding.core.context_compression import is_cleared_body
+
         _visible_call_ids = {
             str(getattr(message, "tool_call_id", "") or "")
             for message in history
             if getattr(message, "role", "") == "tool"
+            and not is_cleared_body(getattr(message, "content", None))
         }
 
         def _count_repeat_read(key: str, start: int, end: int, version: str) -> int:

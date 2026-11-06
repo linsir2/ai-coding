@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -116,6 +117,33 @@ def _build_gate(app_cfg: Any, workspace: str, skills: SkillRegistry) -> Permissi
     return PermissionGate.from_config(app_cfg, workspace=workspace, skill_resolver=resolve)
 
 
+def _workspace_file_reader(workspace: str | Path) -> Callable[[str], str | None]:
+    """A ``path -> text`` reader confined to the workspace, for the refresh.
+
+    The read ledger stores sandbox keys, which are workspace-relative.  A
+    refresh is a convenience, so every failure (escape, missing file, binary,
+    >512KB) answers ``None`` and the file is simply not re-injected — a
+    compaction must never fail because a file could not be refreshed.
+    """
+    root = Path(workspace).resolve()
+
+    def read(path: str) -> str | None:
+        try:
+            target = Path(path)
+            if not target.is_absolute():
+                target = root / target
+            target = target.resolve()
+            if target != root and root not in target.parents:
+                return None
+            if not target.is_file() or target.stat().st_size > 512 * 1024:
+                return None
+            return target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    return read
+
+
 def _build_loop(
     engine: Any,
     sessions: Any,
@@ -224,6 +252,7 @@ def _build_loop(
         transcripts_root=ws,
         summarizer=summarizer,
         context_window=effective_window,
+        file_reader=_workspace_file_reader(ws),
     )
 
     prompt = PromptAssembler(BASE_INSTRUCTIONS)

@@ -55,6 +55,23 @@ ELIDED_DIR = "transcripts/elided"
 #: whether a placeholder would actually shrink a body.
 _NOTE_ALLOWANCE = 160
 HARD_TRIM_KEEP_TAIL = 20
+#: How much of an un-summarised delta may stay in the request.
+#:
+#: Measured 2026-11-06 (selfwork3 turn-1): a summary failed after the shrink
+#: ladder, and Branch D handed the whole delta back — 78,415 tokens of raw tool
+#: output beside a 14,865-token tail, i.e. **95,219 tokens out of a 14,865-token
+#: input**.  The pass had shrunk the head and then undone the win.  The delta is
+#: the part that grows during exploration (every ``read`` adds ~20k characters),
+#: so it must be bounded by the same rules as the tail.
+_DELTA_MAX_TOKENS = 20_000
+_DELTA_KEEP_TAIL = 20
+#: C: what a post-compaction file refresh may cost, and how many files it may
+#: name.  Claude Code re-injects recently-read files for the same reason: the
+#: checkpoint carries references, not bytes, so the model otherwise re-reads
+#: what it just "finished" reading.  The budget is deliberately small — a
+#: refresh must never undo the shrink that made it necessary.
+_REINJECT_FILE_TOKENS = 8_000
+_REINJECT_MAX_FILES = 5
 _L4_BREAKER_THRESHOLD = 3
 _MIN_PAGE_MESSAGES = 4
 #: How much of the tail budget a user boundary must preserve to be worth
@@ -278,9 +295,47 @@ def placeholder_old_results(
     tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
     if len(tool_indices) <= keep_recent:
         return messages
+    return _elide_tool_results(
+        messages,
+        tool_indices[:-keep_recent],
+        window_chars=window_chars,
+        window_budget=window_budget,
+        elide_root=elide_root,
+    )
+
+
+def is_cleared_body(content: str | None) -> bool:
+    """True when this tool body was replaced by a recoverable envelope.
+
+    A cleared body is not evidence the model still has: the bytes are on disk
+    and only a preview is in the request, so a repeat ``read`` of that range has
+    to be answered with content rather than an "already read" pointer.  Both the
+    L2/L0 envelope and L3's persisted marker count.
+    """
+    text = content or ""
+    return "chars elided" in text or PERSISTED_OUTPUT_PREFIX in text
+
+
+def _elide_tool_results(
+    messages: list[ChatMessage],
+    indices: Sequence[int],
+    *,
+    window_chars: int,
+    window_budget: int,
+    elide_root: str | Path | None,
+) -> list[ChatMessage]:
+    """The shared body of every "replace a tool result with an envelope" pass.
+
+    ``placeholder_old_results`` decides *which* indices by count;
+    :func:`microcompact_old_results` by token budget.  Both must produce the
+    identical envelope, or a body elided by one pass would look untouched to
+    the other and be elided twice (two artifacts, two envelopes, one message).
+    """
+    if not indices:
+        return messages
     out = list(messages)
     budget = max(0, int(window_budget))
-    for i in reversed(tool_indices[:-keep_recent]):
+    for i in reversed(list(indices)):
         m = messages[i]
         body = m.content or ""
         if not body or PERSISTED_OUTPUT_PREFIX in body:
@@ -289,10 +344,69 @@ def placeholder_old_results(
         if len(body) <= 2 * window + _NOTE_ALLOWANCE:
             continue  # rule 1: not worth a placeholder at all
         path = elide_and_persist(body, m.tool_name or "tool", elide_root)
+        if path is None:
+            # No artifact means no way back.  An envelope without a path is a
+            # deletion wearing a placeholder's clothes: the model is told the
+            # body is "elided" and has nowhere to look.  Leaving the body costs
+            # tokens; dropping it costs the turn, so leave it.
+            continue
         note = previous_result_note(m.tool_name or "tool", len(body), path)
         out[i] = _tool_copy(m, _elided_body(body, note, window))
         budget -= window
     return out
+
+
+# --------------------------------------------------- stage 0 (microcompact)
+#: Claude Code's ``microcompact`` and opencode's ``prune`` share one idea: most
+#: of a long context is old tool output, and clearing it needs no model call.
+#: We had neither, so a tool-heavy exploration reached **355,107 tokens** before
+#: anything looked at it — L3 only examines the trailing batch by design, and
+#: L2 only the tail/delta.  A 40k protected window is the same order Claude Code
+#: uses; it keeps the results the model is working from and clears the rest.
+_MICROCOMPACT_PROTECT_TOKENS = 40_000
+
+
+def microcompact_old_results(
+    messages: list[ChatMessage],
+    *,
+    protect_tokens: int = _MICROCOMPACT_PROTECT_TOKENS,
+    window_chars: int = 200,
+    window_budget: int = 4000,
+    elide_root: str | Path | None = None,
+) -> list[ChatMessage]:
+    """Clear old tool results by token accounting, with no model call.
+
+    Walks the tool results newest-first, keeps the ones that fit
+    ``protect_tokens``, and replaces every older body with the same recoverable
+    envelope L2 uses (artifact on disk + a head/tail window + the path).  The
+    message count and the pairing fields are untouched: this is a content edit,
+    not a structural one, so ``sanitize_pairs`` has nothing to repair and the
+    request stays append-only for the prompt cache.
+
+    Everything it drops is re-readable: the envelope carries the artifact path,
+    and ``read`` can always fetch the file again.
+    """
+    tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
+    if not tool_indices:
+        return messages
+    keep_from = len(tool_indices)
+    used = 0
+    for position in range(len(tool_indices) - 1, -1, -1):
+        cost = estimate_tokens(messages[tool_indices[position]].content or "")
+        if used > 0 and used + cost > protect_tokens:
+            break
+        used += cost
+        keep_from = position
+    older = tool_indices[:keep_from]
+    if not older:
+        return messages
+    return _elide_tool_results(
+        messages,
+        older,
+        window_chars=window_chars,
+        window_budget=window_budget,
+        elide_root=elide_root,
+    )
 
 
 # ---------------------------------------------------------------- stage 3 (L3)
@@ -883,6 +997,7 @@ class ContextManager:
         transcripts_root: str | Path,
         summarizer: Callable[[str], Awaitable[str | None]] | None = None,
         context_window: int | None = None,
+        file_reader: Callable[[str], str | None] | None = None,
     ) -> None:
         # ``context_window`` is the resolved number (config or model metadata).
         # It wins over the raw setting because resolving it once at the
@@ -935,6 +1050,12 @@ class ContextManager:
         )
         self._root = Path(transcripts_root)
         self._summarizer = summarizer
+        #: C: after a compaction, re-read the files the model was working on.
+        #: Claude Code does this and it is the direct answer to "the checkpoint
+        #: says I read agent_loop.py, so why is the body gone?" — measured 48
+        #: reads of one file in a single turn after a compaction.  ``None``
+        #: keeps every existing caller (and every test) unchanged.
+        self._file_reader = file_reader
         self._l4_failures = 0
         #: The last L4 summary call's own usage (prompt/completion/total), for
         #: the compaction funnel's Ended event.  Never fed to the meter.
@@ -1047,6 +1168,31 @@ class ContextManager:
         before_tokens = _history_tokens(messages)
         stats: list[LayerStat] = []
         out = list(messages)  # copy — never mutate the caller's history
+        # L0: microcompact.  No model call, no message removed — old tool bodies
+        # become recoverable envelopes.  It runs before L3 because L3 is a
+        # *trailing batch* guard by design: the bodies that actually accumulate
+        # are the ones behind an assistant reply, which L3 never examines.
+        # Without this the gate opened at 355,107 tokens on a real exploration
+        # turn, and every pass then tried to summarise a backlog nobody had
+        # cleared.
+        l0_before = _history_tokens(out)
+        l0_in = out
+        out = microcompact_old_results(
+            out,
+            elide_root=self._root,
+            window_chars=self._l2_window_chars,
+            window_budget=self._l2_window_budget,
+        )
+        stats.append(
+            LayerStat(
+                name="L0",
+                removed=0,
+                rewritten=_rewritten_count(l0_in, out),
+                skipped=0,
+                before_tokens=l0_before,
+                after_tokens=_history_tokens(out),
+            )
+        )
         # L3: the mid-turn guard.  The stat turns its semantics observable —
         # "the trailing run was K messages, we persisted R and skipped the
         # rest" — instead of leaving them in a comment (plan-m-e §A/M-E1).
@@ -1170,17 +1316,41 @@ class ContextManager:
                         consumed=len(head),
                         anchor=_anchor_of(messages[: len(head)]),
                     )
-                    out = [_checkpoint_note(fresh), *tail]
+                    out = [
+                        _checkpoint_note(fresh),
+                        *self._reinject_recent_files(session),
+                        *tail,
+                    ]
                 else:
                     # Branch D: the summary failed, so the checkpoint must not
                     # advance -- but the previous one still describes
                     # ``messages[:used]``, and dropping it here would take the
                     # whole head with it (the tail alone is not the history).
-                    out = [_checkpoint_note(previous), *delta, *tail]
+                    #
+                    # 2026-11 real machine: carrying ``delta`` verbatim made the
+                    # pass *bigger* than the input it had just shrunk
+                    # (14,865 -> 95,219 tokens).  Nothing had summarised the
+                    # messages between the last checkpoint and the tail, so the
+                    # failure path put the whole backlog back; the gate then
+                    # reopened within a few reads and the turn spent 65% of its
+                    # wall clock in six passes.  An un-summarised delta gets the
+                    # same treatment as the tail.
+                    out = [
+                        _checkpoint_note(previous),
+                        *self._shrink_unsummarised(delta),
+                        *tail,
+                    ]
             else:
                 # Branch C: the delta is small enough to carry verbatim.  This
                 # is the branch that stops "summarise on every iteration".
-                out = [_checkpoint_note(previous), *delta, *tail]
+                # "Small enough" is judged before L2, so the same shrink still
+                # applies: a few large tool results can fit the token gate and
+                # still be the whole request.
+                out = [
+                    _checkpoint_note(previous),
+                    *self._shrink_unsummarised(delta),
+                    *tail,
+                ]
             stats.append(
                 LayerStat(
                     name="L4",
@@ -1266,7 +1436,11 @@ class ContextManager:
                     consumed=cut,
                     anchor=_anchor_of(messages[:cut]),
                 )
-                out = [_checkpoint_note(fresh), *kept_tail]
+                out = [
+                    _checkpoint_note(fresh),
+                    *self._reinject_recent_files(session),
+                    *kept_tail,
+                ]
                 l2_after = l2_before - (tail_before - _history_tokens(kept_tail))
             else:
                 # No checkpoint was installed, so nothing may be dropped -- and
@@ -1310,7 +1484,12 @@ class ContextManager:
                 )
         self.last_layer_stats = stats
 
-        if page and _history_tokens(out) > self._max_context_tokens:
+        # The backstop uses the same line the gate does.  It used to compare
+        # against the *whole* window: with a 131k window the gate opened at
+        # 115k, a pass could leave 120k, and this never fired because 120k was
+        # still "under the window" — so the next request went out at 91% and
+        # the gate reopened almost immediately.
+        if page and _history_tokens(out) > compaction_ceiling(self._max_context_tokens):
             out = self._announce_omissions(out, hard_trim(out, HARD_TRIM_KEEP_TAIL))
 
         out = _ensure_pinned(out, pinned)
@@ -1507,6 +1686,116 @@ class ContextManager:
         out = _ensure_pinned(out, pinned)
         return out
 
+    def _reinject_recent_files(self, session: Any) -> list[ChatMessage]:
+        """The files this session read most recently, at their current on-disk state.
+
+        A checkpoint is a set of *references*: "read ``agent_loop.py`` lines
+        201-400".  What it cannot carry is the bytes, and a model that is asked
+        to edit the file afterwards has neither the text nor a cheap way to get
+        it — so it reads the same ranges again (measured: 48 reads of one file,
+        108 of 131 reads after the first compaction were re-reads).
+
+        Claude Code's answer is to re-inject the recently-read files after a
+        compaction, and that is what this does.  Three bounds keep it from
+        becoming its own problem:
+
+        * at most ``_REINJECT_MAX_FILES`` files, newest-read first;
+        * ``_REINJECT_FILE_TOKENS`` in total, so a re-injection can never undo
+          the shrink it follows;
+        * one truncation notice per file, so the model knows what it is missing.
+
+        Never raises: a file that vanished or cannot be decoded is simply not
+        re-injected (``None`` from the reader).
+        """
+        if self._file_reader is None or session is None:
+            return []
+        reads = getattr(getattr(session, "effects", None), "reads", None) or ()
+        ordered: list[str] = []
+        for mark in reversed(list(reads)):
+            path = str(getattr(mark, "path", "") or "")
+            if path and path not in ordered:
+                ordered.append(path)
+            if len(ordered) >= _REINJECT_MAX_FILES:
+                break
+        if not ordered:
+            return []
+        budget = _REINJECT_FILE_TOKENS
+        blocks: list[str] = []
+        for path in ordered:
+            if budget <= 0:
+                break
+            try:
+                body = self._file_reader(path)
+            except Exception:  # noqa: BLE001 — a refresh is an optimisation
+                continue
+            if not body:
+                continue
+            cost = estimate_tokens(body)
+            if cost > budget:
+                body = body[: chars_for_tokens(body, budget)]
+                body += "\n[压缩后重载：文件过长，此处截断]"
+                cost = budget
+            blocks.append(f"### {path}\n{body}")
+            budget -= cost
+        if not blocks:
+            return []
+        return [
+            ChatMessage(
+                role="user",
+                content=(
+                    "[压缩后重新载入的文件快照] 以下是压缩前最近读过的文件在当前磁盘上的内容；"
+                    "可以直接据此继续，不必重新读取这些文件。需要未包含的行再按 offset 读。\n\n"
+                    + "\n\n".join(blocks)
+                ),
+                timestamp="",
+                synthetic=True,
+            )
+        ]
+
+    def _shrink_unsummarised(self, delta: list[ChatMessage]) -> list[ChatMessage]:
+        """L2 plus a count bound for messages no summary will cover.
+
+        The tail has always been treated this way; the delta was not, and it is
+        the one that grows during a tool-heavy exploration — every ``read`` adds
+        up to ~20k characters of tool result, and none of it is summarised until
+        a checkpoint pass succeeds.  When that pass fails, everything here goes
+        into the very next request.
+
+        Order matters.  Elide first (``placeholder_old_results`` keeps the most
+        recent results verbatim and archives the rest, so a re-read still works),
+        then cut by count only if the body is still over ``_DELTA_MAX_TOKENS``.
+        Cutting first would drop the newest messages and keep older ones the
+        model no longer needs, which is the opposite of what a tail window is
+        for.  Anything ``hard_trim`` removes is archived by
+        :meth:`_announce_omissions`, so ``history_search`` can still reach it.
+        """
+        if not delta:
+            return []
+        elided = placeholder_old_results(
+            delta,
+            self._keep_recent_results,
+            window_chars=self._l2_window_chars,
+            window_budget=self._l2_window_budget,
+            elide_root=self._root,
+        )
+        if _history_tokens(elided) <= _DELTA_MAX_TOKENS:
+            return elided
+        # ``hard_trim`` cuts by count, so one cut is not a token bound: the
+        # twenty messages it keeps can still be twenty large tool results (the
+        # protected window plus whatever the trim lands on).  Halve until the
+        # budget holds, the list is at its floor, or four cuts have been tried —
+        # the same bound ``compress_if_needed`` uses for its paging loop.
+        trimmed = hard_trim(elided, _DELTA_KEEP_TAIL)
+        guard = 0
+        while (
+            _history_tokens(trimmed) > _DELTA_MAX_TOKENS
+            and len(trimmed) > _MIN_PAGE_MESSAGES
+            and guard < 4
+        ):
+            trimmed = hard_trim(trimmed, max(_MIN_PAGE_MESSAGES, len(trimmed) // 2))
+            guard += 1
+        return self._announce_omissions(elided, trimmed)
+
     def _announce_omissions(
         self, before: list[ChatMessage], after: list[ChatMessage]
     ) -> list[ChatMessage]:
@@ -1538,13 +1827,24 @@ class ContextManager:
             dropped.append(message)
         if not dropped:
             return after
-        self.archive_transcript(dropped)
+        archived = self.archive_transcript(dropped)
+        if archived:
+            body = (
+                f"{OMISSION_MARK} 为放进上下文窗口，已省略 {len(dropped)} 条较早消息；"
+                "原文已归档到 transcripts/archive/，需要时用 history_search 取回。"
+            )
+        else:
+            # The write failed.  Say so, and say where the words still are: the
+            # session file is append-only, so ``history_search`` can still find
+            # them even when the archive directory is unwritable.  Claiming a
+            # successful archive here would send the model to an empty path.
+            body = (
+                f"{OMISSION_MARK} 为放进上下文窗口，已省略 {len(dropped)} 条较早消息；"
+                "归档写入失败，但原始会话历史仍完整保留，需要时用 history_search 检索原文。"
+            )
         notice = ChatMessage(
             role="user",
-            content=(
-                f"{OMISSION_MARK} 为放进上下文窗口，已省略 {len(dropped)} 条较早消息；"
-                "原文已归档，需要时用 history_search 取回。"
-            ),
+            content=body,
             timestamp="",
             synthetic=True,
         )
@@ -1804,9 +2104,14 @@ class ContextManager:
                 pass
         return summary
 
-    def archive_transcript(self, messages: list[ChatMessage]) -> None:
+    def archive_transcript(self, messages: list[ChatMessage]) -> bool:
         """The messages a compaction is about to remove, kept where a human -- and
         ``history_search`` -- can read them.
+
+        Returns whether the archive was actually written.  The caller has to
+        know: a paging notice that says "the originals are archived" when the
+        write failed is worse than no notice at all, because the model stops
+        looking for content that no longer exists anywhere it can reach.
 
         Compression answers "what does the model still see". It does not answer
         "what did we say", and the transcript pane goes on rendering the
@@ -1827,8 +2132,9 @@ class ContextManager:
             stamp = time.strftime("%Y%m%d-%H%M%S")
             digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
             (root / f"{stamp}-{digest}.md").write_text(text, encoding="utf-8")
+            return True
         except OSError:
-            pass  # best-effort; an unwritable disk must not fail a turn
+            return False  # best-effort; an unwritable disk must not fail a turn
 
     def _persist_audit_copy(self, text: str) -> None:
         try:

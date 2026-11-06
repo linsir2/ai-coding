@@ -12,6 +12,8 @@ Both helpers are deliberately best-effort: any network/parse failure degrades to
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -20,6 +22,7 @@ from openai import AsyncOpenAI
 from ai_coding.ai.openai_engine import _looks_like_context_overflow, _usage_to_dict
 from ai_coding.domain.message import ChatMessage
 from ai_coding.memory.schema import parse_candidates
+from ai_coding.providers import provider_id_for
 
 Summarizer = Any  # Callable[[str], Awaitable[str | None]]
 Extractor = Any  # Callable[[Sequence[ChatMessage], str | None], Awaitable[list[str]]]
@@ -50,6 +53,39 @@ _TRUNCATION_NOTE = "\n[历史过长，此处截断]"
 #: accepts almost all of it, and starting at 70% throws away 30% of the
 #: conversation to buy a retry that a 15% trim would have bought.
 _SHRINK_STEPS = (0.85, 0.7, 0.5, 0.35)
+
+#: A summary is an auxiliary call: the turn is blocked while it runs, and the
+#: useful output is a bounded set of sections.  Measured 2026-11-06 on
+#: qwen3.7-flash: one compaction pass spent **565s** and reported **93,603
+#: completion tokens** against a 2,800-token cap, then returned an unusable
+#: (empty) summary — the shrink ladder had walked all five caps × two attempts.
+#: The cap bounds the answer, not the reasoning: DashScope's thinking models
+#: bill reasoning as completion and do not count it against ``max_tokens``.
+#:
+#: So the summariser gets a wall-clock budget of its own, independent of the
+#: turn deadline it used to borrow, and each attempt gets a ceiling well below
+#: the model default (60s).
+_SUMMARY_BUDGET_SECONDS = 90.0
+_SUMMARY_ATTEMPT_SECONDS = 30.0
+
+#: ``enable_thinking: false`` on the DashScope compatible endpoint.  Only that
+#: provider has the switch; an unknown endpoint gets no extra body rather than
+#: a field it may reject.
+_THINKING_OFF = {"enable_thinking": False}
+
+
+def _thinking_off(model_config: Any) -> dict[str, Any]:
+    """The extra request body that disables reasoning, where supported.
+
+    A summariser produces eight fixed sections from text it is given; reasoning
+    adds latency and cost without changing what the sections may contain.
+    """
+    try:
+        provider = provider_id_for(str(getattr(model_config, "base_url", "") or ""))
+    except Exception:  # noqa: BLE001 — an unknown provider simply gets nothing
+        return {}
+    return dict(_THINKING_OFF) if provider == "qwen" else {}
+
 
 #: The two halves of a checkpoint-aware summary input, and the labels that
 #: separate them.  They live here rather than next to the compressor because
@@ -83,6 +119,7 @@ async def _chat(
             ],
             max_tokens=max_tokens,
             temperature=0.2,
+            extra_body=_thinking_off(model_config) or None,
         )
     finally:
         await client.close()
@@ -120,6 +157,7 @@ async def _chat_stream(
             temperature=0.2,
             stream=True,
             stream_options={"include_usage": True},
+            extra_body=_thinking_off(model_config) or None,
         )
         parts: list[str] = []
         usage: dict[str, int] = {}
@@ -321,31 +359,56 @@ def build_summarizer(model_config: Any) -> Summarizer:
         caps = [len(base)] + [max(1, int(len(base) * step)) for step in _SHRINK_STEPS]
         previous_len = len(previous or "")
         streaming = on_delta is not None or usage_sink is not None
+        # The ladder is five caps × two attempts; without a wall clock, the two
+        # slowest attempts alone can outlast a whole turn (measured: 565s on a
+        # thinking model, with an empty answer at the end).  The budget belongs
+        # to the summary, not to the turn it happens to run inside.
+        deadline = time.monotonic() + _SUMMARY_BUDGET_SECONDS
+
+        async def _attempt_call(call_prompt: str) -> tuple[str, dict[str, int]]:
+            if streaming:
+                text, usage = await _chat_stream(
+                    model_config,
+                    _SUMMARY_SYSTEM_PROMPT,
+                    call_prompt,
+                    max_tokens=max_tokens,
+                    on_delta=on_delta,
+                )
+                return text, usage
+            return (
+                await _chat(
+                    model_config,
+                    _SUMMARY_SYSTEM_PROMPT,
+                    call_prompt,
+                    max_tokens=max_tokens,
+                ),
+                {},
+            )
+
         for cap in caps:
             prompt = _summary_prompt(text, previous, cap)
             too_big = False
             for attempt in range(2):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
                 try:
-                    if streaming:
-                        # Live chunks go out as they arrive; a shape-rejected
-                        # attempt's text is already shown (ephemeral progress,
-                        # the ended row carries the authoritative body).
-                        out, usage = await _chat_stream(
-                            model_config,
-                            _SUMMARY_SYSTEM_PROMPT,
-                            prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
-                            max_tokens=max_tokens,
-                            on_delta=on_delta,
-                        )
-                        if usage_sink is not None and usage:
-                            usage_sink.append(usage)
-                    else:
-                        out = await _chat(
-                            model_config,
-                            _SUMMARY_SYSTEM_PROMPT,
-                            prompt if attempt == 0 else prompt + _SUMMARY_NUDGE,
-                            max_tokens=max_tokens,
-                        )
+                    # One attempt never outlives the budget it was given: a
+                    # thinking model can spend minutes on a call that the
+                    # provider's own 60s timeout would allow, and the ladder
+                    # would then repeat that cost at every cap.
+                    out, usage = await asyncio.wait_for(
+                        _attempt_call(
+                            prompt if attempt == 0 else prompt + _SUMMARY_NUDGE
+                        ),
+                        timeout=min(max(remaining, 0.1), _SUMMARY_ATTEMPT_SECONDS),
+                    )
+                    if usage_sink is not None and usage:
+                        usage_sink.append(usage)
+                except asyncio.TimeoutError:
+                    # Out of budget, not out of context: shrinking the input
+                    # would buy another slow call, not a smaller one.
+                    return None
                 except Exception as exc:
                     if _looks_like_context_overflow(exc):
                         too_big = True

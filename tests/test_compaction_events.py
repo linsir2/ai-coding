@@ -335,8 +335,11 @@ async def test_compaction_ended_reports_per_layer_stats(tmp_path) -> None:
     ended = observer.of_type(CompactionEnded)
     assert len(ended) == 1
     layers = ended[0].layers
-    # Pipeline order, not numeric: L3 -> L1 -> L2 -> L4.
-    assert [stat.name for stat in layers] == ["L3", "L1", "L2", "L4"]
+    # Pipeline order, not numeric: L0 (microcompact, no model call) -> L3 -> L1
+    # -> L2 -> L4.  L0 clears old tool bodies by token accounting before any
+    # other layer looks at them; L3 only ever examines the trailing batch, so
+    # the accumulated history would otherwise reach the gate untouched.
+    assert [stat.name for stat in layers] == ["L0", "L3", "L1", "L2", "L4"]
     # Adjacent layers are continuous: the previous exit is the next entry.
     for previous, following in zip(layers, layers[1:], strict=False):
         assert following.before_tokens == previous.after_tokens
@@ -346,8 +349,9 @@ async def test_compaction_ended_reports_per_layer_stats(tmp_path) -> None:
     assert ended[0].estimated_before == layers[0].before_tokens
     assert ended[0].estimated_after == layers[-1].after_tokens
     # L1 actually removed messages here (30 -> 6); L4 removed the head into a note.
-    assert layers[1].removed > 0
-    assert layers[3].removed > 0
+    # Indices follow the pipeline order above: 1 is L3, 2 is L1, 4 is L4.
+    assert layers[2].removed > 0
+    assert layers[4].removed > 0
 
 
 @pytest.mark.asyncio
