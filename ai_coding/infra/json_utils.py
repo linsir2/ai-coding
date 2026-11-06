@@ -35,6 +35,23 @@ def is_valid_json(text: str) -> bool:
         return False
 
 
+def as_int(value: Any, default: int = 0) -> int:
+    """A non-negative integer from a JSON value, or ``default``.
+
+    Session and task files are written by older/newer builds and by hand.  A
+    count stored as ``"12"`` used to raise in ``int()`` and take the whole
+    resume picker down with it; booleans are not counts, and a negative count
+    is a corrupt file rather than a real value.
+    """
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return number if number >= 0 else default
+
+
 def to_json_file(path: str | Path, obj: Any) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)

@@ -637,6 +637,37 @@ async def test_build_mode_keeps_its_existing_symlink_behavior(tmp_path):
     assert target.read_text(encoding="utf-8") == "new"
 
 
+def test_a_snapshot_belongs_to_the_session_that_recorded_it(tmp_path):
+    """One registry serves every session in the process, so a path-only key let
+    session B write a file only session A had read."""
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    tracker = FileStateTracker()
+
+    tracker.record(target, scope="s1")
+
+    assert tracker.check(target, scope="s1").value == "clean"
+    assert tracker.check(target, scope="s2").value == "never_read"
+
+
+@pytest.mark.asyncio
+async def test_a_write_from_another_session_must_read_first(tmp_path):
+    target = tmp_path / "a.py"
+    target.write_text("x", encoding="utf-8")
+    tracker = FileStateTracker()
+    tracker.record(target, scope="s1")
+    tool = WriteTool(Sandbox(tmp_path), tracker)
+
+    result = await tool.execute(
+        {"path": "a.py", "content": "y"},
+        ToolContext(workspace=str(tmp_path), session_id="s2"),
+    )
+
+    assert result.success is False
+    assert result.detail == "must_read_first"
+    assert target.read_text(encoding="utf-8") == "x", "the blind write must not land"
+
+
 def test_walk_to_refuses_a_symlinked_parent(tmp_path):
     """_walk_to is the single fd-relative traversal; a swapped parent is refused."""
     from ai_coding.security.sandbox import _walk_to

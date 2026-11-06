@@ -293,8 +293,9 @@ class ReadTool(BaseTool):
                 f"{offset + 1}. To read line {offset}, pass offset={offset - 1}]"
             )
 
-        # record snapshot for stale-read protection
-        self._tracker.record(target)
+        # record snapshot for stale-read protection (scoped to this session:
+        # the tracker is shared by every session in the process)
+        self._tracker.record(target, scope=resolved_ctx.session_id)
 
         # R20/RC-2: tell the harness which lines actually reached the context.
         # The ledger records the *returned* runs, so a paged read of a 3,081-line

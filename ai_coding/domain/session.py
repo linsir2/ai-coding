@@ -6,6 +6,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ai_coding.infra.json_utils import as_int
+
 from .agents import is_plan_agent
 from .effects import EffectLedger, FileReceipt
 from .message import ChatMessage, ImageRef, ToolArtifact, ToolCallRef, tool_call_from_ref
@@ -55,7 +57,7 @@ def _message_from_dict(data: dict[str, Any]) -> ChatMessage:
             path=str(item.get("path", "")),
             mime=str(item.get("mime", "")),
             name=str(item.get("name", "")),
-            bytes=int(item.get("bytes", 0) or 0),
+            bytes=as_int(item.get("bytes", 0)),
         )
         for item in (raw_images if isinstance(raw_images, list) else [])
         if isinstance(item, dict) and item.get("path")
@@ -223,10 +225,10 @@ class TurnUsage:
             return None
         return cls(
             turn=turn,
-            prompt_tokens=int(data.get("promptTokens", 0) or 0),
-            completion_tokens=int(data.get("completionTokens", 0) or 0),
-            total_tokens=int(data.get("totalTokens", 0) or 0),
-            context_tokens=int(data.get("contextTokens", 0) or 0),
+            prompt_tokens=as_int(data.get("promptTokens", 0)),
+            completion_tokens=as_int(data.get("completionTokens", 0)),
+            total_tokens=as_int(data.get("totalTokens", 0)),
+            context_tokens=as_int(data.get("contextTokens", 0)),
         )
 
 
@@ -1017,14 +1019,14 @@ class SessionData:
             approved_plan=_approved_plan_from_history(messages)
             if data.get("approvedPlan") is None
             else str(data.get("approvedPlan") or ""),
-            harvested_messages=int(data.get("harvestedMessages", 0) or 0),
-            turn_count=int(data.get("turnCount", 0) or 0),
+            harvested_messages=as_int(data.get("harvestedMessages", 0)),
+            turn_count=as_int(data.get("turnCount", 0)),
             turn_digests=digests,
             turn_usages=usages,
             inbox=inbox,
-            last_compacted_turn=int(data.get("lastCompactedTurn", 0) or 0),
+            last_compacted_turn=as_int(data.get("lastCompactedTurn", 0)),
             compaction_checkpoint=str(data.get("compactionCheckpoint", "") or ""),
-            compaction_consumed=int(data.get("compactionConsumed", 0) or 0),
+            compaction_consumed=as_int(data.get("compactionConsumed", 0)),
             compaction_anchor=str(data.get("compactionAnchor", "") or ""),
             effects=effects,
             effects_version=effects_version,

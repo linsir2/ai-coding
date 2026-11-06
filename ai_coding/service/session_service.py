@@ -362,7 +362,12 @@ class SessionService:
     def load(self, session_id: str) -> SessionData | None:
         target = self._path(session_id)
         if target.is_file():
-            session = SessionData.from_dict(from_json_file(target))
+            try:
+                session = SessionData.from_dict(from_json_file(target))
+            except (ValueError, OSError, TypeError, KeyError, AttributeError):
+                # Same rule as the list: a file this reader cannot rebuild is
+                # "no such session", not a crash in /resume or the REPL.
+                return None
             # P2 (补充式方案 06): a file that says a turn is open is the crash
             # signal.  Derived on load, not stored: it describes this read, and
             # the next turn clears ``open_turn`` (and with it this notice).
@@ -412,13 +417,16 @@ class SessionService:
         for p in sorted(self.root.glob("*.json")):
             try:
                 data = from_json_file(p)
-            except (ValueError, OSError):
+                rows = data.get("messages")
+                count = len(rows) if isinstance(rows, list) else 0
+                summary: dict[str, Any] = dict(data)
+                summary["messages"] = []  # list view drops message bodies
+                item = SessionData.from_dict(summary)
+            except (ValueError, OSError, TypeError, KeyError, AttributeError):
+                # A corrupt file must not take the resume picker down with it.
+                # ``from_dict`` used to sit outside this guard, so one string
+                # stored where a count belongs hid every session in the list.
                 continue
-            rows = data.get("messages")
-            count = len(rows) if isinstance(rows, list) else 0
-            summary: dict[str, Any] = dict(data)
-            summary["messages"] = []  # list view drops message bodies
-            item = SessionData.from_dict(summary)
             # The bodies are gone but the number is still known: the file was
             # just parsed in full, so anything that reads ``.messages`` from a
             # listed session would be reporting the zero written two lines up.

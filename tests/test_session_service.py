@@ -220,6 +220,27 @@ def test_list_sessions_skips_broken_files_without_counting_them(tmp_path):
     assert listed[0].message_count == 1
 
 
+def test_a_session_with_a_corrupt_count_does_not_hide_the_others(tmp_path):
+    """A string where a count belongs used to raise inside ``from_dict``, and
+    that call sat outside the per-file guard: one bad file emptied the whole
+    resume picker."""
+    svc = _svc(tmp_path / "sessions")
+    good = svc.create()
+    svc.save(good)
+    (tmp_path / "sessions" / "bad.json").write_text(
+        '{"sessionId":"bad","title":"","createdTime":"","lastAccessTime":"",'
+        '"turnCount":"abc","compactionConsumed":-3,"messages":[]}',
+        encoding="utf-8",
+    )
+
+    listed = svc.list_sessions()
+    assert good.session_id in [s.session_id for s in listed]
+    loaded = svc.load("bad")
+    assert loaded is not None, "numeric fields are repaired, not fatal"
+    assert loaded.turn_count == 0
+    assert loaded.compaction_consumed == 0
+
+
 def test_resolve_finds_a_unique_prefix(tmp_path):
     """The list shows 12 hex chars; loading must accept what the list shows."""
     svc = _svc(tmp_path / "sessions")

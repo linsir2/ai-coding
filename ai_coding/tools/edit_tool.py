@@ -163,6 +163,9 @@ class EditTool(BaseTool):
                 success=False, output=f"file not found: {path_str}", error="file_not_found"
             )
 
+        # Shared tracker: the stale/missing-read verdict is per conversation.
+        scope = resolve_ctx(ctx).session_id
+
         if ctx is not None and ctx.mode == "plan":
             relative = self._plan_relative(path_str)
             if self._plan_root is None or relative is None:
@@ -178,10 +181,11 @@ class EditTool(BaseTool):
                 old,
                 new,
                 replace_all,
+                scope=scope,
             )
 
         # Stale-read check
-        state = self._tracker.check(target)
+        state = self._tracker.check(target, scope=scope)
         if state == FileState.NEVER_READ:
             return ToolResult(
                 success=False,
@@ -246,7 +250,7 @@ class EditTool(BaseTool):
                 success=False, output=f"write error: {exc}", error="write_error"
             )
 
-        self._tracker.record(target)
+        self._tracker.record(target, scope=scope)
         note_effect = resolve_ctx(ctx).note_effect
         if note_effect is not None:
             note_effect(
@@ -284,6 +288,8 @@ class EditTool(BaseTool):
         old: str,
         new: str,
         replace_all: bool,
+        *,
+        scope: str = "",
     ) -> ToolResult:
         try:
             opened = open_inside(self._plan_root or Path(), relative, mode="readwrite")
@@ -295,7 +301,7 @@ class EditTool(BaseTool):
             # path and may misreport under a symlink race.
             pre = os.fstat(opened.fd)
             state = self._tracker.check_stat(
-                opened.path, mtime=pre.st_mtime, size=pre.st_size
+                opened.path, mtime=pre.st_mtime, size=pre.st_size, scope=scope
             )
             if state == FileState.NEVER_READ:
                 return ToolResult(
@@ -354,7 +360,9 @@ class EditTool(BaseTool):
         finally:
             os.close(opened.fd)
 
-        self._tracker.record_stat(opened.path, mtime=post.st_mtime, size=post.st_size)
+        self._tracker.record_stat(
+            opened.path, mtime=post.st_mtime, size=post.st_size, scope=scope
+        )
         replaced = count if replace_all else 1
         return ToolResult(
             success=True,

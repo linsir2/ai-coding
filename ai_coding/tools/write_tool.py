@@ -174,6 +174,10 @@ class WriteTool(BaseTool):
         except SandboxViolation as exc:
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
 
+        # The tracker is shared by every session the process serves; the
+        # "read it first" verdict must describe *this* conversation.
+        scope = resolve_ctx(ctx).session_id
+
         if ctx is not None and ctx.mode == "plan":
             relative = self._plan_relative(path_str)
             if self._plan_root is None or relative is None:
@@ -183,13 +187,14 @@ class WriteTool(BaseTool):
                     error="plan_directory_required",
                 )
             return self._write_plan_file(
-                path_str, relative, content, target, append=mode == "append"
+                path_str, relative, content, target,
+                append=mode == "append", scope=scope,
             )
 
         # Stale-read check for existing files (append included: adding to a
         # file the model has not read is the same blind edit).
         if target.exists():
-            state = self._tracker.check(target)
+            state = self._tracker.check(target, scope=scope)
             if state == FileState.NEVER_READ:
                 return ToolResult(
                     success=False,
@@ -240,7 +245,7 @@ class WriteTool(BaseTool):
                 success=False, output=f"write error: {exc}", error="write_error"
             )
 
-        self._tracker.record(target)
+        self._tracker.record(target, scope=scope)
         note_effect = resolve_ctx(ctx).note_effect
         if note_effect is not None:
             note_effect(
@@ -283,6 +288,7 @@ class WriteTool(BaseTool):
         target: Path,
         *,
         append: bool = False,
+        scope: str = "",
     ) -> ToolResult:
         # target.exists() is only the NEVER_READ fast path for a brand-new
         # file and may misreport under a symlink race; the authoritative
@@ -304,7 +310,7 @@ class WriteTool(BaseTool):
             pre = os.fstat(opened.fd)
             if existed:
                 state = self._tracker.check_stat(
-                    opened.path, mtime=pre.st_mtime, size=pre.st_size
+                    opened.path, mtime=pre.st_mtime, size=pre.st_size, scope=scope
                 )
                 if state == FileState.NEVER_READ:
                     return ToolResult(
@@ -335,7 +341,9 @@ class WriteTool(BaseTool):
         finally:
             os.close(opened.fd)
 
-        self._tracker.record_stat(opened.path, mtime=post.st_mtime, size=post.st_size)
+        self._tracker.record_stat(
+            opened.path, mtime=post.st_mtime, size=post.st_size, scope=scope
+        )
         verb = "appended" if append else "wrote"
         return ToolResult(
             success=True,

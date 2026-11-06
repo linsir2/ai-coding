@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
+from ai_coding.infra.json_utils import as_int
+
 TodoStatus = Literal[
     "pending", "in_progress", "completed", "blocked", "dropped", "skipped"
 ]
@@ -542,11 +544,13 @@ class TaskState:
             if isinstance(entry, dict) and entry.get("id")
         ]
         raw_fingerprint = data.get("resumeFingerprint")
-        fingerprint = (
-            tuple(int(value) for value in raw_fingerprint)
-            if isinstance(raw_fingerprint, list)
-            else None
-        )
+        if isinstance(raw_fingerprint, list):
+            try:
+                fingerprint = tuple(int(value) for value in raw_fingerprint)
+            except (TypeError, ValueError):
+                fingerprint = None
+        else:
+            fingerprint = None
         # P0b: "goal" is the only profile a runner drives.  A session the
         # retired plan path armed still says "plan"; loading it as armed leaves
         # a flag nothing can finish (boot skips it, ``start_goal`` refuses).
@@ -558,12 +562,12 @@ class TaskState:
             items=items,
             armed=armed,
             armed_profile=profile if armed else "",
-            rounds_run=int(data.get("roundsRun", 0) or 0),
-            resume_count=int(data.get("resumeCount", 0) or 0),
-            tokens_used=int(data.get("tokensUsed", 0) or 0),
+            rounds_run=as_int(data.get("roundsRun", 0)),
+            resume_count=as_int(data.get("resumeCount", 0)),
+            tokens_used=as_int(data.get("tokensUsed", 0)),
             goal_phase=str(data.get("goalPhase", "") or ""),
             resume_fingerprint=fingerprint,
-            no_progress_resumes=int(data.get("noProgressResumes", 0) or 0),
+            no_progress_resumes=as_int(data.get("noProgressResumes", 0)),
         )
 
 

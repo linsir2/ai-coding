@@ -565,6 +565,22 @@ def test_rejecting_a_pending_skill_removes_it(tmp_path):
     assert not (tmp_path / ".pending" / "staged").exists()
 
 
+def test_approve_and_reject_refuse_a_name_that_escapes_the_staging_tree(tmp_path):
+    """``name`` comes from the local IPC; ``../outside`` must not move a
+    SKILL.md out of the staging tree or delete a directory that holds one."""
+    from ai_coding.core.skill_review import approve_skill, reject_skill
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("---\nname: x\n---\n", encoding="utf-8")
+
+    assert approve_skill(tmp_path, "../outside") is False
+    assert reject_skill(tmp_path, "../outside") is False
+    assert (outside / "SKILL.md").is_file(), (
+        "nothing outside the staging tree may move or vanish"
+    )
+
+
 def test_pending_skills_can_be_listed_with_their_reason(tmp_path):
     from ai_coding.core.skill_review import list_pending, stage_skill
 

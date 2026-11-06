@@ -335,6 +335,24 @@ def _pending_root(skill_dir: Path) -> Path:
     return skill_dir / PENDING_DIR
 
 
+def _staged_name(name: str) -> str | None:
+    """One pending skill's directory name, or ``None`` when it is not one.
+
+    ``name`` arrives from the local IPC (and normally from ``list_pending``),
+    so ``../outside`` must not be able to move a SKILL.md out of the staging
+    tree or delete a directory that happens to contain one.  Exactly one path
+    component, no separators, no NUL.
+    """
+    candidate = (name or "").strip()
+    if not candidate or candidate in (".", ".."):
+        return None
+    if "/" in candidate or "\\" in candidate or "\x00" in candidate:
+        return None
+    if Path(candidate).name != candidate:
+        return None
+    return candidate
+
+
 def list_pending(skill_dir: Path) -> list[tuple[str, str]]:
     """``(name, reason)`` for everything awaiting approval, name-ordered."""
     root = _pending_root(skill_dir)
@@ -354,10 +372,13 @@ def list_pending(skill_dir: Path) -> list[tuple[str, str]]:
 
 def approve_skill(skill_dir: Path, name: str) -> bool:
     """Move a staged skill into the live tree. ``False`` if there was none."""
-    source = _pending_root(skill_dir) / name / "SKILL.md"
+    staged = _staged_name(name)
+    if staged is None:
+        return False
+    source = _pending_root(skill_dir) / staged / "SKILL.md"
     if not source.is_file():
         return False
-    target = skill_dir / name / "SKILL.md"
+    target = skill_dir / staged / "SKILL.md"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(source, target)
@@ -366,19 +387,22 @@ def approve_skill(skill_dir: Path, name: str) -> bool:
     except OSError as exc:  # noqa: BLE001
         _log.debug("skill approval failed: %s", exc)
         return False
-    _log.info("skill approved: %s", name)
+    _log.info("skill approved: %s", staged)
     return True
 
 
 def reject_skill(skill_dir: Path, name: str) -> bool:
     """Delete a staged skill. ``False`` if there was none."""
-    staged = _pending_root(skill_dir) / name
-    if not (staged / "SKILL.md").is_file():
+    staged = _staged_name(name)
+    if staged is None:
+        return False
+    path = _pending_root(skill_dir) / staged
+    if not (path / "SKILL.md").is_file():
         return False
     import shutil
 
     try:
-        shutil.rmtree(staged)
+        shutil.rmtree(path)
     except OSError as exc:  # noqa: BLE001
         _log.debug("skill rejection failed: %s", exc)
         return False

@@ -182,10 +182,10 @@ async def test_edit_replace_all(tmp_path):
     from ai_coding.tools.edit_tool import EditTool
 
     class _Fresh:
-        def check(self, target):
+        def check(self, target, scope=""):
             return FileState.CLEAN
 
-        def record(self, target):
+        def record(self, target, scope=""):
             pass
 
     (tmp_path / "f").write_text("a b a b", encoding="utf-8")
@@ -198,10 +198,10 @@ async def test_edit_read_oserror_and_write_oserror(tmp_path, monkeypatch):
     from ai_coding.tools.edit_tool import EditTool
 
     class _Fresh:
-        def check(self, target):
+        def check(self, target, scope=""):
             return FileState.CLEAN
 
-        def record(self, target):
+        def record(self, target, scope=""):
             pass
 
     target = tmp_path / "f.txt"
