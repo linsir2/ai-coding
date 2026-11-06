@@ -136,6 +136,16 @@ def _pytest_digest(text: str, limit: int = 4_000) -> str:
     if failures:
         parts.append("=== 首个失败详情 ===")
         parts.append("\n".join(failures).strip())
+    # A collection error is not a "FAILURES" section: pytest writes an
+    # ``ERRORS`` heading plus ``ERROR collecting ...`` lines.  The old digest
+    # kept only the counts, so the model was fed "[1 error]" and invented a
+    # theory (measured 2026-11-06: it chased a stale ``TaskOut`` bug for ten
+    # rounds while the real error was ``No module named 'httpx'``).
+    errors = next((clean(b) for t, b in sections if t == "ERRORS"), [])
+    error_lines = [line.strip() for line in lines if line.startswith("ERROR ")]
+    if errors or error_lines:
+        parts.append("=== 收集/导入错误 ===")
+        parts.append("\n".join([*error_lines, *errors]).strip())
     counts = "，".join(
         f"{n} {kind}" for n, kind in _PYTEST_COUNT.findall(" ".join(lines[-20:]))
     )

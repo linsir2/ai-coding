@@ -362,6 +362,33 @@ def test_pytest_feedback_carries_the_failed_list():
     assert "18 failed" in digest
 
 
+def test_pytest_feedback_carries_collection_errors_not_just_the_count():
+    """A collection error is under ``ERRORS``, not ``FAILURES`` (2026-11-06).
+
+    The driver used to emit only ``[1 error]`` for this shape, so the model
+    never saw *which* import failed and spent ten rounds chasing a stale theory.
+    """
+    lines = [
+        "============================= test session starts =============================",
+        "collected 0 items / 1 error",
+        "==================================== ERRORS ====================================",
+        "__________________ ERROR collecting backend/tests/test_api.py __________________",
+        "backend/tests/test_api.py:2: in <module>",
+        "    from fastapi.testclient import TestClient",
+        "E   ModuleNotFoundError: No module named 'httpx'",
+        "=========================== short test summary info ============================",
+        "ERROR backend/tests/test_api.py - ModuleNotFoundError: No module named 'httpx'",
+        "!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!",
+        "1 error in 0.35s",
+    ]
+
+    digest = _pytest_digest()("\n".join(lines))
+
+    assert "httpx" in digest, "the model must see the missing module"
+    assert "ERROR collecting" in digest
+    assert "1 error" in digest
+
+
 # ---- #15: the attempts ledger ------------------------------------------
 
 
