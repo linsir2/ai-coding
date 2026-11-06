@@ -1,0 +1,314 @@
+# 代码评审（2026-11-06）
+
+范围：运行时主链路（回合循环 / 工具面 / 持久化 / 审批与沙箱边界），只做代码层评审，
+不评价产品形态。每条都给出**可复现证据**与**修复方案**，按严重度排序。
+
+---
+
+## 0. 结论摘要
+
+| # | 问题 | 严重度 | 直接影响 |
+|---|---|---|---|
+| 1 | 后台任务写入回执与内存会话「丢更新」 | P1 | 撤销/证据账本丢失，下一次保存把磁盘上的回执覆盖掉 |
+| 2 | write/edit 覆盖非原子 + 检查与写之间的 TOCTOU | P1 | 崩溃留下半截文件；并发写入静默丢失 |
+| 3 | 只读 bash 判定把「写文件」命令当成 look | P2 | 停滞阶梯失明（`2>f`、`git branch -D`、`env rm` 等） |
+| 4 | sessions 目录里一个合法 JSON 非对象就崩 `/resume` | P2 | `list_sessions`/`resolve`/`load` 抛 AttributeError |
+| 5 | 计划文件的 stale-read 键空间不一致 | P2 | 符号链接工作区下，刚读过的计划文件被误判 never_read |
+| 6 | skill review 的 task 无强引用，且游标会跳过消息 | P2 | 后台评审可能被 GC 掉；评审期间的新消息永远不会被评审 |
+| 7 | `load("")` / `resolve("")` 与注释契约相反 | P3 | 空 id 会匹配唯一会话；前缀为空的候选列表返回全部 |
+| 8 | 原子写的临时文件名是固定的 | P3 | 两个进程写同一会话/标记时互相搬走对方的 tmp |
+| 9 | `asyncio.wait` 取消与完成同 tick 时取消优先 | P3 | 已成功的工具结果被当成 cancelled 丢弃 |
+
+CI 已恢复全绿（见 §1）。每一项的修复方案都在 §2，建议按 P1 → P2 → P3 分批，
+每批配一条**先失败后通过**的单测。
+
+---
+
+## 1. CI 失败与修复记录（已推送 `ecb1922`）
+
+- 失败任务：`unit (3.10)` 与 `unit (3.13)`，同一个测试
+  `tests/test_trace_recorder.py::test_a_continuation_batch_gets_its_own_span_namespace`。
+- 失败断言：`lines[4]["span"] == "b2-step1"`，实际 `"step1"`。
+- 根因：`7291ff2` 给 `TraceRecorder._describe` 加 `nested` 区分时，把非嵌套分支也写成了
+  `f"step{event.index}"`；续跑批次的 `ModelStepFinished` 因此丢掉前缀。
+- 修复：nested 用 `step{i}`（子循环自己的命名空间），非嵌套回到
+  `self._span("step", i)` / `self._span("i", i)`。
+- 验证：本地 `pytest -q -m "not integration and not live"`、`ruff check .`、`mypy ai_coding`
+  全通过；GitHub Actions 9 个 job 全绿。
+
+---
+
+## 2. 实质性问题
+
+### 2.1 P1 后台任务回执与内存会话丢更新
+
+**证据**
+
+- [agent_loop.py:2336-2347](../ai_coding/core/agent_loop.py#L2336-L2347)：只有
+  「当前会话相同 **且** turn_lock 已被持有」才写内存；其余情况走
+  `self.sessions.mutate(session_id, apply)`，只写磁盘。
+- [turn_close.py:203-215](../ai_coding/core/turn_close.py#L203-L215)：回合结束/checkpoint
+  保存的是**内存里的整个 SessionData**。
+- [session_service.py:344-360](../ai_coding/service/session_service.py#L344-L360)：
+  `mutate` 从磁盘读、改、写，完全不碰调用方手里的那个对象。
+
+后台 bash 作业在**回合之间**完成时，回执写进磁盘；应用/循环仍持有旧的
+`state.session`，下一回合的保存会把磁盘上的回执覆盖掉。丢失的是
+`effects`（文件写/删回执），后果是撤销证据与 stale-read 账本失效，而且
+没有任何日志提示。
+
+**修复方案（二选一，推荐 A）**
+
+A. 在回调里同时对齐内存：
+
+```python
+active = self._active_session
+if active is not None and active.session_id == session_id:
+    apply(active)                 # 同一事件循环内，安全
+    self._late_effects_dirty = True
+    if not self._turn_lock.locked():
+        self.sessions.mutate(session_id, apply)   # 也落盘
+    return
+self.sessions.mutate(session_id, apply)
+```
+
+`record_effect` 按 path 覆盖、seq 取 max（[effects.py:48-85](../ai_coding/domain/effects.py#L48-L85)），
+所以对内存和磁盘各应用一次是幂等的。
+
+B. 让 `SessionService.save` 变成「带版本合并」：保存时先读盘、按 message id/effect seq
+合并再写。改动面大，且需要所有调用方配合，不推荐现在做。
+
+**验收测试**：构造一个会话，先 `save`，再 `mutate` 加一条 effect，然后用**旧对象**再
+`save`；断言 `load()` 后 effect 仍在（当前实现会失败）。
+
+---
+
+### 2.2 P1 write/edit 非原子写与 TOCTOU
+
+**证据**
+
+- [write_tool.py:179-189](../ai_coding/tools/write_tool.py#L179-L189)：`target.write_text`
+  就地截断；写到一半崩溃 = 半截文件。stale 检查（165 行）与真正写入之间没有任何
+  重新校验。
+- [edit_tool.py:192-226](../ai_coding/tools/edit_tool.py#L192-L226)：`check` → `read_text`
+  → `replace` → `write_text`，全程不在同一个 fd/版本上；期间外部写入会被静默覆盖。
+
+这两个工具是模型改代码的唯一入口，长任务里同时存在用户、子代理和 bash 作业，
+TOCTOU 不是理论问题。
+
+**修复方案**
+
+1. 覆盖写改为「同目录临时文件 + fsync + `os.replace`」：
+
+```python
+tmp = tempfile.NamedTemporaryFile(
+    "wb", dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False
+)
+try:
+    tmp.write(content.encode("utf-8"))
+    tmp.flush(); os.fsync(tmp.fileno())
+finally:
+    tmp.close()
+os.replace(tmp.name, target)
+```
+
+2. edit 改为单 fd 流程：`open_inside` 拿 fd → `os.fstat` 记 pre → 从 fd 读全文 →
+   apply → 写临时文件 → `os.replace` 前按 path 再 `os.stat` 一次，与 pre 的
+   `(mtime_ns, size, ino)` 比对；不一致返回 `stale_read`，临时文件删除，原文件保持。
+3. `append` 保持 `O_APPEND`（单次 `os.write` 是原子追加），不要走临时文件。
+4. `_write_plan_file` 已经是 fd 流程，补上同样的 replace 前二次校验即可。
+
+**验收测试**：`pytest` 用 monkeypatch 在 `write_text`/`os.replace` 前后注入一次外部
+修改，断言返回 `stale_read` 且目标文件内容等于外部写入（没有被覆盖）。
+
+---
+
+### 2.3 P2 只读 bash 判定把写命令当成 look
+
+**证据**：[turn_books.py:133-174](../ai_coding/core/turn_books.py#L133-L174)。
+实测（当前 HEAD）：
+
+```
+True   ls 2>err.log          # fd 重定向被负向后顾排除
+True   ls &>err.log          # &> 同样被排除
+True   git branch -D feat    # _GIT_READ_SUBCOMMANDS 含 branch，不看参数
+True   git branch new
+True   env FOO=1 rm -rf x    # env/command 是程序启动器
+True   command rm -rf x
+True   sort -o out.txt in.txt
+True   find . -fprint out.txt
+True   date -s 2020-01-01
+```
+
+`_is_look` 用它决定「这一步只是查看」，而停滞阶梯依赖这个分类；一条删除分支或
+重定向写文件的命令被算作 look，正是 R4-1 想消灭的「核验循环失明」的另一种形态。
+
+**修复方案**
+
+1. 重定正则改为 `re.compile(r">>?\s*([^\s&|;]+)")`（`2>&1` 的目标以 `&` 开头，
+   本来就不会匹配；现有 target 白名单保留）。
+2. 把「纯读程序」与「可携带写参数的程序」分开：
+   - `sort` 拒绝 `-o` / `--output`；
+   - `find` 拒绝 `-fprint` / `-fprint0` / `-fprintf` / `-fls`（并入现有
+     `_FIND_MUTATING_FLAGS`）；
+   - `date` 拒绝 `-s` / `--set`；
+   - `git branch` 只允许无参数或只读旗标（`-a/-r/-v/--list/--show-current`），
+     `git log`/`git diff` 拒绝 `--output`；
+   - `env`、`command` 从白名单移除（`printenv` 已覆盖读环境；`command -v` 可单独放行）。
+3. 判定保持「拿不准就是 action」，不要为了少几次 look 放宽。
+
+**验收测试**：上表每条一个 case；另加 `cat /dev/null 2>&1` 仍是 look 的负例。
+
+---
+
+### 2.4 P2 合法 JSON 非对象会让会话扫描崩溃
+
+**证据**：[session_service.py:408-427](../ai_coding/service/session_service.py#L408-L427)
+直接 `data.get("messages")`，只捕获 `ValueError/OSError`；合法 JSON 数组/字符串会抛
+`AttributeError`。[load:362-366](../ai_coding/service/session_service.py#L362-L366) 同理。
+
+复现：
+
+```
+$ mkdir sessions; echo '["hello"]' > sessions/notasession.json
+>>> service.list_sessions()
+AttributeError: 'list' object has no attribute 'get'
+```
+
+后果是 `/resume`、`resolve`、`mutate` 全部不可用，一个无关文件就能让会话列表瘫掉。
+
+**修复方案**
+
+- `list_sessions` 解析后先 `if not isinstance(data, dict): continue`；
+- `load` 先判 `isinstance(data, dict)`，否则当作 miss 返回 `None`；
+- `_read_pending_*` 已有类似判断，保持；
+- 补测试：合法数组、合法字符串、合法数字三种文件各放一个，列表仍返回其余会话。
+
+---
+
+### 2.5 P2 计划文件的 stale-read 键空间不一致
+
+**证据**
+
+- 读：`self._sandbox.resolve(path_str)`（全程 `Path.resolve()`）后
+  `tracker.record(target)` → 键是解析后的绝对路径
+  （[read_tool.py:111-269](../ai_coding/tools/read_tool.py#L111-L269)）。
+- 计划写：[write_tool.py:250-282](../ai_coding/tools/write_tool.py#L250-L282) 用
+  `opened.path = root_path.joinpath(*parts)`，**不 resolve**，并特意用
+  `check_stat(opened.path)` / `record_stat(opened.path)`。
+
+当工作区路径本身是符号链接（macOS `/tmp`、用户软链目录）时，两个键不相等：
+读过的计划文件在下一次覆盖写时被判 `NEVER_READ`，模型会收到「必须先读」的
+错误指令，而它刚刚读过。
+
+**修复方案**：键统一为 `target`（`sandbox.resolve` 已经解析过，且已做过
+`relative_to_root` 词法检查）；fd 仍用 `open_inside` 保证写入边界。这样既保留
+「按 fd 写」的安全属性，也让键与 `read` 一致。`edit_tool._edit_plan_file` 同样处理。
+
+**验收测试**：用 `tmp_path` 的软链作为 workspace，读计划文件后 plan 模式覆盖写，
+断言成功而不是 `must_read_first`。
+
+---
+
+### 2.6 P2 skill review 的后台任务
+
+**证据**：[agent_loop.py:1996-2025](../ai_coding/core/agent_loop.py#L1996-L2025)
+
+```python
+asyncio.create_task(self._run_skill_review(session), name=...)
+...
+delta = session.messages[cursor:]
+result = await run_skill_review(messages=delta, ...)
+if result.created:
+    session.skill_review_cursor = len(session.messages)
+```
+
+两个问题：
+
+1. 任务没有强引用。asyncio 只保留弱引用，事件循环在极端情况下可以在任务完成前
+   把它回收（CPython 文档明确要求保存引用）。同文件里的 harvest 已经用
+   `self._harvest_task` 做了正确示范（[agent_loop.py:1960](../ai_coding/core/agent_loop.py#L1960)）。
+2. 游标在 `await` **之后**取 `len(session.messages)`。评审期间新追加的消息既没被
+   这次评审看到，又会被游标跳过，永远不会再评审。若评审失败，游标不前进，
+   下一次会把同一段重放（可接受）。
+
+**修复方案**
+
+```python
+start = len(session.messages)
+delta = session.messages[cursor:start]
+...
+self._skill_review_task = asyncio.create_task(...)   # 链式，像 harvest
+...
+if result.created:
+    session.skill_review_cursor = start
+```
+
+并在 `aclose()` / 会话切换时等待或取消该任务（与 `flush_harvest` 同款）。
+
+**验收测试**：在 `run_skill_review` 里 await 一个事件，期间向 `session.messages`
+追加一条；放行后断言 `skill_review_cursor == start`，且那条消息留待下一次评审。
+
+---
+
+### 2.7 P3 `load("")` / `resolve("")` 与注释契约相反
+
+**证据**：[session_service.py:383-406](../ai_coding/service/session_service.py#L383-L406)
+和 [_check_id:37-46](../ai_coding/service/session_service.py#L37-L46) 的注释都写着
+「空串保持 `load("") is None` 的行为」，但 `resolve("")` 会匹配所有 id
+（`startswith("")` 恒真），只有一个会话时 `load("")` 直接返回它。已实测复现。
+
+**修复方案**：`resolve` 开头 `if not prefix: return []`；`load` 开头
+`if not session_id: return None`。同时给 `resolve` 加上「空串」测试。
+
+---
+
+### 2.8 P3 原子写的临时文件名固定
+
+**证据**：[session_service.py:163-165](../ai_coding/service/session_service.py#L163-L165)、
+[188-209](../ai_coding/service/session_service.py#L188-L209)、[229-247](../ai_coding/service/session_service.py#L229-L247)、
+[283-292](../ai_coding/service/session_service.py#L283-L292) 全部使用
+`path.with_suffix(".tmp")`；[save:341-342](../ai_coding/service/session_service.py#L341-L342) 同样。
+
+同一进程内由 RLock 串行化，但 CLI 与服务端两个进程共享 sessions 目录时，两个写者
+会抢同一个临时文件名：A 写 tmp → B 写 tmp → A `os.replace` 把 B 正在写的文件搬走，
+B 随后 replace 失败（`OSError` 被吞掉）→ 一次更新静默丢失。
+
+**修复方案**：统一走 `tempfile.NamedTemporaryFile(dir=target.parent, delete=False,
+prefix=f".{target.name}.", suffix=".tmp")` + `fsync` + `os.replace`。顺带给 `save`
+补 `fsync`（当前只有 replace，没有落盘保证）。
+
+---
+
+### 2.9 P3 deadline 等待的完成/取消竞争
+
+**证据**：[deadline.py:171-180](../ai_coding/infra/deadline.py#L171-L180)：`asyncio.wait`
+返回后先判 `watcher in done`，再判 `task in done`。两者同 tick 完成时（旧取消事件
+已经 set，工具恰好成功），结果被丢弃并返回 `RunCancelled`。
+
+**修复方案**：先判 `task in done` 并 `return task.result()`，再判 watcher。语义是
+「已经完成的工作优先于迟到的取消」。补一条两者同时完成的单测。
+
+---
+
+## 3. 修复顺序建议
+
+1. **批次 A（P1，先做）**：2.1 内存/磁盘对齐 + 2.2 write/edit 原子写与二次校验。
+   这两项都直接落在长任务高频路径上，且各有一条可写的回归测试。
+2. **批次 B（P2）**：2.3 分类器收紧（只读程序参数表）、2.4 会话 JSON 类型防御、
+   2.5 键空间统一。
+3. **批次 C（P2/P3）**：2.6 skill review 任务链、2.7/2.8 会话服务小修、2.9 deadline 顺序。
+
+每批独立提交、独立跑 `pytest -m "not integration and not live"` + `ruff` + `mypy`，
+推上去看 CI 再进下一批；不要在长任务复跑前把多批混在一次提交里。
+
+---
+
+## 4. 复跑与观测口径（供 14 轮压力任务使用）
+
+- 指标沿用前几轮：每轮耗时/工具数/门禁、`read_repeats`、`duplicate_call` 拒绝数、
+  `ContextCompacted` 次数、`turn-*.jsonl` 的 span 是否仍重复、`todo_write` 失败码
+  （`unknown_id` / `completion_unverified` / `override_unavailable`）。
+- 日志按 `grep -c` 统计：`ERROR|Traceback|approval_timeout|tool_timeout|
+  content_too_large|stale_read|must_read_first`。
+- 本轮新加观测点：`late_effect` 回执是否在磁盘会话里出现（2.1 的现场证据）。
