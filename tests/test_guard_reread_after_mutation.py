@@ -89,6 +89,30 @@ def test_a_bash_command_may_repeat_after_a_mutation():
     assert repeat.verdict.value == "deny"
 
 
+def test_an_advisory_bash_may_repeat_after_a_mutation():
+    """Production guards are advisory, and a bash call still mutates the world.
+
+    The strict branch already had the repair-loop escape; the advisory branch
+    refused at the threshold before consulting it, so `edit` -> re-run the
+    build cost an extra iteration (measured live 2026-11-06).
+    """
+    guard = DuplicateCallGuard(threshold=1, advisory=True)
+    _success(guard, _bash("b1"))
+
+    history = [
+        _assistant_call("b1", "bash"),
+        _tool_result("b1"),
+        _assistant_call("w1", "write"),
+    ]
+    view = TurnView(mutates_world=True)
+    decision = guard.check(_bash("b2"), _ctx(history), view)
+    assert decision.verdict.value == "allow", "the workspace changed; re-run"
+
+    no_mutation = [_assistant_call("b1", "bash"), _tool_result("b1")]
+    repeat = guard.check(_bash("b3"), _ctx(no_mutation), view)
+    assert repeat.verdict.value == "deny"
+
+
 def test_a_reread_without_a_mutation_is_still_a_duplicate():
     guard = DuplicateCallGuard(threshold=1)
     _success(guard, _read("r1"))

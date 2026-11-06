@@ -2470,15 +2470,16 @@ class AgentLoop:
                 # side-effecting call is answered from the record.
                 write_ahead=write_ahead,
                 # Plan-as-Goal: the proof command runs at the item boundary.
-                # C-0/C-1: the codex path opts into it via ``plan_verify_items``.
+                # ``plan_verify_items`` is update_plan's opt-in (it drops the
+                # field when off), but todo_write's ``verify`` is advertised in
+                # every session -- without a callback the gate answered
+                # "verify 未接线" and a model that followed the advice could
+                # never complete the item (measured live 2026-11-06:
+                # completion_unverified -> verify unavailable -> blocked).
                 verify_item=(
-                    (
-                        lambda item_id, statement, command: self._verify_plan_item(
-                            session, item_id, statement, command
-                        )
+                    lambda item_id, statement, command: self._verify_plan_item(
+                        session, item_id, statement, command
                     )
-                    if getattr(session, "plan_verify_items", False)
-                    else None
                 ),
                 plan_verify_items=bool(
                     getattr(session, "plan_verify_items", False)

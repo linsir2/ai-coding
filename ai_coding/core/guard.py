@@ -326,7 +326,17 @@ class DuplicateCallGuard:
             # Side-effecting edits stay strict: a duplicate write is not a
             # harmless poll, and an earlier result is not a value to reuse.
             # Everything else gets advisory reminders only (DeepSeek parity).
+            # A bash command is the exception: re-running the suite after an
+            # edit is the repair loop, so the same "the workspace changed"
+            # escape the strict branch gives bash applies here too.  Measured
+            # live 2026-11-06 (ws-fullstack6 turn 3): edit -> `npm run build`
+            # was refused because the older build still counted, and the model
+            # spent an extra iteration rewording the command.
             if view.mutates_world:
+                if call.name.lower() == "bash" and _mutated_after_read(
+                    ctx.messages, succeeded, ignore_call_id=call.id
+                ):
+                    return GuardDecision(GuardVerdict.ALLOW)
                 if count >= self.threshold:
                     return self._refusal(call, succeeded[0], count)
                 return GuardDecision(GuardVerdict.ALLOW)

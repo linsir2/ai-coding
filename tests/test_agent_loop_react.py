@@ -617,6 +617,43 @@ async def test_todo_write_updates_session_task(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_todo_completion_runs_the_verify_command_outside_plan_mode(tmp_path):
+    """todo_write's ``verify`` is advertised in every session, so it must run.
+
+    Before this wiring the gate answered "verify 未接线" and a model that
+    supplied the very proof the schema asks for could never complete the item;
+    it then marked the item blocked (measured live 2026-11-06).
+    """
+    engine = ScriptedEngine(
+        [
+            _calls(
+                _ref(
+                    "c1",
+                    "todo_write",
+                    '{"action":"add","content":"ship it","id":"1","verify":"true"}',
+                )
+            ),
+            _calls(
+                _ref(
+                    "c2",
+                    "todo_write",
+                    '{"action":"update","id":"1","status":"completed"}',
+                )
+            ),
+            _text("done"),
+        ]
+    )
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(engine, sessions, workspace=str(tmp_path))
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+
+    assert session.task is not None
+    assert session.task.items[0].status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_task_updated_event_emitted(tmp_path):
     engine = ScriptedEngine(
         [
