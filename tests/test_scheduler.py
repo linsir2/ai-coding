@@ -587,6 +587,51 @@ def test_runner_event_writes_base_and_commit_error_to_the_journal(tmp_path):
     assert state.is_terminal is True
 
 
+def test_a_settled_child_can_open_a_follow_up_turn(tmp_path):
+    """``send_message`` on an idle child starts a new turn on the *same* handle.
+
+    The first turn settles the record, and ``on_turn_start`` used to reject it
+    through ``accepts()`` (which answers "is this a late settlement?").  The
+    caller got ``running`` while the turn returned ``stale task`` and the
+    message was drained unread.  Only the fence decides turn admission.
+    """
+    scheduler, _ = _scheduler()
+    request = TaskRequest.for_child(_task(), name="probe")
+    record = scheduler._begin(request, kind="child")
+
+    scheduler.on_runner_event(
+        record.task_id, record.run_id, "completed", record.fence,
+    )
+    assert record.state == "settled"
+
+    assert scheduler.on_turn_start(record.task_id, record.fence, turn=2) is True
+    assert record.state == "running"
+    # A different claim still owns nothing here: the fence is the admission.
+    assert scheduler.on_turn_start(record.task_id, record.fence + 1, turn=2) is False
+    # The follow-up settles like any other turn (the record is not terminal).
+    scheduler.on_runner_event(
+        record.task_id, record.run_id, "completed", record.fence,
+    )
+    assert record.state == "settled"
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_report_a_finished_child_as_stopped():
+    """``resume`` never starts a turn (Codex semantics); a settled first turn is
+    exactly the state a child is resumed from, so it must reach the runner."""
+    scheduler, runner = _scheduler()
+    request = TaskRequest.for_child(_task(), name="probe")
+    record = scheduler._begin(request, kind="child")
+    scheduler.on_runner_event(
+        record.task_id, record.run_id, "completed", record.fence,
+    )
+
+    status, _run_id = await scheduler.resume(record.task_id)
+
+    assert status == "idle"
+    assert runner.resumed, "the runner owns the resume; the scheduler must not short-circuit it"
+
+
 @pytest.mark.asyncio
 async def test_merge_source_uses_the_journal_after_restart(tmp_path):
     journal = TaskJournal(tmp_path)

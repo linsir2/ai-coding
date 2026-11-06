@@ -17,6 +17,7 @@ from ai_coding.core.guard import (
     TurnView,
 )
 from ai_coding.domain.message import ToolCallRef, ToolResult
+from ai_coding.security.approval import ApprovalResult
 from ai_coding.security.permission_gate import Decision, PermissionDecision, PermissionGate
 from ai_coding.tools.base import BaseTool, ToolContext
 from ai_coding.tools.registry import ToolRegistry
@@ -110,6 +111,48 @@ async def test_a_benign_rewrite_runs_and_is_recorded():
     assert result.data["rewritten_from"] == {"command": "ls"}
     assert result.data["rewritten_by"] == "guard:rewriter"
     assert "adjusted before execution" in result.output
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_that_escalates_to_warn_asks_the_operator():
+    """The approval level belongs to the parameters that will run.
+
+    ``verdict`` used to keep the pre-rewrite value, so a rewrite from an ALLOW
+    call to a WARN one executed straight through the approval block.
+    """
+
+    class _WarnGate(_CountingGate):
+        def check(self, tool_name, params, **kwargs):  # type: ignore[no-untyped-def]
+            self.calls.append((tool_name, dict(params)))
+            if "touch .env" in str(params.get("command", "")):
+                return Decision(PermissionDecision.WARN, "writes a secret file")
+            return Decision(PermissionDecision.ALLOW, "")
+
+    asked: list[str] = []
+
+    class _Approval:
+        async def approve(self, tool, params, reason):  # type: ignore[no-untyped-def]
+            asked.append(str(params.get("command", "")))
+            return ApprovalResult.YES
+
+    gate = _WarnGate()
+    tool = _Bash()
+    registry = ToolRegistry()
+    registry.register(tool)
+    dispatcher = ToolDispatcher(
+        registry,
+        gate,
+        approval=_Approval(),
+        guards=GuardChain([_Rewriter("touch .env")]),
+    )
+
+    await dispatcher.dispatch_batch(
+        [ToolCallRef(id="c1", name="bash", arguments='{"command":"ls"}')],
+        ToolContext(workspace="/tmp/ws"),
+    )
+
+    assert asked == ["touch .env"], "the escalated call must be asked about"
+    assert tool.commands == ["touch .env"]
 
 
 @pytest.mark.asyncio

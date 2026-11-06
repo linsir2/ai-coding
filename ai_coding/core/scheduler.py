@@ -624,9 +624,10 @@ class Scheduler:
         )
 
     async def resume(self, target: str) -> tuple[str, str]:
-        record = self._record_for(target)
-        if record is not None and record.state in TERMINAL_EVENTS:
-            return "stopped", record.run_id or target
+        # ``resume`` makes a child usable again; it never starts a turn.  A
+        # settled record is exactly the state a finished first turn leaves
+        # behind, so refusing it here made the documented "resume, then send"
+        # flow unreachable (Codex semantics: resume is not a turn).
         return cast(
             tuple[str, str], await self._runner.resume(self._run_id_for(target))
         )
@@ -724,11 +725,23 @@ class Scheduler:
         return record.fence == fence and record.state not in TERMINAL_EVENTS
 
     def on_turn_start(self, task_id: str, fence: int, turn: int) -> bool:
-        if not self.accepts(task_id, fence):
-            return False
+        """Open one turn on an existing task; False means a stale fence.
+
+        A child keeps its handle across turns (``send_message`` on an idle
+        agent starts a new turn), and its first turn settles the record.  The
+        terminal-state half of ``accepts`` answers a different question — "is
+        this a late settlement for a run that is already over?" — so reusing it
+        here made every follow-up turn return ``stale task`` while
+        ``send_message`` reported ``running``.  Only the fence is the turn
+        admission: it names the run, and a mismatched fence still belongs to a
+        different claim.  Late settlements stay gated in ``on_runner_event``
+        because a *reopened* record is no longer terminal.
+        """
         record = self._records.get(task_id)
         if record is None:
             return True
+        if record.fence != fence:
+            return False
         record.turn = turn
         record.state = "running"
         self._journal.append(

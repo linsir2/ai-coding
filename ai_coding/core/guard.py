@@ -480,20 +480,21 @@ class DuplicateCallGuard:
     def after(
         self, call: ToolCall, result: ToolResult, ctx: ToolContext, view: TurnView
     ) -> ToolResult:
-        """Count a call that worked; forget one that didn't.
+        """Remember a call that succeeded.
 
-        A failure deletes the fingerprint instead of adding to it, so a model
-        that fixes its arguments and retries pays nothing for the attempt that
-        taught it the fix.
+        A failure deliberately leaves the success history alone.  The dispatcher
+        feeds guard *refusals* here too (so the failed-repeat counter stays
+        honest), and a refusal is ``success=False``: popping the fingerprint
+        would let "succeed N times → get refused → succeed N times" loop for
+        ever, which is the exact budget this guard exists to spend.  A failed
+        attempt teaches nothing about how many times the call already worked.
         """
         del ctx, view
         if self.threshold <= 0:
             return result
-        fingerprint = call_fingerprint(call)
         if result.success:
+            fingerprint = call_fingerprint(call)
             self._successes.setdefault(fingerprint, []).append(call.id)
-        else:
-            self._successes.pop(fingerprint, None)
         return result
 
 

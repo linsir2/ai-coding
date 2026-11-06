@@ -648,7 +648,14 @@ class ToolDispatcher:
             call = replace(call, params=dict(guard_decision.params or {}))
             item = replace(item, call=call, tool=item.tool)
             recheck = self._check(item.tool, call, ctx)
-            if _verdict(recheck) is PermissionDecision.DENY:
+            # The rewritten parameters are the ones that will run, so their
+            # verdict replaces the one taken before the rewrite.  Keeping the
+            # old value let a rewrite escalate ALLOW to WARN and still execute
+            # without ever asking the operator (the WARN block below reads
+            # ``verdict``).
+            verdict = _verdict(recheck)
+            reason = _reason(recheck)
+            if verdict is PermissionDecision.DENY:
                 # A rewrite must never be a way around the static gate.
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
             # P1b: the write boundary is a fact about the *new* parameters.
@@ -682,7 +689,11 @@ class ToolDispatcher:
             call = replace(call, params=dict(hook_decision.params or {}))
             item = replace(item, call=call, tool=item.tool)
             recheck = self._check(item.tool, call, ctx)
-            if _verdict(recheck) is PermissionDecision.DENY:
+            # Same rule as the guard rewrite: the approval level belongs to the
+            # parameters that will run, not to the ones the hook replaced.
+            verdict = _verdict(recheck)
+            reason = _reason(recheck)
+            if verdict is PermissionDecision.DENY:
                 return self._denied(call, _reason(recheck), rewritten=True), True, False
             # P1b: a hook rewrite is a parameter rewrite too; the read-only
             # boundary must be re-asked with the parameters that will run.

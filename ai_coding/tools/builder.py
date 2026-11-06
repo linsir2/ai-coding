@@ -418,7 +418,11 @@ def _assemble_registry(
 
         registry.register(
             UpdatePlanTool(
-                verify_items=bool(getattr(app_cfg, "plan_verify_items", False))
+                # The switch lives on ``AIConfig`` (``ai.plan_verify_items``).
+                # Reading it off ``AppConfig`` returned False forever, so the
+                # ``verify`` field never appeared in the schema even when the
+                # operator had turned it on.
+                verify_items=bool(getattr(ai_cfg, "plan_verify_items", False))
             )
         )
 

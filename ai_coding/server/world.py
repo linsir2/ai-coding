@@ -120,6 +120,7 @@ def find_armed_session(sessions: Any) -> Any | None:
 async def build_world(path: str | None, workspace: str, skills: str | None) -> AppWorld:
     """Build config -> engine -> registry -> MCP -> loop (never starts a UI)."""
     from ai_coding.cli import (
+        _build_gate,
         _build_loop,
         _build_tool_registry,
         _extra_roots,
@@ -214,10 +215,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     # object.  A static tuple here would snapshot the writable face and break
     # the invariant ``builder.py`` claims (a directory the file tools may write
     # is one a bash command may write, and never one or the other).
-    from ai_coding.security.permission_gate import PermissionGate
     from ai_coding.security.sandbox import Sandbox
 
-    gate = PermissionGate.from_config(app_cfg, workspace=workspace)
+    # E-5: the gate resolves skill spellings through the registry, exactly as
+    # the REPL's ``_build_gate`` does.  Building it with the bare
+    # ``from_config`` left ``ai.skill_permissions`` keys written against an
+    # alias unenforced in the TUI (the catalog denied the skill, the gate let
+    # the model read it).
+    gate = _build_gate(app_cfg, workspace, skill_registry)
     sandbox = Sandbox(
         workspace,
         extra_roots=_extra_roots(app_cfg, workspace),

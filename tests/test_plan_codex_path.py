@@ -541,3 +541,31 @@ async def test_the_loop_outcome_carries_the_salvaged_plan_text(tmp_path):
 
     assert answer == f"<proposed_plan>\n{plan}\n</proposed_plan>"
     assert not engine._steps
+
+
+# ------------------------------------------------- 7. the tool-surface wiring
+
+
+def test_plan_verify_items_is_read_from_the_ai_section(tmp_path):
+    """``ai.plan_verify_items`` is the switch; reading it off ``AppConfig``
+    returned False forever, so the ``verify`` field never reached the schema."""
+    import json
+
+    from ai_coding.config.models import AppConfig
+    from ai_coding.tools.builder import build_tool_registry
+
+    on = build_tool_registry(
+        AppConfig(
+            models={}, default_model="", ai=AIConfig(plan_verify_items=True)
+        ),
+        str(tmp_path), None, include_subagent=True,
+    )
+    assert "verify" in json.dumps(on.get("update_plan").params_json_schema)
+
+    off = build_tool_registry(
+        AppConfig(
+            models={}, default_model="", ai=AIConfig(plan_verify_items=False)
+        ),
+        str(tmp_path), None, include_subagent=True,
+    )
+    assert "verify" not in json.dumps(off.get("update_plan").params_json_schema)

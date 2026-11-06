@@ -407,6 +407,25 @@ def test_duplicate_guard_a_denied_call_does_not_clear_the_budget():
         assert guard.check(third, ctx, view).verdict is GuardVerdict.DENY
 
 
+def test_a_refusal_result_does_not_clear_the_duplicate_budget():
+    """The dispatcher feeds guard refusals to ``after`` so the failed-repeat
+    counter stays honest; a refusal is ``success=False`` and must not erase
+    what the call already did.  Popping made "succeed N → refused → succeed
+    N" loop for ever, which is the budget this guard exists to spend."""
+    guard = DuplicateCallGuard(threshold=2)
+    view = TurnView()
+    ctx = _visible("a", "b", "c")
+    for call_id in ("a", "b"):
+        call = _call("read", call_id=call_id, path="x")
+        guard.after(call, _ok(), ctx, view)
+    third = _call("read", call_id="c", path="x")
+    assert guard.check(third, ctx, view).verdict is GuardVerdict.DENY
+    guard.after(third, _fail(), ctx, view)  # the refusal itself
+    assert guard.check(third, ctx, view).verdict is GuardVerdict.DENY, (
+        "the refusal must leave the duplicate-success budget intact"
+    )
+
+
 # ---- BashPolicyGuard -------------------------------------------------------
 
 

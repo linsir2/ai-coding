@@ -1656,6 +1656,11 @@ class AgentLoop:
         # would leave a session that had one bad minute permanently unable to
         # summarise, with the delta growing until paging has to drop it.
         session.compaction_failures = 0
+        # M7's one-chance retry for a thinking-only step is also per turn (the
+        # field is persisted, and the docstring on it says so).  Not resetting
+        # it made the first such step consume the retry for the whole session:
+        # every later thinking-only step failed the turn immediately.
+        session.thinking_retries = 0
         # R20/RC-7: one correction chance per turn's answer.
         session.claim_retries = 0
         # R3-1: the "already read" pointer may only be repeated once per range
