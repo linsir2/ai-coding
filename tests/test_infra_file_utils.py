@@ -1,3 +1,7 @@
+import os
+
+import pytest
+
 from ai_coding.infra import file_utils as fu
 
 
@@ -59,3 +63,32 @@ def test_get_file_size(tmp_path):
     p = tmp_path / "s.txt"
     fu.write_file(p, "12345")
     assert fu.get_file_size(p) == 5
+
+
+def test_write_text_atomic_replaces_whole_content_and_cleans_up(tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_text("old", encoding="utf-8")
+    fu.write_text_atomic(p, "new")
+    assert p.read_text(encoding="utf-8") == "new"
+    assert list(tmp_path.glob(".a.txt.*.tmp")) == []
+
+
+def test_write_text_atomic_refuses_a_file_that_changed_after_the_read(tmp_path):
+    p = tmp_path / "a.txt"
+    p.write_text("old", encoding="utf-8")
+    version = fu.file_version(p)
+    p.write_text("someone else wrote this", encoding="utf-8")
+
+    with pytest.raises(fu.FileConflict):
+        fu.write_text_atomic(p, "new", expected_version=version)
+
+    assert p.read_text(encoding="utf-8") == "someone else wrote this"
+    assert list(tmp_path.glob(".a.txt.*.tmp")) == []
+
+
+def test_write_text_atomic_keeps_the_original_mode(tmp_path):
+    p = tmp_path / "run.sh"
+    p.write_text("#!/bin/sh\n", encoding="utf-8")
+    p.chmod(0o755)
+    fu.write_text_atomic(p, "#!/bin/sh\necho hi\n")
+    assert os.stat(p).st_mode & 0o777 == 0o755

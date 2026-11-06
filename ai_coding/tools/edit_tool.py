@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolArtifact, ToolResult
-from ai_coding.infra.file_utils import file_version
+from ai_coding.infra.file_utils import FileConflict, file_version, write_text_atomic
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import (
     Sandbox,
@@ -189,6 +189,10 @@ class EditTool(BaseTool):
                 error="stale_read",
             )
 
+        # The version every line below is computed from.  Re-checked right
+        # before the atomic rename, so a file that changed between the stale
+        # check and this write is refused instead of overwritten.
+        before = file_version(target)
         try:
             text = target.read_text(encoding="utf-8")
         except OSError as exc:
@@ -219,7 +223,13 @@ class EditTool(BaseTool):
         new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
 
         try:
-            target.write_text(new_text, encoding="utf-8")
+            write_text_atomic(target, new_text, expected_version=before)
+        except FileConflict:
+            return ToolResult(
+                success=False,
+                output=stale_message("edit", path_str),
+                error="stale_read",
+            )
         except OSError as exc:
             return ToolResult(success=False, output=f"write error: {exc}")
 

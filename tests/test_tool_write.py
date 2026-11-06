@@ -72,6 +72,27 @@ async def test_write_without_prior_read_denied(setup):
 
 
 @pytest.mark.asyncio
+async def test_write_reports_stale_when_the_file_changed_during_the_call(
+    setup, monkeypatch
+):
+    """The check-to-write window is closed by a second version comparison."""
+    tmp_path, sb, fst, tool = setup
+    p = tmp_path / "f.txt"
+    p.write_text("v1")
+    fst.record(p)
+    from ai_coding.infra import file_utils
+
+    monkeypatch.setattr(file_utils, "file_version", lambda _path: "changed-late")
+
+    result = await tool.execute({"path": "f.txt", "content": "new"})
+
+    assert result.success is False
+    assert result.error == "stale_read"
+    assert p.read_text() == "v1"
+    assert list(tmp_path.glob(".f.txt.*.tmp")) == []
+
+
+@pytest.mark.asyncio
 async def test_write_stale_after_external_modification(setup):
     tmp_path, sb, fst, tool = setup
     p = tmp_path / "f.txt"

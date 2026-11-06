@@ -4,7 +4,18 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
+import tempfile
 from pathlib import Path
+
+
+class FileConflict(Exception):
+    """The file changed after the caller computed its new content.
+
+    Raised by :func:`write_text_atomic` when an ``expected_version`` no longer
+    matches the file on disk.  Distinct from ``OSError`` so a tool can answer
+    ``stale_read`` instead of reporting a plain write failure.
+    """
 
 
 def read_file(path: str | Path) -> str:
@@ -15,6 +26,46 @@ def write_file(path: str | Path, content: str) -> None:
     file_path = Path(path)
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(content, encoding="utf-8")
+
+
+def write_text_atomic(
+    path: str | Path, content: str, *, expected_version: str | None = None
+) -> None:
+    """Replace ``path`` with ``content`` without ever exposing a partial file.
+
+    The bytes go to a temp file in the same directory (so ``os.replace`` is an
+    atomic rename), get flushed and fsynced, and inherit the original mode --
+    ``mkstemp`` creates 0600, which would silently strip a script's executable
+    bit.  ``expected_version`` closes the read-then-write window: a file that
+    changed since the caller computed ``content`` raises :class:`FileConflict`
+    and the temp file is discarded, leaving the other writer's bytes intact.
+
+    The only trace a crash can leave is a stray ``.<name>.*.tmp`` beside the
+    target; the target itself is always either the old file or the new one.
+    """
+    target = Path(path)
+    try:
+        mode_bits = stat.S_IMODE(target.stat().st_mode)
+    except OSError:
+        mode_bits = 0o644
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target.parent), prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, mode_bits)
+        if expected_version is not None and file_version(target) != expected_version:
+            raise FileConflict(f"{target} changed while it was being edited")
+        os.replace(tmp_name, target)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def append_to_file(path: str | Path, content: str) -> None:

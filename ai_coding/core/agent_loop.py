@@ -2334,16 +2334,22 @@ class AgentLoop:
                     )
 
             active = self._active_session
-            if (
-                active is not None
-                and active.session_id == session_id
-                and self._turn_lock.locked()
-            ):
+            if active is not None and active.session_id == session_id:
+                # The app keeps this object across turns, so a receipt applied
+                # to the disk copy alone would be erased by the next save,
+                # which writes the whole in-memory session.  Apply it to both.
+                # ``record_effect`` replaces per path and takes the max seq, so
+                # applying twice is idempotent.
                 apply(active)
-                self._late_effects_dirty = True
+                if self._turn_lock.locked():
+                    # The close's own save (or the late-effects save in its
+                    # ``finally``) will persist it; no extra write point.
+                    self._late_effects_dirty = True
+                    return
+                self.sessions.mutate(session_id, apply)
                 return
-            # Disk is the authority outside the turn (and for a reloaded or
-            # deleted session).
+            # Disk is the authority for a reloaded, deleted, or non-active
+            # session.
             self.sessions.mutate(session_id, apply)
 
         # R2-13: the tool results this request will actually contain.  A read

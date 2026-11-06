@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ai_coding.domain.message import ToolArtifact, ToolResult
-from ai_coding.infra.file_utils import file_version
+from ai_coding.infra.file_utils import FileConflict, file_version, write_text_atomic
 from ai_coding.security.file_state_tracker import FileState, FileStateTracker
 from ai_coding.security.sandbox import (
     Sandbox,
@@ -176,13 +176,23 @@ class WriteTool(BaseTool):
                     error="stale_read",
                 )
 
+        # The version the stale check just approved.  ``write_text_atomic``
+        # compares it again immediately before the rename, so a concurrent
+        # writer in the check-to-write window is reported instead of clobbered.
+        before = file_version(target)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if mode == "append":
                 with target.open("ab") as handle:
                     handle.write(content.encode("utf-8"))
             else:
-                target.write_text(content, encoding="utf-8")
+                write_text_atomic(target, content, expected_version=before)
+        except FileConflict:
+            return ToolResult(
+                success=False,
+                output=stale_message("write", path_str),
+                error="stale_read",
+            )
         except OSError as exc:
             return ToolResult(success=False, output=f"write error: {exc}")
 

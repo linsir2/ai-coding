@@ -90,6 +90,53 @@ async def test_a_subagent_changed_path_becomes_a_parent_receipt(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_late_receipt_survives_the_next_save_of_the_in_memory_session(tmp_path):
+    """A job that settles between turns must reach memory, not just the disk.
+
+    The app keeps ``session`` across turns and every save writes the whole
+    object; a disk-only mutation was erased by the next save (the receipt was
+    there after ``settle`` and gone after ``save``).
+    """
+    from ai_coding.infra.file_utils import file_version
+
+    (tmp_path / "a.py").write_text("a", encoding="utf-8")
+    tool = _Tool("noop")
+    engine = ScriptedEngine([_calls(_ref("n1", "noop")), _text("done")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        _registry(tool),
+        settings=_settings(),
+        workspace=str(tmp_path),
+        approval=AutoApproveCallback(),
+    )
+    session = sessions.create()
+
+    await loop.process_input(session, "go")
+    ctx = tool.contexts[0]
+    assert ctx is not None
+    ctx.settle_effect(
+        session.session_id,
+        [
+            {
+                "path": "a.py",
+                "version": file_version(tmp_path / "a.py"),
+                "kind": "write",
+                "call_id": "late",
+                "seq": 1,
+            }
+        ],
+    )
+
+    assert session.effects.receipt_for("a.py") is not None
+    sessions.save(session)
+    loaded = sessions.load(session.session_id)
+    assert loaded is not None
+    assert loaded.effects.receipt_for("a.py") is not None
+
+
+@pytest.mark.asyncio
 async def test_late_job_receipts_use_disk_authority_and_never_resurrect_a_deleted_session(tmp_path):
     from ai_coding.infra.file_utils import file_version
 

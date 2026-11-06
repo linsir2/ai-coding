@@ -194,7 +194,7 @@ async def test_edit_replace_all(tmp_path):
     assert r.success is True and "2" in r.output
 
 
-async def test_edit_read_oserror_and_write_oserror(tmp_path):
+async def test_edit_read_oserror_and_write_oserror(tmp_path, monkeypatch):
     from ai_coding.tools.edit_tool import EditTool
 
     class _Fresh:
@@ -204,25 +204,8 @@ async def test_edit_read_oserror_and_write_oserror(tmp_path):
         def record(self, target):
             pass
 
-    class _BrokenRead:
-        def is_file(self):
-            return True
-
-        def read_text(self, *a, **k):
-            raise PermissionError("no read")
-
-        def write_text(self, *a, **k):
-            pass
-
-    class _BrokenWrite:
-        def is_file(self):
-            return True
-
-        def read_text(self, *a, **k):
-            return "a b"
-
-        def write_text(self, *a, **k):
-            raise PermissionError("no write")
+    target = tmp_path / "f.txt"
+    target.write_text("a b", encoding="utf-8")
 
     class _Sandbox:
         def __init__(self, target):
@@ -231,12 +214,23 @@ async def test_edit_read_oserror_and_write_oserror(tmp_path):
         def resolve(self, _p):
             return self.target
 
-    rr = await EditTool(_Sandbox(_BrokenRead()), _Fresh()).execute(
+    def _boom_read(self, *_a, **_k):
+        raise PermissionError("no read")
+
+    monkeypatch.setattr("pathlib.Path.read_text", _boom_read)
+    rr = await EditTool(_Sandbox(target), _Fresh()).execute(
         {"path": "f", "old_string": "x", "new_string": "y"}
     )
     assert rr.success is False and "read error" in rr.output
+    monkeypatch.undo()
 
-    wr = await EditTool(_Sandbox(_BrokenWrite()), _Fresh()).execute(
+    # The write path now goes through ``write_text_atomic``, so the failure is
+    # injected there instead of on ``Path.write_text``.
+    def _boom_write(*_a, **_k):
+        raise PermissionError("no write")
+
+    monkeypatch.setattr("ai_coding.tools.edit_tool.write_text_atomic", _boom_write)
+    wr = await EditTool(_Sandbox(target), _Fresh()).execute(
         {"path": "f", "old_string": "a", "new_string": "z"}
     )
     assert wr.success is False and "write error" in wr.output
