@@ -411,15 +411,21 @@ F3/F4 是 trace 可观测性的确定性缺陷，建议下一批处理；F5/F6 �
 
 ---
 
-## 6. 修复后的两次真机复跑（ws7 / ws8）
+## 6. 修复后的三次真机复跑（ws7 / ws8 / ws9）
 
-3 次运行使用同一个任务与配置，模型输出有随机性，结果只能做趋势对比：
+4 次运行使用同一个任务与配置，模型输出有随机性，结果只能做趋势对比：
 
 | 运行 | 代码状态 | 轮次 | 总耗时 | 工具调用 | 压缩 | todo_write 失败 |
 |---|---|---|---|---|---|---|
 | ws6 | R4 修复后 | 3 | 728.5s | 76 | 0 | 7 |
 | ws7 | + F1/F2 | 4 | 772.7s | 143 | 0 | 3 |
 | ws8 | + F1/F2/F7 | 6 | 1226.4s | 156 | 0 | 8 |
+| ws9 | + F8（当前 HEAD） | 3 | 614.8s | 90 | 0 | 2 |
+
+ws9 是修复完成后的最快一次，也是 `todo_write` 失败最少的一次：
+只剩 1 次 `unknown_id`（模型猜错 id，工具已列出真实 id 后重试成功）与
+1 次 `completion_unverified`（第一次没带 files/verify，第二次补上即成功），
+**没有任何 `completion_blocked` 级联**。
 
 ### 6.1 F1/F2 在真机上的验证（ws7）
 
@@ -460,8 +466,9 @@ that proves it)"，`evidence` 字段写的是 "What proves the item is done"。
 修复：description 与 `evidence` 字段都明确写出「完成需要 `files` 或
 `verify`；`evidence` 只是给人看的说明，单独不满足完成」。
 回归测试 `test_the_schema_names_files_or_verify_as_the_completion_proof`。
-ws8 在修复前启动，因此没有覆盖到这一条；下一次复跑应重点看
-`todo_write` 失败数是否从 8 降到 0–1。
+**ws9（当前 HEAD）复验**：`todo_write` 失败从 ws8 的 8 次降到 2 次，
+`completion_blocked` 级联消失；第一次 `completion_unverified` 之后，
+模型在下一个 `update` 里就补上了 `files`/`verify` 并成功。
 
 ### 6.4 仍未解决
 
