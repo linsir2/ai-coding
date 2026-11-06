@@ -52,8 +52,8 @@ async def gate_refuses_completion(tmp: Path) -> tuple[bool, str]:
     await tool.execute({"action": "add", "content": "dep"}, ctx)
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
     result = await tool.execute({"action": "update", "id": "2", "status": "completed"}, ctx)
-    ok = result.error == "blocked_by_dependencies" and task.get("2").status == "pending"
-    return ok, f"error={result.error} status={task.get('2').status}"
+    ok = result.detail == "blocked_by_dependencies" and task.get("2").status == "pending"
+    return ok, f"error={result.detail} status={task.get('2').status}"
 
 
 async def gate_refuses_start(tmp: Path) -> tuple[bool, str]:
@@ -63,8 +63,8 @@ async def gate_refuses_start(tmp: Path) -> tuple[bool, str]:
     await tool.execute({"action": "add", "content": "dep"}, ctx)
     await tool.execute({"action": "add", "content": "next", "depends_on": ["1"]}, ctx)
     result = await tool.execute({"action": "update", "id": "2", "status": "in_progress"}, ctx)
-    ok = result.error == "blocked_by_dependencies" and task.get("2").status == "pending"
-    return ok, f"error={result.error} status={task.get('2').status}"
+    ok = result.detail == "blocked_by_dependencies" and task.get("2").status == "pending"
+    return ok, f"error={result.detail} status={task.get('2').status}"
 
 
 async def gate_unblocks_after_completion(tmp: Path) -> tuple[bool, str]:
@@ -97,11 +97,11 @@ async def add_refuses_unknown_and_self(tmp: Path) -> tuple[bool, str]:
     unknown = await tool.execute({"action": "add", "content": "b", "depends_on": ["9"]}, ctx)
     self_dep = await tool.execute({"action": "add", "content": "a", "depends_on": ["1"]}, ctx)
     ok = (
-        unknown.error == "unknown_dependency"
-        and self_dep.error == "self_dependency"
+        unknown.detail == "unknown_dependency"
+        and self_dep.detail == "self_dependency"
         and task.items == []
     )
-    return ok, f"unknown={unknown.error} self={self_dep.error} items={len(task.items)}"
+    return ok, f"unknown={unknown.detail} self={self_dep.detail} items={len(task.items)}"
 
 
 async def the_forward_reference_cycle_is_gone(tmp: Path) -> tuple[bool, str]:
@@ -110,8 +110,8 @@ async def the_forward_reference_cycle_is_gone(tmp: Path) -> tuple[bool, str]:
     tool = TodoWriteTool()
     ctx = ToolContext(task=task)
     first = await tool.execute({"action": "add", "content": "a", "depends_on": ["2"]}, ctx)
-    ok = first.error == "unknown_dependency" and task.items == []
-    return ok, f"error={first.error} items={len(task.items)}"
+    ok = first.detail == "unknown_dependency" and task.items == []
+    return ok, f"error={first.detail} items={len(task.items)}"
 
 
 async def gate_can_be_switched_off(tmp: Path) -> tuple[bool, str]:

@@ -338,6 +338,66 @@ def test_search_escalates_from_the_streak_not_from_the_window():
     assert (d.gate, d.level) == ("search", 2)
 
 
+def test_search_names_the_counter_that_earned_the_rung():
+    """F4: the reason must match the counter, not always say "look-only"."""
+    look = iv.select(
+        _snap(search_streak=4, search_calls=4), phase=iv.PRE, limits=LIMITS
+    )
+    assert (look.trigger, look.reason) == ("look_streak", "look-only streak")
+
+    # Measured in ws8 turn-2: calls=5, streak=0, repeated=0, novel=2, but the
+    # event still said "look-only streak" -- the identical-output rung fired.
+    repeat = iv.select(
+        _snap(repeat_streak=1, search_streak=0, search_calls=5),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert repeat.trigger == "repeat_output"
+    assert repeat.reason == "repeated identical output"
+    assert "look-only" not in repeat.reason
+
+
+def test_stale_evidence_takes_credit_for_its_own_rung():
+    d = iv.select(_snap(stale_streak=3), phase=iv.PRE, limits=LIMITS)
+    assert (d.level, d.trigger) == (1, "stale_evidence")
+    assert d.reason == "repeated evidence"
+
+    # A stale stream that *raises* the rung names itself; one that merely
+    # co-occurs with a count rung does not.
+    raised = iv.select(
+        _snap(search_streak=4, stale_streak=4, search_calls=4),
+        phase=iv.PRE,
+        limits=LIMITS,
+    )
+    assert (raised.level, raised.trigger) == (2, "stale_evidence")
+
+
+def test_the_ledger_remembers_why_the_search_gate_spoke():
+    snap = _snap(search_streak=4, search_calls=4)
+    gate = iv.select(snap, phase=iv.PRE, limits=LIMITS)
+    decision = TurnDecision(
+        TurnAction.NUDGE,
+        gate.reason,
+        intervention=gate.gate,
+        level=gate.level,
+        trigger=gate.trigger,
+    )
+    ledger = iv.record({}, decision, snap)
+    assert ledger["search"]["trigger"] == "look_streak"
+
+    # The other gates keep their exact old entry (additive only).
+    strategy_snap = _snap(failed_streak=2)
+    strategy_gate = iv.select(strategy_snap, phase=iv.PRE, limits=LIMITS)
+    strategy = TurnDecision(
+        TurnAction.NUDGE,
+        strategy_gate.reason,
+        intervention=strategy_gate.gate,
+        level=strategy_gate.level,
+        trigger=strategy_gate.trigger,
+    )
+    assert "trigger" not in iv.record({}, strategy, strategy_snap)["strategy"]
+
+
 def test_search_stays_quiet_while_the_streak_crawls():
     """One extra look is not news; a whole threshold of them is."""
     quiet = _fired("search", 1, outcome="failed", ref={"streak": 4, "calls": 4})

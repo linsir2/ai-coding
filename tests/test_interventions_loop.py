@@ -585,6 +585,82 @@ async def test_the_finish_path_carries_the_intervention(tmp_path):
     assert loop.last_outcome.note, "the FINISH decision's note must reach the outcome"
 
 
+class _Inspector(BaseTool):
+    """A bash-shaped inspection: a look that produces no finding (R20's gate)."""
+
+    name = "bash"
+    parallel_safe = True
+
+    @property
+    def description(self) -> str:
+        return "inspects without producing evidence"
+
+    @property
+    def params_json_schema(self) -> dict:
+        return {"type": "object", "properties": {"command": {"type": "string"}}}
+
+    async def execute(self, params, ctx=None) -> ToolResult:
+        return ToolResult(success=True, output="")
+
+
+def _inspect_call(call_id: str, command: str) -> StepResult:
+    return StepResult(
+        text=None,
+        tool_calls=[
+            ToolCallRef(id=call_id, name="bash", arguments=f'{{"command": "{command}"}}')
+        ],
+        finish_reason="tool_calls",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pre_step_nudge_leaves_a_visible_budget_slot(tmp_path):
+    """F3: the advice rungs spend budget slots that used to vanish from the trace.
+
+    The looks here find nothing (R20's count rung), so the ladder climbs on
+    ``search_streak``; with an 8-step budget the turn ends on the budget mouth
+    and the handoff has to account for the injection it paid for.
+    """
+    from ai_coding.core.events import NudgeInjected, RecordingObserver
+
+    engine = _ScriptedEngine(
+        [_inspect_call(f"p{i}", f"ls f{i}") for i in range(1, 13)]
+    )
+    registry = ToolRegistry()
+    registry.register(_Inspector())
+    observer = RecordingObserver()
+    loop = AgentLoop(
+        engine,
+        SessionService(tmp_path / "sessions"),
+        registry,
+        approval=AutoApproveCallback(),
+        settings=AIConfig(max_tool_iterations=8),
+        observer=observer,
+        workspace=".",
+    )
+    session = loop.sessions.create()
+
+    await loop.process_input(session, "look around")
+
+    nudges = [e for e in observer.events if isinstance(e, NudgeInjected)]
+    assert nudges, "a look-only streak must inject advice before the budget dies"
+    assert nudges[0].gate == "search"
+    assert nudges[0].action == "nudge"
+    assert nudges[0].iteration == 5
+    # The slot produced no model step; that is exactly the hole F3 closes.
+    started = {
+        e.index for e in observer.events if type(e).__name__ == "IterationStarted"
+    }
+    assert nudges[0].iteration not in started
+    assert loop.last_outcome.nudge_steps == len(nudges)
+    assert "次提醒" in loop.last_outcome.handoff
+
+    # F4: the event names the counter that fired, and it is the count rung.
+    stalled = [e for e in observer.events if type(e).__name__ == "SearchStalled"]
+    assert stalled and stalled[0].trigger == "look_streak"
+    assert stalled[0].repeat_streak == 0
+
+
 @pytest.mark.asyncio
 async def test_narration_between_looks_does_not_swallow_the_closing(tmp_path):
     """A real model narrates inside its tool-calling steps ("let me read X").

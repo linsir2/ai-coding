@@ -543,6 +543,40 @@ class SearchStalled:
     repeated: int = 0
     unconverged: bool = False
     reason: str = ""
+    #: F4 (2026-11): *which* counter earned the rung -- ``repeat_output``,
+    #: ``look_streak`` or ``stale_evidence``.  The counts alone were ambiguous:
+    #: a trace with ``calls=5, streak=0, repeated=0, novel=2`` still said
+    #: "look-only streak", so the operator could not tell what fired.
+    trigger: str = ""
+    #: F4: the identical-output streak at the moment of the fire (the counter
+    #: the ``repeat_output`` trigger reads).
+    repeat_streak: int = 0
+
+
+@dataclass(frozen=True)
+class NudgeInjected:
+    """A budget slot spent on injected advice instead of a model step (F3).
+
+    The PRE-step ladders (strategy / fatigue / search) and the C3 continuation
+    run *before* ``IterationStarted``, so the slot they consume used to leave no
+    event at all: a trace read ``i1 … i20, i22, i23`` with 21/25/27 simply
+    missing, and "how many iterations did this turn really spend" had no answer.
+    One event per injection makes the arithmetic auditable: every ``n<index>``
+    is a slot that produced advice, not a model call.
+
+    ``action`` is ``"nudge"`` for a ladder and ``"continue"`` for the C3
+    continuation (which also restarts ``index`` at 1 -- ``restarted``).
+    """
+
+    iteration: int
+    #: strategy / fatigue / search / task / continuation
+    gate: str
+    level: int
+    action: str = "nudge"
+    reason: str = ""
+    #: Characters the injection added to the next request (cost visible).
+    chars: int = 0
+    restarted: bool = False
 
 
 @dataclass(frozen=True)
@@ -649,6 +683,7 @@ LoopEvent = (
     | MemoryHarvested
     | MemoryConsolidated
     | SearchStalled
+    | NudgeInjected
     | ResumeStalled
 )
 
@@ -727,6 +762,7 @@ __all__ = [
     "MemoryHarvested",
     "MemoryConsolidated",
     "SearchStalled",
+    "NudgeInjected",
     "ResumeStalled",
     "LoopEvent",
     "LoopObserver",

@@ -80,6 +80,17 @@ def test_a_family_emitted_directly_has_no_detail():
     assert normalize("PERMISSION_DENIED", success=False) == ("PERMISSION_DENIED", None)
 
 
+def test_the_enum_member_is_a_family_too():
+    """``ToolError`` is a str mixin whose ``str()`` is "ToolError.X".
+
+    A producer that passes the member (the module exports it for exactly that)
+    must not fall into the UNKNOWN bucket.
+    """
+    assert normalize(ToolError.INTERNAL, success=False) == ("INTERNAL", None)
+    assert family_of(ToolError.DEADLINE_EXCEEDED) == "DEADLINE_EXCEEDED"
+    assert is_family(ToolError.NOT_FOUND)
+
+
 def test_an_unregistered_string_is_unknown_and_keeps_the_original():
     assert normalize("brand_new_code", success=False) == ("UNKNOWN", "brand_new_code")
 

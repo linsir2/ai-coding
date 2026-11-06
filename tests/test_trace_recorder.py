@@ -55,6 +55,32 @@ def test_every_event_becomes_one_json_line(tmp_path):
     assert first["ts"].endswith("Z")
 
 
+def test_a_nudge_gets_its_own_span_in_the_budget_line(tmp_path):
+    """F3: a pre-step injection consumes a slot that never starts a step."""
+    from ai_coding.core.events import NudgeInjected
+
+    recorder, _ = _recorder(tmp_path)
+    recorder.on_event(IterationStarted(index=1, max_iterations=10))
+    recorder.on_event(
+        NudgeInjected(
+            iteration=2,
+            gate="search",
+            level=1,
+            reason="look-only streak",
+            chars=120,
+        )
+    )
+    recorder.on_event(IterationStarted(index=3, max_iterations=10))
+
+    lines = _lines(recorder)
+    assert [line["span"] for line in lines] == ["i1", "n2", "i3"]
+    nudge = lines[1]
+    assert nudge["parent"] == "turn"
+    assert nudge["iter"] == 2
+    assert nudge["data"]["gate"] == "search"
+    assert nudge["data"]["chars"] == 120
+
+
 def test_tool_spans_hang_off_their_iteration(tmp_path):
     recorder, _ = _recorder(tmp_path)
     recorder.on_event(ToolStarted(call_id="c1", tool_name="read", params={}, iteration=2))

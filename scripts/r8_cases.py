@@ -196,8 +196,8 @@ async def evidence_filter(tmp: Path) -> tuple[bool, str]:
     bad = await tool.execute({"query": "构建用什么", "evidence": "maybe"})
     ids = [n["id"] for n in tool_hits.data["notes"]]
     other = sorted(n["id"] for n in model_hits.data["notes"])
-    ok = ids == ["t1"] and other == ["l1", "m1"] and bad.error == "bad_evidence"
-    return ok, f"tool={ids} model={other} bad={bad.error}"
+    ok = ids == ["t1"] and other == ["l1", "m1"] and bad.detail == "bad_evidence"
+    return ok, f"tool={ids} model={other} bad={bad.detail}"
 
 
 async def digest_carries_the_note(_tmp: Path) -> tuple[bool, str]:
@@ -367,8 +367,12 @@ async def dispatcher_cancel_is_structured(tmp: Path) -> tuple[bool, str]:
         trip(),
     )
     result = batches[0][0].result
-    ok = result.error == CANCELLED_BY_USER and result.success is False
-    return ok, f"error={result.error}"
+    ok = (
+        result.detail == CANCELLED_BY_USER
+        and result.error == "CANCELLED"
+        and result.success is False
+    )
+    return ok, f"error={result.error} detail={result.detail}"
 
 
 OFFLINE: dict[str, CaseFn] = {

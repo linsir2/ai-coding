@@ -338,6 +338,10 @@ class TurnBooks:
     total_iterations: int = 0
     #: Task-gate nudges injected (``[task-gate]``) — the R2 stop policy's budget.
     nudges: int = 0
+    #: F3: budget slots consumed by a *pre-step* injection (a ladder nudge or
+    #: the C3 continuation).  Those slots produce no model step, so
+    #: ``total_iterations + nudge_steps`` is the turn's real budget spend.
+    nudge_steps: int = 0
     #: Tool calls asked for this turn, successful or not.
     attempted_calls: int = 0
     #: Tool calls that came back with ``success=True``.
@@ -464,6 +468,10 @@ class TurnBooks:
     def note_nudge(self) -> None:
         """The task gate injected a reminder and will iterate again."""
         self.nudges += 1
+
+    def note_nudge_step(self) -> None:
+        """A pre-step injection spent one budget slot without a model step (F3)."""
+        self.nudge_steps += 1
 
     def note_fatigue_nudge(self) -> None:
         """The fatigue gate injected a reminder and will iterate again."""

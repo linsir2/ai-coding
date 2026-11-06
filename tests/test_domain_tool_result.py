@@ -57,6 +57,15 @@ def test_wrap_tool_output_marks_failure_with_ok_false():
     )
 
 
+def test_wrap_tool_output_normalises_a_legacy_leaf_from_a_direct_caller():
+    """The public function must not put a leaf where the contract says family."""
+    out = wrap_tool_output("edit", "boom", success=False, error="old_string_not_found")
+    assert out.startswith(
+        '<tool_output tool="edit" ok="false" '
+        'error="FAILED_PRECONDITION" code="old_string_not_found">'
+    )
+
+
 def test_wrap_tool_output_names_the_family_and_the_specific_code():
     out = wrap_tool_output(
         "edit",

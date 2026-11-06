@@ -356,7 +356,13 @@ def render_handoff(
         label = "零进展（提前收尾）"
     elif outcome.reason.startswith(_SEARCH_UNCONVERGED):
         label = "检索未收敛（强制收尾）"
-    lines = [f"[回合未完成 · {label}（{outcome.iterations} 轮）]"]
+    # F3: iterations count model steps; a pre-step injection spent a budget slot
+    # without one.  Say both, but only when there were injections -- a turn
+    # without them keeps the exact old line (goldens and readers depend on it).
+    rounds = f"{outcome.iterations} 轮"
+    if outcome.nudge_steps:
+        rounds += f"，其中 {outcome.nudge_steps} 次提醒"
+    lines = [f"[回合未完成 · {label}（{rounds}）]"]
     if closing.strip():
         lines.append(f"模型收尾: {one_line(closing, _CLOSING_LIMIT)}")
     if outcome.reason:

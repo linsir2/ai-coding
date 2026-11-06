@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .error_codes import normalize
 from .loop import StepResult
 from .message import ChatMessage, ImageRef, ToolOutput
 
@@ -77,11 +78,17 @@ def wrap_tool_output(
     """
     attrs = f' tool="{tool_name}"'
     if not success:
+        # Normalise here too: this is a public function, and a direct caller
+        # that still passes a legacy leaf must not put a leaf on the wire.
+        # ``tool_message`` passes the already-normalised pair, so this is a
+        # no-op on the real path.
+        family, leaf = normalize(error, success=success)
+        detail = detail or leaf
         attrs += ' ok="false"'
         # A failure with no code is an unclassified one; naming the family keeps
         # the wire self-describing even for a direct caller that forgot to pass
-        # one (``tool_message`` always passes the normalised pair).
-        attrs += f' error="{error or "INTERNAL"}"'
+        # one.
+        attrs += f' error="{family or "INTERNAL"}"'
         if detail:
             attrs += f' code="{detail}"'
     head = f"<tool_output{attrs}>"

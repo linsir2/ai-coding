@@ -297,10 +297,13 @@ async def case_approval_timeout_is_bounded_and_distinct(root: Path) -> tuple[boo
     result = outcomes[0].result
     ok = (
         elapsed < 2.0
-        and result.error == "approval_timeout"
+        and result.detail == "approval_timeout"
         and outcomes[0].halted is False
     )
-    return ok, f"elapsed={elapsed:.2f}s error={result.error} halted={outcomes[0].halted}"
+    return (
+        ok,
+        f"elapsed={elapsed:.2f}s error={result.detail} halted={outcomes[0].halted}",
+    )
 
 
 async def case_a_sync_approval_no_longer_freezes_the_loop(root: Path) -> tuple[bool, str]:
@@ -319,7 +322,7 @@ async def case_a_sync_approval_no_longer_freezes_the_loop(root: Path) -> tuple[b
         deadline=Deadline.after(0.5),
     )
     elapsed = time.monotonic() - started
-    ok = elapsed < 1.0 and outcomes[0].result.error == "approval_timeout"
+    ok = elapsed < 1.0 and outcomes[0].result.detail == "approval_timeout"
     return ok, f"elapsed={elapsed:.2f}s (clock 0.5s, human 1.5s)"
 
 

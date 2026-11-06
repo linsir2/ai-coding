@@ -131,7 +131,14 @@ def fold_turn(spans: Sequence[Any]) -> TurnFacts:
             begin = started.pop(call_id, {})
             name = str(data.get("tool_name") or begin.get("tool_name") or "tool")
             error = str(data.get("error") or "")
-            if error in {"guard_denied", "guard_error"}:
+            # 2026-11: ``error`` is the gRPC family; the specific reason moved
+            # to ``detail``.  Read both so old traces (leaf in ``error``) and
+            # new ones (family + ``detail``) count the same.
+            detail = str(data.get("detail") or "")
+            if detail in {"guard_denied", "guard_error"} or error in {
+                "guard_denied",
+                "guard_error",
+            }:
                 guard_denied += 1
             duration = _int(data.get("duration_ms"))
             tool_ms += duration
@@ -140,7 +147,10 @@ def fold_turn(spans: Sequence[Any]) -> TurnFacts:
                     name=name,
                     params=_params_summary(begin.get("params")),
                     output=_clip(str(data.get("output_preview") or "")),
-                    error=error,
+                    # The specific reason is what the operator searched for
+                    # before the family arrived; old traces only have it in
+                    # ``error``.
+                    error=detail or error,
                     duration_ms=duration,
                     success=bool(data.get("success")),
                     span=str(span_id or ""),
@@ -371,7 +381,11 @@ def summarize_turn(path: str | Path) -> dict[str, Any]:
                 tools.append(name)
         elif event == "ToolFinished":
             summary["tool_ms"] += _int(data.get("duration_ms"))
-            if data.get("error") in {"guard_denied", "guard_error"}:
+            # Same dual read as ``fold_turn``: old traces carry the leaf in
+            # ``error``, new ones in ``detail``.
+            if data.get("detail") in {"guard_denied", "guard_error"} or data.get(
+                "error"
+            ) in {"guard_denied", "guard_error"}:
                 summary["guard_denied"] += 1
         elif event == "Degraded":
             component = data.get("component")

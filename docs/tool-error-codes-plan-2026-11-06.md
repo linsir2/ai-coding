@@ -319,7 +319,7 @@ def tone_of(error: str | None) -> Literal["denied", "failed"]
 
 ---
 
-## 7. F3 / F4 / F6
+## 7. F3 / F4 / F6（F3/F4 已于 2026-11-06 实现）
 
 ### 7.1 F3：nudge 消耗的迭代在 trace 里不可见
 

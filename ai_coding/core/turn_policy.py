@@ -138,6 +138,8 @@ class TurnDecision:
     #: exhausted"), the note says what the turn leaves behind — two different
     #: facts.
     note: str = ""
+    #: F4: which counter earned the search rung ("" for every other gate).
+    trigger: str = ""
 
 
 @dataclass(frozen=True)
@@ -319,6 +321,7 @@ class TurnPolicy:
                     intervention=decision.intervention,
                     level=decision.level,
                     note=decision.note,
+                    trigger=decision.trigger,
                 )
             return decision
         return TurnDecision(TurnAction.ITERATE, "within budget")
@@ -330,6 +333,7 @@ class TurnPolicy:
         intervention: str = "",
         level: int = 0,
         note: str = "",
+        trigger: str = "",
     ) -> TurnDecision:
         """End the turn on a budget mouth.
 
@@ -344,6 +348,7 @@ class TurnPolicy:
             intervention=intervention,
             level=level,
             note=note,
+            trigger=trigger,
         )
 
     def decide_after_step(self, snapshot: TurnSnapshot) -> TurnDecision:
@@ -379,6 +384,8 @@ class TurnPolicy:
             level=gate.level,
             # I1/R-7: a ladder FINISH's terminal line must survive the mapping.
             note=gate.note,
+            # F4: the search ladder's "which counter" rides the mapping too.
+            trigger=gate.trigger,
         )
 
     # ---- task text ---------------------------------------------------------

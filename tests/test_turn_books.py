@@ -40,6 +40,8 @@ def test_books_start_empty():
     books = TurnBooks()
     assert books.iterations == 0
     assert books.nudges == 0
+    # F3: no pre-step injection has spent a budget slot yet.
+    assert books.nudge_steps == 0
     assert books.attempted_calls == 0
     assert books.successful_calls == 0
     assert books.failed_streak == 0
@@ -65,6 +67,15 @@ def test_note_nudge_and_strategy_nudge_are_separate_counters():
     books.note_nudge()
     assert books.nudges == 2
     assert books.strategy_nudges == 1
+
+
+def test_note_nudge_step_counts_budget_slots_not_model_steps():
+    """F3: an injection spends a slot without calling the model."""
+    books = TurnBooks()
+    books.note_iteration(1)
+    books.note_nudge_step()
+    books.note_iteration(3)
+    assert (books.total_iterations, books.nudge_steps) == (2, 1)
 
 
 def test_note_step_keeps_the_last_text():

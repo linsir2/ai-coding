@@ -306,12 +306,27 @@ _DENIED: frozenset[str] = frozenset(
 )
 
 
-def is_family(value: str | None) -> bool:
+def _code_text(error: str | ToolError | None) -> str:
+    """The string value of an input code.
+
+    ``ToolError`` is a ``str`` mixin, but ``str(ToolError.INTERNAL)`` is
+    ``"ToolError.INTERNAL"`` -- a producer that passes the enum member (which
+    the module invites, since it exports it) would otherwise be classified as
+    ``UNKNOWN``.  Normalise through ``.value``.
+    """
+    if isinstance(error, ToolError):
+        return error.value
+    return str(error or "")
+
+
+def is_family(value: str | ToolError | None) -> bool:
     """Is ``value`` already one of the canonical gRPC codes?"""
-    return str(value or "") in _FAMILY_VALUES
+    return _code_text(value) in _FAMILY_VALUES
 
 
-def normalize(error: str | None, *, success: bool) -> tuple[str | None, str | None]:
+def normalize(
+    error: str | ToolError | None, *, success: bool
+) -> tuple[str | None, str | None]:
     """``(family, detail)`` for a result's ``error`` input.
 
     A leaf becomes ``(its family, the leaf)``; an already-canonical code keeps
@@ -324,17 +339,17 @@ def normalize(error: str | None, *, success: bool) -> tuple[str | None, str | No
         if success:
             return None, None
         return ToolError.INTERNAL.value, None
-    text = str(error)
+    text = _code_text(error)
     if text in _FAMILY_VALUES:
         return text, None
     return (LEGACY_TO_FAMILY.get(text) or ToolError.UNKNOWN).value, text
 
 
-def family_of(error: str | None) -> str:
+def family_of(error: str | ToolError | None) -> str:
     """The family for a code, tolerating legacy leaves and ``None``."""
     if error is None:
         return ToolError.UNKNOWN.value
-    text = str(error)
+    text = _code_text(error)
     if text in _FAMILY_VALUES:
         return text
     return (LEGACY_TO_FAMILY.get(text) or ToolError.UNKNOWN).value

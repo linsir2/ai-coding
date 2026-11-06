@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ai_coding.domain.loop import TurnOutcome, TurnStatus
 from ai_coding.domain.message import ToolArtifact
 from ai_coding.domain.session import SessionData
@@ -179,6 +181,21 @@ def test_handoff_names_goal_open_items_and_failure():
     assert "bash → nonzero_exit" in text
     assert "Makefile" in text
     assert "turn-1.jsonl" in text
+
+
+def test_the_handoff_accounts_for_advice_slots_when_there_were_any():
+    """F3: iterations count model steps, so a cut turn also names the advice."""
+    outcome = _outcome(
+        status=TurnStatus.MAX_ITERATIONS,
+        text=None,
+        reason="iteration budget exhausted",
+        iterations=3,
+    )
+    quiet = render_handoff(outcome=outcome)
+    assert "3 轮" in quiet and "提醒" not in quiet
+
+    with_nudges = render_handoff(outcome=replace(outcome, nudge_steps=2))
+    assert "3 轮，其中 2 次提醒" in with_nudges
 
 
 def test_handoff_is_empty_when_the_model_spoke():

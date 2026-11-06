@@ -69,6 +69,7 @@ from ai_coding.core.events import (
     LedgerUpdated,
     LoopEvent,
     LoopObserver,
+    NudgeInjected,
     NullObserver,
     ProviderFallback,
     ProviderRetried,
@@ -1200,10 +1201,30 @@ class AgentLoop:
                                         else block
                                     ),
                                 )
+                    injected = decision.inject or ""
                     session.add_message(
-                        user_message(decision.inject or "", now_utc(), synthetic=True)
+                        user_message(injected, now_utc(), synthetic=True)
                     )
                     books.nudge_pending = True
+                    books.note_nudge_step()
+                    # F3: this slot never reaches ``IterationStarted`` -- the
+                    # ``continue`` below skips it -- so without this event the
+                    # budget's arithmetic had a hole (i20 -> i22 in the trace).
+                    # Emit before the C3 restart so ``iteration`` names the slot
+                    # that was actually spent.
+                    self._emit(
+                        NudgeInjected(
+                            iteration=index,
+                            gate=decision.intervention or (
+                                "continuation" if restart else "nudge"
+                            ),
+                            level=decision.level,
+                            action="continue" if restart else "nudge",
+                            reason=decision.reason,
+                            chars=len(injected),
+                            restarted=restart,
+                        )
+                    )
                     self.closer.checkpoint(session, index)
                     if restart:
                         index = 0
@@ -2039,8 +2060,13 @@ class AgentLoop:
         # W1: every exit funnels through here (normal, failed, and the
         # cancelled path above), so the length-cutoff flag lands uniformly —
         # including on turns the budget or the clock stopped.
+        # F3: one place, so every exit carries the pre-step injection count
+        # (the ten ``TurnOutcome`` construction sites would each have to remember
+        # it otherwise).
         outcome = replace(
-            outcome, truncated_by_length=(books.last_finish_reason == "length")
+            outcome,
+            truncated_by_length=(books.last_finish_reason == "length"),
+            nudge_steps=books.nudge_steps,
         )
         # P2 (补充式方案 06): every exit funnels through here, so this is where
         # the open marker is cleared -- the close below persists both the
@@ -2647,6 +2673,10 @@ class AgentLoop:
                     repeated=snapshot.repeated_nonempty,
                     unconverged=decision.reason == interventions.SEARCH_UNCONVERGED,
                     reason=decision.reason,
+                    # F4: which counter earned the rung, and the identical-
+                    # output streak that the ``repeat_output`` trigger reads.
+                    trigger=decision.trigger,
+                    repeat_streak=snapshot.repeat_streak,
                 )
             )
         session.intervention_state = interventions.record(

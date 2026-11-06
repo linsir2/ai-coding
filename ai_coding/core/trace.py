@@ -32,6 +32,7 @@ from ai_coding.core.events import (
     ContextAssembled,
     IterationStarted,
     ModelStepFinished,
+    NudgeInjected,
     ScopedEvent,
     ToolChunk,
     ToolFinished,
@@ -837,6 +838,22 @@ class TraceRecorder:
                 f"i{event.index}" if nested else self._span("i", event.index),
                 "turn",
                 event.index,
+                scope,
+            )
+        if isinstance(event, NudgeInjected):
+            # F3: a budget slot that produced advice, not a model step.  Same
+            # namespace family as ``i{index}`` (with the C3 batch prefix), so
+            # ``i20`` -> ``n21`` -> ``i22`` reads as one continuous budget.
+            if not nested:
+                self._iteration = event.iteration
+            return (
+                name,
+                payload,
+                f"n{event.iteration}"
+                if nested
+                else self._span("n", event.iteration),
+                "turn",
+                event.iteration,
                 scope,
             )
         if isinstance(event, ModelStepFinished):

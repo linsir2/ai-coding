@@ -137,6 +137,10 @@ class InterventionDecision:
     #: I1/R-7: the terminal line that must reach the operator when a ladder
     #: *finishes* the turn.  It rides the decision like the plan guard's note.
     note: str = ""
+    #: F4 (2026-11): which counter earned the rung.  Only the search ladder
+    #: sets it today (``repeat_output`` / ``look_streak`` / ``stale_evidence``);
+    #: the others keep "" so their payloads do not change.
+    trigger: str = ""
 
 
 # ---- triggers --------------------------------------------------------------
@@ -299,7 +303,7 @@ def settle(
 
 def _search_due(
     snap: TurnSnapshot, entry: Mapping[str, Any] | None, limits: LadderLimits
-) -> tuple[int, str] | None:
+) -> tuple[int, str, str] | None:
     """The rung the look-only streak has earned, or None to stay quiet (B1/B2).
 
     The rung is derived from the **streak**, not from the ledger's window, which is
@@ -329,19 +333,19 @@ def _search_due(
     """
     l3_at = limits.search_streak_l3
     if l3_at and snap.search_streak >= l3_at:
-        return (L3, "finish")
+        return (L3, "finish", "look_streak")
     if (
         limits.stale_l3
         and snap.stale_streak >= limits.stale_l3
         and snap.repeated_nonempty >= 2
     ):
-        return (L3, "finish")
+        return (L3, "finish", "stale_evidence")
     if snap.repeat_streak >= 1:
         if entry is None:
-            return (L1, "nudge")
+            return (L1, "nudge", "repeat_output")
         ref: Mapping[str, Any] = entry.get("ref") or {}
         if snap.repeat_streak >= int(ref.get("repeat", 0) or 0) + 2:
-            return (L1, "nudge")
+            return (L1, "nudge", "repeat_output")
     threshold = limits.search_streak_threshold
     if not threshold:
         return None
@@ -350,28 +354,33 @@ def _search_due(
     # L1 would never be seen.
     l2_at = max(limits.search_streak_l2, threshold + 1)
     level = 0
+    trigger = ""
     if snap.search_streak >= l2_at:
-        level = L2
+        level, trigger = L2, "look_streak"
     elif snap.search_streak >= threshold:
-        level = L1
+        level, trigger = L1, "look_streak"
+    # F4: the trigger names the counter that *raised* the rung.  A stale stream
+    # that merely co-occurs with a count rung must not take credit for it.
     if limits.stale_l2 and snap.stale_streak >= limits.stale_l2:
-        level = max(level, L2)
+        if L2 > level:
+            level, trigger = L2, "stale_evidence"
     elif limits.stale_l1 and snap.stale_streak >= limits.stale_l1:
-        level = max(level, L1)
+        if L1 > level:
+            level, trigger = L1, "stale_evidence"
     if not level:
         return None
     if entry is None:
-        return (level, "nudge")
+        return (level, "nudge", trigger)
     if level > int(entry.get("level", 0) or 0):
-        return (level, "nudge")
+        return (level, "nudge", trigger)
     ref = entry.get("ref") or {}
     if snap.search_streak >= int(ref.get("streak", 0) or 0) + threshold:
-        return (level, "nudge")
+        return (level, "nudge", "look_streak")
     # The stale stream grows independently of the streak (different params, same
     # evidence), so it earns its re-fire on its own whole L1-threshold.
     stale_l1 = limits.stale_l1 or threshold
     if snap.stale_streak >= int(ref.get("stale", 0) or 0) + stale_l1:
-        return (level, "nudge")
+        return (level, "nudge", "stale_evidence")
     return None
 
 
@@ -380,29 +389,36 @@ def _due(
     entry: Mapping[str, Any] | None,
     snap: TurnSnapshot,
     limits: LadderLimits,
-) -> tuple[int, str] | None:
-    """(level, kind) this gate should fire now, or None to keep observing."""
+) -> tuple[int, str, str] | None:
+    """(level, kind, trigger) this gate should fire now, or None to observe.
+
+    ``trigger`` is the search ladder's "which counter earned it" (F4); the other
+    gates have no such ambiguity and return "".
+    """
     if gate == SEARCH:
         return _search_due(snap, entry, limits)
     if entry is None:
-        return (L1, "nudge")
+        return (L1, "nudge", "")
     outcome = str(entry.get("outcome", ""))
     level = int(entry.get("level", 0) or 0)
     if outcome == "pending":
         if gate == TASK:
             if level == L1:
                 fires = int(entry.get("fires", 0) or 0)
-                return (L1, "nudge") if fires < limits.task_l1 else (L2, "nudge")
-            return (L2, "finish")            # the ask was ignored
+                return (
+                    (L1, "nudge", "") if fires < limits.task_l1
+                    else (L2, "nudge", "")
+                )
+            return (L2, "finish", "")            # the ask was ignored
         return None                           # strategy/fatigue: observing
     if outcome == "failed":
         if gate == STRATEGY:
-            return (L4, "finish") if level >= L3 else (level + 1, "nudge")
+            return (L4, "finish", "") if level >= L3 else (level + 1, "nudge", "")
         if gate == FATIGUE:
-            return (L3, "finish") if level >= L3 else (level + 1, "nudge")
-        return (L2, "finish") if level >= L2 else (L2, "nudge")
+            return (L3, "finish", "") if level >= L3 else (level + 1, "nudge", "")
+        return (L2, "finish", "") if level >= L2 else (L2, "nudge", "")
     if outcome == "unfinished":
-        return (max(level, L1), "nudge")      # same-level retry
+        return (max(level, L1), "nudge", "")      # same-level retry
     if outcome == "helped" and gate == FATIGUE:
         # Fatigue only accumulates: "equal to the ref" is how ``_helped``
         # recognises that the last nudge stopped new damage.  Re-arming L1 on
@@ -412,7 +428,7 @@ def _due(
         ref = entry.get("ref") or {}
         if snap.fatigue_index <= float(ref.get("fatigue", 0.0) or 0.0):
             return None
-    return (L1, "nudge")                      # helped / exhausted / unknown
+    return (L1, "nudge", "")                  # helped / exhausted / unknown
 
 
 def select(
@@ -439,7 +455,7 @@ def select(
         due = _due(gate, ledger.get(gate), snapshot, limits)
         if due is None:
             continue
-        return _build(gate, due[0], due[1], snapshot)
+        return _build(gate, due[0], due[1], snapshot, due[2])
     return None
 
 
@@ -465,13 +481,19 @@ def record(
     action = getattr(decision, "action", None)
     finished = getattr(action, "value", action) == "finish"
     out: dict[str, Any] = dict(ledger)
-    out[gate] = {
+    entry_out: dict[str, Any] = {
         "level": level,
         "at": [snapshot.iteration, snapshot.iteration + WINDOW],
         "outcome": "exhausted" if finished else "pending",
         "fires": fires,
         "ref": _ref_for(gate, snapshot),
     }
+    # F4: "why did it speak last time" is answerable from the persisted ledger.
+    # Additive -- the other gates keep their exact old entry.
+    trigger = str(getattr(decision, "trigger", "") or "")
+    if trigger:
+        entry_out["trigger"] = trigger
+    out[gate] = entry_out
     return out
 
 
@@ -488,14 +510,27 @@ def armed(ledger: Mapping[str, Any] | None) -> bool:
 # ---- texts (moved from turn_policy; L1 verbatim, L2/L3 are new) ------------
 
 
-def _build(gate: str, level: int, kind: str, snap: TurnSnapshot) -> InterventionDecision:
+#: F4: the operator-facing name of each search trigger.  The rung's advice text
+#: is unchanged; only the one-line reason stops guessing.
+_SEARCH_TRIGGER_REASONS: dict[str, str] = {
+    "repeat_output": "repeated identical output",
+    "look_streak": "look-only streak",
+    "stale_evidence": "repeated evidence",
+}
+
+
+def _build(
+    gate: str, level: int, kind: str, snap: TurnSnapshot, trigger: str = ""
+) -> InterventionDecision:
     if kind == "finish":
         if gate == SEARCH:
             # I1/R-7: the hard stop.  Its reason is what the loop matches on to
-            # ask for a closing word, and what the digest labels.
+            # ask for a closing word, and what the digest labels -- it must stay
+            # ``SEARCH_UNCONVERGED``; ``trigger`` says which counter earned it.
             return InterventionDecision(
                 gate, level, "finish", SEARCH_UNCONVERGED,
                 note=SEARCH_UNCONVERGED_NOTE,
+                trigger=trigger,
             )
         if gate == STRATEGY:
             count = snap.failed_streak or max(1, snap.iteration - 1)
@@ -512,12 +547,15 @@ def _build(gate: str, level: int, kind: str, snap: TurnSnapshot) -> Intervention
         reason = "repeated tool failures" if level == L1 else f"repeated tool failures (L{level})"
         return InterventionDecision(gate, level, "nudge", reason, _strategy_text(level, snap))
     if gate == SEARCH:
-        reason = (
-            "look-only streak"
-            if level == L1
-            else f"look-only streak (L{level})"
+        # F4: say which counter fired.  The old reason was always "look-only
+        # streak", even when ``repeat_streak`` (identical output) was the cause
+        # and ``search_streak`` was 0 -- a trace that contradicted itself.
+        label = _SEARCH_TRIGGER_REASONS.get(trigger, "look-only streak")
+        reason = label if level == L1 else f"{label} (L{level})"
+        return InterventionDecision(
+            gate, level, "nudge", reason, _search_text(level, snap),
+            trigger=trigger,
         )
-        return InterventionDecision(gate, level, "nudge", reason, _search_text(level, snap))
     if gate == FATIGUE:
         reason = (
             "accumulated errors (fatigue)" if level == L1

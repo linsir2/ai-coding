@@ -109,6 +109,10 @@ class TurnOutcome:
     # turn ends without a submission -- same shape as ``handoff`` (a status,
     # not an answer); the transcript draws it as a muted notice.
     note: str = ""
+    # F3 (2026-11): budget slots spent on a pre-step injection (a ladder nudge
+    # or the C3 continuation).  Those slots never produce a model step, so
+    # ``iterations`` alone under-reports what the turn really consumed.
+    nudge_steps: int = 0
 
 
 __all__ = ["EmptyStepError", "ThinkingOnlyStepError", "TurnStatus", "StepResult", "TurnOutcome"]

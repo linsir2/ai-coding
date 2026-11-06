@@ -274,8 +274,12 @@ async def case_ask_user_without_a_human(root: Path) -> tuple[bool, str]:
     result = await AskUserTool(UnavailableUserPromptCallback()).execute(
         {"question": "改哪个？"}
     )
-    ok = result.success is False and result.error == "no_user" and "假设" in result.output
-    return ok, f"error={result.error}, the model is told to decide and say so"
+    ok = (
+        result.success is False
+        and result.detail == "no_user"
+        and "假设" in result.output
+    )
+    return ok, f"error={result.detail}, the model is told to decide and say so"
 
 
 async def case_ask_user_with_a_human(root: Path) -> tuple[bool, str]:

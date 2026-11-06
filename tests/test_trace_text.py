@@ -9,7 +9,12 @@ import json
 
 import pytest
 
-from ai_coding.app.trace_text import render_budget, render_turn, summarize_turn
+from ai_coding.app.trace_text import (
+    fold_turn,
+    render_budget,
+    render_turn,
+    summarize_turn,
+)
 
 
 def _write(path, events):
@@ -98,6 +103,42 @@ def test_render_turn_is_human_readable(tmp_path):
     assert "1,000 tok" in text or "1000 tok" in text
     assert "cache 78%" in text  # 700/900
     assert "memory_block" in text
+
+
+def test_a_denial_is_counted_from_the_detail_not_the_family(tmp_path):
+    """2026-11: ``error`` is the gRPC family; the leaf rides ``detail``.
+
+    The guard counter used to read ``error`` only, so it silently went to zero
+    for every trace written after the unification (a regression this test
+    pins).
+    """
+    path = tmp_path / "traces" / "s1" / "turn-1.jsonl"
+    _write(
+        path,
+        [
+            _rec("turn", "", "TurnStarted", {}, iteration=0),
+            _rec("c1", "i1", "ToolStarted", {"tool_name": "todo_write"}),
+            _rec(
+                "c1",
+                "i1",
+                "ToolFinished",
+                {
+                    "tool_name": "todo_write",
+                    "success": False,
+                    "duration_ms": 10,
+                    "error": "PERMISSION_DENIED",
+                    "detail": "guard_denied",
+                },
+            ),
+        ],
+    )
+
+    summary = summarize_turn(path)
+    assert summary["guard_denied"] == 1
+    assert "guard denial(s)" in render_turn(summary)
+    # The export keeps the specific reason, not just the family.
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert fold_turn(rows).tools[0].error == "guard_denied"
 
 
 def test_render_budget_reports_session_totals():

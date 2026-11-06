@@ -263,8 +263,15 @@ R2 再加一个只读属性 `max_duration_seconds: float | None`：工具自报�
 ### 循环事件（`core/events.py`）
 
 `LoopEvent` 是以下冻结事件的联合：`IterationStarted`、`AssistantTextDelta`、`AssistantMessage`、
-`ToolApprovalRequested`、`ToolStarted`、`ToolFinished`、`TaskUpdated`、`TurnFinished`。
+`ToolApprovalRequested`、`ToolStarted`、`ToolFinished`、`TaskUpdated`、`TurnFinished`、
+`SearchStalled`、`NudgeInjected`。
 `LoopObserver.on_event` 是同步入口；观测者抛异常不会中断回合（`_SafeObserver` 兜底并记日志）。
+
+F3（2026-11）：PRE-step 阶梯（strategy / fatigue / search）与 C3 continuation 在
+`IterationStarted` 之前消耗预算槽位，`NudgeInjected(iteration, gate, level, action,
+reason, chars, restarted)` 为每个槽位发一条事件，trace span 为 `n{index}`（parent `turn`）。
+F4：`SearchStalled` 增加 `trigger`（`repeat_output` / `look_streak` / `stale_evidence`）
+与 `repeat_streak`，nudge 的 `reason` 与触发源一致；L3 的 `search unconverged` 不变。
 
 R2 给 `ToolFinished` 追加末尾字段 `error: str | None = None`（2026-11 起是 gRPC
 family，与 `ToolResult.error` 同源），并追加 `detail: str = ""`（旧叶子码；
