@@ -947,3 +947,55 @@ async def test_close_and_reap_release_the_same_slot():
     await runner.close(run_id)
     assert slots.active == 0
 
+
+@pytest.mark.asyncio
+async def test_a_crashed_sync_child_returns_a_result_instead_of_raising(monkeypatch, tmp_path):
+    """A crash used to escape ``_run_in``, so ``_run_isolated`` never reached
+    ``_commit_turn`` and ``temporary()`` deleted every file the child wrote."""
+    runner = _runner(_Engine())
+    handle = SimpleNamespace(
+        loop=None, context_mode="full", workdir=str(tmp_path), run_id="r1"
+    )
+    monkeypatch.setattr(runner, "_open_handle", lambda *a, **k: handle)
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("tool blew up")
+
+    monkeypatch.setattr(runner, "_run_turn", boom)
+
+    result = await runner._run_in("task", "probe", str(tmp_path), None)
+
+    assert result.status == "error"
+    assert "RuntimeError" in (result.error or "")
+    assert result.exit_reason == "child_error"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_child_has_a_grace_window(monkeypatch):
+    """Cancellation is cooperative; a tool that ignores it must not hold the
+    parent past the sub-agent's own timeout."""
+    import time
+
+    from ai_coding.core import subagent as module
+
+    monkeypatch.setattr(module, "_CANCEL_GRACE_SECONDS", 0.1)
+    stop = asyncio.Event()
+
+    async def stubborn():
+        while not stop.is_set():
+            try:
+                await asyncio.sleep(0.05)
+            except asyncio.CancelledError:
+                continue
+
+    task = asyncio.create_task(stubborn())
+    await asyncio.sleep(0)
+    task.cancel()
+    started = time.monotonic()
+    await module._settle_cancelled(task)
+    assert time.monotonic() - started < 1.0, "the grace window must bound the wait"
+    # Let the abandoned child leave the loop instead of leaking into teardown.
+    stop.set()
+    task.cancel()
+    await asyncio.sleep(0.1)
+

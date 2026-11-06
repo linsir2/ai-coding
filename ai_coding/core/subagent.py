@@ -104,6 +104,33 @@ _MAX_BACKGROUND_ROWS = 200
 #: C-5a: the hard ceiling ``wait`` applies (the tool clamps to the same value).
 _MAX_WAIT_SECONDS = 600.0
 
+#: How long a cut waits for the child to finish cancelling.  Cancellation is
+#: cooperative: a tool in a long ``await`` may ignore it, and the parent used
+#: to wait for that indefinitely — a 120s child budget could hold a turn for
+#: minutes past ``subagent_timeout_seconds``.  Five seconds is enough for a
+#: loop close and a worktree cleanup; after that the child is abandoned.
+_CANCEL_GRACE_SECONDS = 5.0
+
+
+async def _settle_cancelled(task: asyncio.Task[Any]) -> None:
+    """Wait for a cancelled child, but never longer than the grace window.
+
+    ``asyncio.wait`` (not ``wait_for``): ``wait_for`` cancels the inner future
+    and then *awaits it*, so a tool that swallows ``CancelledError`` holds the
+    parent for ever -- the exact case this exists for.
+    """
+    done, _ = await asyncio.wait({task}, timeout=_CANCEL_GRACE_SECONDS)
+    if not done:
+        _log.warning(
+            "a cancelled sub-agent did not stop within %.0fs",
+            _CANCEL_GRACE_SECONDS,
+        )
+        return
+    try:
+        task.result()
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001 — a cut is not a failure
+        pass
+
 
 class _NullSessions:
     """Swallows saves: a sub-agent's transcript is its ledger, not a session file."""
@@ -1761,6 +1788,26 @@ class SubAgentRunner:
             return SubagentResult(status="error", error=str(exc))
         try:
             return await self._run_turn(handle, task)
+        except asyncio.CancelledError:
+            # A cut is not a crash: the caller asked for it, and the worktree
+            # must not be committed as if the child had finished.
+            raise
+        except Exception as exc:  # noqa: BLE001 — the sync/background parity
+            # The background path already turns a crash into a result so the
+            # worktree can be committed before ``temporary()`` deletes it.  The
+            # sync path let the exception escape, so ``_commit_turn`` never ran
+            # and every file the child had written died with the directory.
+            loop = handle.loop
+            artifacts = tuple(getattr(loop, "last_artifacts", ()) or ())
+            return SubagentResult(
+                status="error",
+                error=f"{type(exc).__name__}: {exc}",
+                truncated=True,
+                exit_reason="child_error",
+                context_mode=handle.context_mode,
+                artifacts=artifacts,
+                changed_paths=_changed_paths(list(artifacts)),
+            )
         finally:
             loop = handle.loop
             if loop is not None:
@@ -1975,11 +2022,11 @@ class SubAgentRunner:
             )
         except asyncio.CancelledError:
             inner.cancel()
-            await asyncio.gather(inner, return_exceptions=True)
+            await _settle_cancelled(inner)
             raise
         if not done:
             inner.cancel()
-            await asyncio.gather(inner, return_exceptions=True)
+            await _settle_cancelled(inner)
             result = SubagentResult(
                 status="timeout",
                 error=f"exceeded {self._timeout:g}s",

@@ -1081,6 +1081,11 @@ class AgentLoop:
         #: G8-2: the model's own wrap-up, if it was asked for one.  Kept off
         #: ``outcome.text`` on purpose -- see ``render_handoff``.
         closing = ""
+        #: An exception the body does not name.  The turn is still *closed*
+        # (digest, handoff, ``open_turn``) before this is re-raised: a turn
+        # that vanishes leaves a ghost marker resume offers to continue and a
+        # digest nobody will ever write.
+        failure: Exception | None = None
 
         try:
             index = 0
@@ -1512,6 +1517,15 @@ class AgentLoop:
             outcome = failed_outcome(
                 exc, last_text=books.last_text, iterations=books.total_iterations
             )
+        except Exception as exc:  # noqa: BLE001 — close the turn, then re-raise
+            # Anything else (a hook, a tool, a reporter) used to escape without
+            # closing: ``open_turn`` stayed set, so a restart offered to resume
+            # a turn that no longer exists.  The outcome is a failed turn; the
+            # exception still reaches the caller below.
+            outcome = failed_outcome(
+                exc, last_text=books.last_text, iterations=books.total_iterations
+            )
+            failure = exc
         finally:
             # M-C1: the reuse domain is the turn.  ``close`` clears the sidecar
             # on the normal path; this covers a turn that ended on an exception
@@ -1523,7 +1537,7 @@ class AgentLoop:
                 except Exception:  # noqa: BLE001 — the close must still succeed
                     _log.debug("write-ahead clear failed", exc_info=True)
 
-        return await self._finish_turn(
+        result = await self._finish_turn(
             session,
             user_input=user_input,
             task=task,
@@ -1532,6 +1546,10 @@ class AgentLoop:
             outcome=outcome,
             closing=closing,
         )
+        if failure is not None:
+            # Closing succeeded; the caller still sees the failure it caused.
+            raise failure
+        return result
 
     async def _begin_turn(
         self,

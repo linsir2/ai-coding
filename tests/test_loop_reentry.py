@@ -170,6 +170,11 @@ async def test_the_gate_is_released_when_a_turn_raises(tmp_path):
     with pytest.raises(RuntimeError):
         await asyncio.wait_for(loop.process_input(session, "boom"), _TIMEOUT)
 
+    # The turn must still be *closed* before the exception reaches the caller:
+    # an open_turn marker left behind is a ghost that resume offers to continue,
+    # and the digest/handoff never get written.
+    assert session.open_turn is None, "an unnamed exception still closes the turn"
+
     engine.fail = False
     engine.release.set()  # the second call goes through _ScriptedEngine's wait
     assert await asyncio.wait_for(loop.process_input(session, "after"), _TIMEOUT) == "A"
