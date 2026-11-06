@@ -48,8 +48,10 @@ class TodoWriteTool(BaseTool):
             "update (id, optional status/evidence/content) patches an item, where "
             "status is one of pending/in_progress/completed/blocked/dropped; "
             "list shows the current list. "
-            "Keep items small and actionable, and mark an item completed only with "
-            "evidence (the file, command or finding that proves it)."
+            "A `completed` item needs proof: pass `files` naming the files you "
+            "wrote/edited (each needs a current receipt) or `verify` with a shell "
+            "command. `evidence` is a note for the user and does NOT satisfy "
+            "completion by itself -- a completion with evidence alone is refused."
         )
 
     @property
@@ -75,7 +77,11 @@ class TodoWriteTool(BaseTool):
                 },
                 "evidence": {
                     "type": "string",
-                    "description": "What proves the item is done (for 'update').",
+                    "description": (
+                        "Note for the user about the work (for 'update'). "
+                        "Prose alone does NOT satisfy completion: also pass "
+                        "`files` or `verify`."
+                    ),
                 },
                 "depends_on": {
                     "type": "array",

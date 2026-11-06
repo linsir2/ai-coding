@@ -36,6 +36,21 @@ async def test_add_creates_item_in_ctx_task(tool, ctx):
     assert r.data is not None and r.data["action"] == "add" and r.data["open"] == 1
 
 
+def test_the_schema_names_files_or_verify_as_the_completion_proof(tool):
+    """``evidence`` alone never satisfies the gate; the text must say so.
+
+    Measured live 2026-11-06: the description called evidence "the file,
+    command or finding that proves it", the model wrote exactly that, and the
+    gate refused every attempt (completion_unverified -> blocked).  A model
+    reads the schema, so the schema is where the contract belongs.
+    """
+    description = tool.description
+    assert "files" in description and "verify" in description
+    assert "does NOT satisfy" in description
+    evidence = tool.params_json_schema["properties"]["evidence"]["description"]
+    assert "files" in evidence and "verify" in evidence
+
+
 @pytest.mark.asyncio
 async def test_add_accepts_depends_on(tool, ctx):
     await tool.execute({"action": "add", "content": "a"}, ctx)
