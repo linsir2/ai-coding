@@ -570,6 +570,20 @@ def test_identical_successful_outputs_build_a_repeat_streak():
     assert books.repeat_streak == 2
 
 
+def test_silent_actions_do_not_build_a_repeat_streak():
+    """Two empty outputs are not "the same output twice".
+
+    ``mkdir``/``pip install``/``npm create`` are routinely silent; counting
+    the empty digest armed the look-only ladder with zero looks (measured live
+    2026-11-06: SearchStalled at iteration 4 with calls=0/streak=0).
+    """
+    books = TurnBooks()
+    books.note_outcomes([_outcome("bash", output="")])
+    books.note_outcomes([_outcome("bash", output="   \n")])
+    assert books.repeat_streak == 0
+    assert books.last_success_digest is None
+
+
 def test_a_different_successful_output_resets_the_repeat_streak():
     books = TurnBooks()
     books.note_outcomes([_outcome("bash", output="same")])

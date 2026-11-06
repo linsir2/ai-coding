@@ -617,12 +617,17 @@ class TurnBooks:
         if action_calls:
             last = action_calls[-1]
             digest = _output_digest(last.result.output or "")
-            if digest in self.seen_success_outputs:
-                self.repeat_streak += 1
-            else:
-                self.seen_success_outputs.add(digest)
-                self.repeat_streak = 0
-                self.last_success_digest = digest
+            # A silent action (mkdir/pip install/npm create) produces no
+            # evidence; two of them are not "the same output twice".  Counting
+            # the empty digest armed the look-only ladder at iteration 3 with
+            # zero calls in a measured turn (2026-11-06, ws-fullstack7).
+            if (last.result.output or "").strip():
+                if digest in self.seen_success_outputs:
+                    self.repeat_streak += 1
+                else:
+                    self.seen_success_outputs.add(digest)
+                    self.repeat_streak = 0
+                    self.last_success_digest = digest
         # 13 §2.1: the ladder's ask helped-signal counts only what actually
         # reached the user (a denied call never did).
         self.ask_user_calls += sum(
