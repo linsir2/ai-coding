@@ -29,6 +29,7 @@ from ai_coding.ai.llm_helpers import checkpoint_body
 from ai_coding.config.models import DEFAULT_CONTEXT_TOKENS
 from ai_coding.core.compaction import Compactor
 from ai_coding.core.context_compression import (
+    _history_tokens,
     chars_for_tokens,
     estimate_tokens,
     working_history_tokens,
@@ -221,7 +222,9 @@ def _bare_pointer(rel: str, target: Path) -> str:
     )
 
 
-def _observed_prompt_tokens(session: SessionData) -> int:
+def _observed_prompt_tokens(
+    session: SessionData, view: Sequence[ChatMessage] | None = None
+) -> int:
     """The best measurement of the request that is about to be sent.
 
     The compaction gate used to read only ``estimate_tokens``, which counts
@@ -245,6 +248,16 @@ def _observed_prompt_tokens(session: SessionData) -> int:
     live = int(getattr(session, "live_context_tokens", 0) or 0)
     if live > 0:
         return live
+    # No provider reading yet this turn: ``view`` is the history this request
+    # will actually carry (checkpoint note + L0).  ``working_history_tokens``
+    # counts the tail *before* L0 elides it, and the gap is not small — measured
+    # on a real session: 313,587 estimated against a 50,626-token view, so the
+    # gate reopened compaction at the start of every turn even though the
+    # request was a quarter of the ceiling.
+    if view is not None:
+        measured = _history_tokens(list(view))
+        if measured > 0:
+            return measured
     # R2-2r: a checkpoint installed after that reading makes it describe a
     # request nobody will send again.  The working view is the honest measure
     # until a new step reports (the loop clears the flag when it does).
@@ -924,15 +937,35 @@ class RequestAssembler:
         compaction boundary and the provider's token count — so a compactor that
         has not heard of them keeps working instead of raising, exactly as this
         module already prefers ``compress_if_needed`` over ``compress``.
+
+        The first iteration of a turn has no provider reading yet, so the number
+        has to come from the local estimate — and it must be the estimate of the
+        request this gate is about to send, i.e. the checkpoint/L0 view.  It is
+        built at most once per turn (``live_context_tokens`` is only 0 before
+        the first step reports), which is why this is affordable here.
         """
-        wanted = {
-            "session": session,
-            "observed_tokens": _observed_prompt_tokens(session),
-        }
         try:
             accepted = inspect.signature(self._compactor.compress).parameters
         except (TypeError, ValueError):  # pragma: no cover — not introspectable
             return {}
+        if "observed_tokens" not in accepted:
+            # A compactor that predates the gate cannot use the number, so do
+            # not pay for the view it would describe.
+            return {"session": session} if "session" in accepted else {}
+        view: Sequence[ChatMessage] | None = None
+        if not int(getattr(session, "live_context_tokens", 0) or 0):
+            view_fn = getattr(self._compactor, "view", None)
+            if callable(view_fn):
+                try:
+                    view = view_fn(session.messages, session=session, pinned=())
+                except Exception:  # noqa: BLE001 — a view is an optimisation
+                    view = None
+            if not isinstance(view, list):
+                view = None
+        wanted = {
+            "session": session,
+            "observed_tokens": _observed_prompt_tokens(session, view),
+        }
         return {name: value for name, value in wanted.items() if name in accepted}
 
     def _get_active_constraints(self, session: SessionData) -> list[str]:

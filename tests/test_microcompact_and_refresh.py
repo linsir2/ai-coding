@@ -20,10 +20,16 @@ from types import SimpleNamespace
 from ai_coding.config.models import AIConfig
 from ai_coding.core.context_compression import (
     ContextManager,
+    _anchor_of,
+    _history_tokens,
     estimate_tokens,
+    install_checkpoint,
     microcompact_old_results,
+    working_history_tokens,
 )
+from ai_coding.core.request_assembly import _observed_prompt_tokens
 from ai_coding.domain.message import ChatMessage, ToolCallRef
+from ai_coding.domain.session import SessionData
 
 GOOD_SUMMARY = (
     "## 目标\n审计完成\n\n## 约束与要求\n无\n\n## 决策\n用 grep\n\n"
@@ -139,8 +145,70 @@ def test_an_unwritable_disk_means_no_elision_at_all():
     assert not any("chars elided" in (m.content or "") for m in out)
 
 
-# ---- C: the post-compaction file refresh ----------------------------------
+# ---- L0 without a checkpoint: the per-request view -------------------------
 
+
+def _real_session(messages) -> SessionData:
+    session = SessionData(
+        session_id="s1",
+        title="",
+        created_time="2026-01-01T00:00:00Z",
+        last_access_time="",
+    )
+    session.messages = list(messages)
+    return session
+
+
+def _wide_manager(tmp_path) -> ContextManager:
+    return ContextManager(
+        AIConfig(**{"max_context_tokens": 131_072, "max_messages": 50}),
+        transcripts_root=tmp_path,
+        summarizer=_good,
+    )
+
+
+def test_a_checkpointless_view_is_elided_and_reproducible(tmp_path):
+    """Measured 2026-11-06 with the current pipeline: a 44-message / 154k-token
+    history went to 23k for the one request that paid for a pass, no checkpoint
+    was installed (L4 saw 37k, under the ceiling), and the gate — reading that
+    23k as the context — let the next request go out as the raw **161k**, past a
+    131k window.  L0 has to apply to the request itself, not only to a
+    compaction's copy, or the shrink lasts exactly one iteration."""
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(20, 20_000)
+    session = _real_session(messages)
+
+    first = manager.checkpoint_view(messages, session=session)
+    second = manager.checkpoint_view(messages, session=session)
+
+    assert first is not None, "L0 must not require a checkpoint"
+    assert _history_tokens(first) < _history_tokens(messages) // 2
+    assert [m.content for m in first] == [m.content for m in second]
+
+
+def test_the_cold_start_measurement_uses_the_view_not_the_raw_tail(tmp_path):
+    """``working_history_tokens`` counts the post-checkpoint tail before L0, so
+    it over-reported a real request by 6x (313,587 against 50,626) and reopened
+    compaction at the start of every turn.  The gate must measure the view it is
+    about to send."""
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(30, 20_000)
+    session = _real_session(messages)
+    install_checkpoint(
+        session, GOOD_SUMMARY, consumed=2, anchor=_anchor_of(messages[:2])
+    )
+
+    view = manager.checkpoint_view(messages, session=session)
+
+    assert view is not None
+    measured = _observed_prompt_tokens(session, view)
+    assert measured == _history_tokens(view)
+    assert measured * 2 < working_history_tokens(session), (
+        "the L0 view is what the request carries; the raw tail is not"
+    )
+
+
+# ---- C: the post-compaction file refresh ----------------------------------
 
 def _session(reads: list[tuple[str, str]]):
     marks = [
