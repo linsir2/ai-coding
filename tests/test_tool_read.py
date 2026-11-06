@@ -2,6 +2,7 @@
 
 import pytest
 
+from ai_coding.infra.file_utils import file_version
 from ai_coding.security.file_state_tracker import FileStateTracker
 from ai_coding.security.sandbox import Sandbox
 from ai_coding.tools.read_tool import ReadTool
@@ -291,11 +292,12 @@ async def test_a_fully_covered_reread_returns_a_pointer(setup):
     R3-1: the page must be larger than ``_SMALL_READ_LINES`` -- a small file is
     deliberately answered with the body instead of a pointer."""
     tmp_path, sb, fst, tool = setup
-    (tmp_path / "trace.jsonl").write_text(
+    target = tmp_path / "trace.jsonl"
+    target.write_text(
         "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
     )
-    key = sb.key(tmp_path / "trace.jsonl")
-    marks = [(1, 100, "v1")]
+    key = sb.key(target)
+    marks = [(1, 100, file_version(target))]
 
     from ai_coding.tools.base import ToolContext
 
@@ -312,6 +314,41 @@ async def test_a_fully_covered_reread_returns_a_pointer(setup):
 
 
 @pytest.mark.asyncio
+async def test_a_changed_file_is_returned_in_full_not_suppressed(setup):
+    """2026-11 real-machine finding: the marks describe the *old* bytes.
+
+    write → pytest fail → read answered "[未返回正文…文件已变化]" and the
+    offset re-read was suppressed too, so the model re-requested its own edit
+    until the duplicate guard fired.  A changed file must come back whole.
+    """
+    tmp_path, sb, fst, tool = setup
+    target = tmp_path / "main.py"
+    target.write_text(
+        "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
+    )
+    stale = file_version(target)
+    # A *longer* body: size differs, so the version cannot collide even on a
+    # filesystem with coarse mtime granularity.
+    target.write_text(
+        "\n".join(f"NEW line number {index} with fresh content" for index in range(1, 101)) + "\n"
+    )
+    assert file_version(target) != stale
+    marks = [(1, 100, stale)]  # recorded before the rewrite
+
+    from ai_coding.tools.base import ToolContext
+
+    result = await tool.execute(
+        {"path": "main.py"},
+        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
+    )
+
+    assert result.success is True
+    assert "未返回正文" not in result.output
+    assert "NEW line number 1" in result.output
+    assert result.data is not None and result.data["changed"] is True
+
+
+@pytest.mark.asyncio
 async def test_the_second_pointer_returns_the_body(setup):
     """R3-1: the pointer tells the model to ask again; that promise must hold.
 
@@ -319,10 +356,11 @@ async def test_the_second_pointer_returns_the_body(setup):
     the same pointer, because the advice ("use limit=N") never worked.
     """
     tmp_path, sb, fst, tool = setup
-    (tmp_path / "trace.jsonl").write_text(
+    target = tmp_path / "trace.jsonl"
+    target.write_text(
         "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
     )
-    marks = [(1, 100, "v1")]
+    marks = [(1, 100, file_version(target))]
     seen: list[int] = []
 
     def _count(key, start, end, version):
@@ -369,10 +407,9 @@ async def test_a_short_but_wide_page_is_not_exempt(setup):
     """R4-4: "small" is lines **and** characters.  Twenty lines of minified
     output is not the 450-byte config the exemption was written for."""
     tmp_path, sb, fst, tool = setup
-    (tmp_path / "bundle.js").write_text(
-        "\n".join("x" * 300 for _ in range(20)) + "\n"
-    )
-    marks = [(1, 20, "v1")]
+    target = tmp_path / "bundle.js"
+    target.write_text("\n".join("x" * 300 for _ in range(20)) + "\n")
+    marks = [(1, 20, file_version(target))]
 
     from ai_coding.tools.base import ToolContext
 
@@ -389,10 +426,11 @@ async def test_a_59_line_file_is_deduplicated(setup):
     """R4-4: the live loop re-read a 59-line ``App.tsx`` 47 times because the
     old 60-line threshold exempted it."""
     tmp_path, sb, fst, tool = setup
-    (tmp_path / "App.tsx").write_text(
+    target = tmp_path / "App.tsx"
+    target.write_text(
         "\n".join(f"const row{index} = {index};" for index in range(1, 60)) + "\n"
     )
-    marks = [(1, 59, "v1")]
+    marks = [(1, 59, file_version(target))]
 
     from ai_coding.tools.base import ToolContext
 
@@ -407,10 +445,11 @@ async def test_a_59_line_file_is_deduplicated(setup):
 @pytest.mark.asyncio
 async def test_a_repeat_read_returns_only_the_gap(setup):
     tmp_path, sb, fst, tool = setup
-    (tmp_path / "trace.jsonl").write_text(
+    target = tmp_path / "trace.jsonl"
+    target.write_text(
         "\n".join(f'{{"line":{index}}}' for index in range(1, 101)) + "\n"
     )
-    marks = [(1, 95, "v1")]
+    marks = [(1, 95, file_version(target))]
 
     from ai_coding.tools.base import ToolContext
 
@@ -424,26 +463,6 @@ async def test_a_repeat_read_returns_only_the_gap(setup):
     assert '"line":97' in result.output
     assert '"line":5' not in result.output
     assert "只返回未读过的行" in result.output
-
-
-@pytest.mark.asyncio
-async def test_a_changed_file_still_reports_the_reason(setup):
-    tmp_path, sb, fst, tool = setup
-    (tmp_path / "g.txt").write_text(
-        "\n".join(f"content{index}" for index in range(1, 101)) + "\n"
-    )
-    marks = [(1, 100, "old-version")]
-
-    from ai_coding.tools.base import ToolContext
-
-    result = await tool.execute(
-        {"path": "g.txt"},
-        ToolContext(workspace=str(tmp_path), read_marks=lambda _key: tuple(marks)),
-    )
-
-    assert result.success is True
-    assert "文件已变化" in result.output
-    assert result.data is not None and result.data["changed"] is True
 
 
 @pytest.mark.asyncio

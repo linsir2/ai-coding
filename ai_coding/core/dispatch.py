@@ -632,7 +632,17 @@ class ToolDispatcher:
         guard_decision = self.guards.check(call, ctx, turn_view)
         rewritten_from: dict[str, Any] | None = None
         if guard_decision.verdict is GuardVerdict.DENY:
-            return self._guard_denied(call, guard_decision), True, False
+            refusal = self._guard_denied(call, guard_decision)
+            # 2026-11 real-machine finding: a refused call never reaches the
+            # post-execution pass, so ``FailedRepeatGuard`` never counted the
+            # denial and the model could retry the *same refused call* without
+            # bound (measured: eight identical denied reads in one turn).
+            # Counting the refusal keeps the failed-repeat budget honest; the
+            # duplicate-success budget is untouched (a refusal is not a
+            # success), and ``_not_run_ids`` still excludes it from
+            # mutation detection.
+            self.guards.after(call, refusal, ctx, turn_view)
+            return refusal, True, False
         if guard_decision.verdict is GuardVerdict.REWRITE:
             rewritten_from = dict(call.params)
             call = replace(call, params=dict(guard_decision.params or {}))

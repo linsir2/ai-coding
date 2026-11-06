@@ -199,9 +199,19 @@ class ReadTool(BaseTool):
             if resolved_ctx.read_marks is not None and not small
             else ()
         )
+        # 2026-11 real-machine finding: the marks describe the *old* bytes.
+        # When the file changed since they were written, "already read" is a
+        # lie -- the model needs the fresh content to build its next edit, and
+        # suppressing it made the model re-request the same range until the
+        # duplicate guard fired (measured: write → pytest fail → read answered
+        # "[未返回正文…文件已变化]" while the offset re-read was suppressed
+        # too, eleven times in one turn).  A changed file is returned in full;
+        # the suppression is a token saving for *unchanged* content only.
+        changed = bool(marks) and any(mark_version != version for _, _, mark_version in marks)
+        if changed:
+            marks = ()
         gaps = _uncovered(offset + 1, page_end, marks) if marks else [(offset + 1, page_end)]
         repeated = bool(marks) and gaps != [(offset + 1, page_end)]
-        changed = bool(marks) and any(mark_version != version for _, _, mark_version in marks)
 
         if not gaps:
             # Nothing new: say which lines were already in the context.  R3-1:

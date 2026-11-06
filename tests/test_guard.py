@@ -9,6 +9,7 @@ done?" (docs/r4-analysis.md 5.1/5.2).
 from ai_coding.core.guard import (
     BashPolicyGuard,
     DuplicateCallGuard,
+    FailedRepeatGuard,
     GuardChain,
     GuardDecision,
     GuardVerdict,
@@ -266,6 +267,36 @@ def test_duplicate_guard_names_the_visible_call_not_the_summarised_one():
     assert denied.verdict is GuardVerdict.DENY
     assert "(call b)" in denied.reason
     assert "(call a)" not in denied.reason
+
+
+def test_a_guard_refusal_counts_toward_the_failed_repeat_budget():
+    """2026-11 real run: 8 identical *denied* reads retried without bound.
+
+    The refusal never reached the post-execution pass, so FailedRepeatGuard
+    never counted it.  The dispatcher now feeds refusals through `after()`,
+    which this test pins at the guard level.
+    """
+    failed = FailedRepeatGuard(threshold=2, advisory=True)
+    duplicate = DuplicateCallGuard(threshold=2, advisory=True)
+    chain = GuardChain([failed, duplicate])
+    view, ctx = TurnView(), ToolContext()
+
+    result = ToolResult(
+        success=False,
+        output="error: refused by runtime guard 'duplicate_call': duplicate",
+        error="guard_denied",
+        data={"decision": "deny", "guard": "duplicate_call"},
+    )
+    call = _call("read", call_id="c5", path="main.py")
+    for index in range(6):
+        call = _call("read", call_id=f"c{index}", path="main.py")
+        assert duplicate.check(call, ctx, view).verdict is GuardVerdict.ALLOW
+        # The dispatcher feeds refusals through the same post pass now.
+        chain.after(call, result, ctx, view)
+
+    denied = failed.check(call, ctx, view)
+    assert denied.verdict is GuardVerdict.DENY
+    assert "cannot succeed" in denied.reason
 
 
 def test_advisory_guard_hard_stops_an_exact_read_loop():
