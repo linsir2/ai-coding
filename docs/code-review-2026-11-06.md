@@ -312,3 +312,100 @@ prefix=f".{target.name}.", suffix=".tmp")` + `fsync` + `os.replace`。顺带给 
 - 日志按 `grep -c` 统计：`ERROR|Traceback|approval_timeout|tool_timeout|
   content_too_large|stale_read|must_read_first`。
 - 本轮新加观测点：`late_effect` 回执是否在磁盘会话里出现（2.1 的现场证据）。
+
+---
+
+## 5. 14 轮压力任务实测（2026-11-06）
+
+配置 `/tmp/aic-r2/config-fullstack.yaml`（qwen3.7-flash、`context_window=131072`、
+`max_context_tokens=0`、`max_tool_iterations=30`、`max_auto_continuations=4`、
+`process_sandbox.mode=warn`——本机没有 bwrap，warn 是唯一诚实的降级）。
+全新工作区 `/tmp/aic-r2/ws-fullstack6`，`--rounds 14`；任务在第 3 轮就
+`TASK COMPLETE`（14 是上限，不是配额），总 728.5s。
+
+| 轮次 | 耗时 | 工具 | 迭代 | 门禁 |
+|---|---|---|---|---|
+| 1 | 359.5s | 25 | 29 | `be_pytest=1`（pydantic wheel），前端未开始 |
+| 2 | 121.0s | 21 | 25 | `be_pytest=0`、`fe_build=0`，仍是脚手架 |
+| 3 | 211.4s | 30 | 30 | 全绿（4 组件、非脚手架、README） |
+
+总计 76 次工具、74 次模型步、**0 次压缩**、日志 0 条 `ERROR/Traceback`。
+对比 R4（4 轮 1959s / 275 工具 / 17 次压缩）：耗时下降约 63%，工具调用下降 72%，
+压缩归零。
+
+### 5.1 日志里发现、并已修复的两个问题（`e4d0776`）
+
+**F1（P1）`todo_write.verify` 在所有非 plan 会话都是「未接线」**
+
+证据：`turn-1.jsonl` 的 7 次 todo_write 失败中，6 次来自同一个条目：
+`completion_unverified` → `completion_blocked`（两次）→ `override_unavailable`；
+`data.reason` 明确写着 `verify 未接线，无法证明完成`。模型随后只能把条目
+标成 `blocked`，第 3 轮结束时还要在交付总结里解释「task-gate 显示的是系统残留
+旧条目」。
+
+根因：`verify_item` 只在 `session.plan_verify_items` 为真时接线
+（旧 [agent_loop.py:2474](../ai_coding/core/agent_loop.py#L2474)），而
+`todo_write` 的 schema 与门禁文案在所有会话都宣传 `verify`。模型照做，
+命令永远不执行，条目永远证明不了完成，第二次失败后被永久 `blocked`。
+
+修复：无条件接线（`update_plan` 侧仍由 `plan_verify_items` 自己决定是否
+接受 verify 字段，所以没有给 plan 模式偷偷开自动验证）。
+回归测试：`test_todo_completion_runs_the_verify_command_outside_plan_mode`。
+
+**F2（P2）advisory 重复守卫把「编辑后重跑构建」当成重复**
+
+证据：`turn-3.jsonl` 第 24 步 `edit TaskList.tsx` 成功，第 25 步执行与第 19 步
+完全相同的 `npm run build ... | tail -20`，被 `guard_denied`
+（`duplicate_call`）；模型改写成 `tail -25` 后第 27 步才通过，白花 2 个迭代。
+
+根因：[guard.py:329-332](../ai_coding/core/guard.py#L329-L332) 的 advisory 分支在
+`view.mutates_world` 时直接按计数拒绝，没有走严格分支里已有的
+`_mutated_after_read` 逃生门；而 `BashTool` 的 `mutates_world` 恒为 True，
+所以每次 bash 都命中这条提前拒绝。
+
+修复：advisory 分支对 bash 先查 `_mutated_after_read`，与严格分支共用同一语义。
+回归测试：`test_an_advisory_bash_may_repeat_after_a_mutation`。
+
+### 5.2 日志里发现、本轮未改的观测/体验问题
+
+**F3（P2）nudge 消耗的迭代在 trace 里不可见**
+
+`turn-1` 的 `IterationStarted` 序列是 `i1…i20, i22, i23, i24, i26, i28, i29`，
+缺 21/25/27。它们在 [agent_loop.py:1115-1210](../ai_coding/core/agent_loop.py#L1115-L1210)
+的 NUDGE 分支里：`index += 1` 后直接 `continue`，既不 emit
+`IterationStarted`，也不 `books.note_iteration`。因此：
+(a) 迭代预算被算进去，但 trace 看不到这几步；
+(b) 回合报告里的 iterations 与 span 数量对不上，post-mortem 无法关联。
+建议：NUDGE 分支 emit 一个 `NudgeInjected(index, gate, level, reason)`（或至少
+`IterationStarted` 带 `nudged=true`），并让 `TurnBooks.iterations` 记录它。
+
+**F4（P2）`SearchStalled` 的 reason 与计数自相矛盾**
+
+`turn-2` 第 9 步的事件：`level=1, calls=5, streak=0, repeated=0, novel=2,
+unconverged=false, reason="look-only streak"`。它实际是
+[interventions.py:339-344](../ai_coding/core/interventions.py#L339-L344) 的
+`repeat_streak >= 1` 分支触发，但事件里没有 `repeat_streak` 字段，reason 也
+统一写成 look-only。建议给事件加 `repeat_streak`/`trigger`，并让 reason 反映
+真正的触发源。
+
+**F5（P3）没有 goal 时 `update_goal` 仍出现在工具面**
+
+`turn-3` 第 28 步 `update_goal` 返回 `no_goal`（「先 start_goal 立案」）。
+虽然报错文案是清楚的，但它白花一次调用并进入 ledger 的未知项。
+建议在 `_surface_tools` 里按「当前有无运行中的 goal」过滤
+`update_goal`（`start_goal` 保留）。
+
+**F6（P3）同一文件一轮内仍可重复读 5 次**
+
+`turn-3` 对 `frontend/src/components/TaskList.tsx` 读了 5 次（每次编辑后一次）。
+按现有设计（advisory + 小读豁免）这是允许的，且本轮只花 30 步就完成；
+但如果后面做 14 轮长任务，建议把「同一文件在同一批/相邻两步内内容未变」
+纳入去重，至少把它算进 `search_streak`。
+
+### 5.3 结论
+
+本轮压力任务在 3 轮内完成，所有交付门槛（后端 8 个 pytest、前端 build、
+4 个组件、非脚手架、README）都过了；日志与 trace 没有 ERROR/Traceback。
+真正影响效率的两个问题（F1 永久 blocked、F2 白花 2 步）已修复并通过回归测试，
+F3/F4 是 trace 可观测性的确定性缺陷，建议下一批处理；F5/F6 是低频优化。
+
