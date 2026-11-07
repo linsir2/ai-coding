@@ -101,13 +101,19 @@ class MCPCallTool(BaseTool):
             # Prefer the specific reason over a generic one: "it failed to
             # connect and why" is the message that lets the model tell the user
             # something actionable.
-            reason = self._manager.unreachable_reason(server)
+            unreachable = self._manager.unreachable_reason(server)
+            reason = unreachable
             if reason is None:
                 reason = (
                     f"no MCP server named '{server}' is configured. "
                     f"Connected servers: {', '.join(connected) or '(none)'}."
                 )
-            return self._error(reason, server, tool)
+            # MCP-07 keeps three leaves: a configured-but-unreachable server is
+            # a transport-shaped failure, while a hallucinated name is the
+            # model's error (and stays retryable, which is what it was before —
+            # NOT_FOUND would have made a retry look forbidden).
+            code = "mcp_transport" if unreachable else "mcp_tool_error"
+            return self._error(reason, server, tool, code)
 
         handle = self._manager.lookup(server, tool)
         if handle is None:
@@ -118,7 +124,19 @@ class MCPCallTool(BaseTool):
                 f"MCP server '{server}' has no tool '{tool}'. Its tools: {tools}.",
                 server,
                 tool,
+                "mcp_tool_error",
             )
+
+        # MCP-03: an execution bound is what makes a timeout possible at all.
+        # With ``execution`` unset (the default) or zero there is no session
+        # retirement, so a zero budget cannot retire a healthy session on
+        # every single call.
+        timeout = handle.execution_timeout
+        on_session_stale = (
+            (lambda: self._manager.note_session_stale(server))
+            if timeout is not None and timeout > 0
+            else None
+        )
 
         return await invoke_remote_tool(
             server=server,
@@ -126,21 +144,24 @@ class MCPCallTool(BaseTool):
             session=handle.session,
             arguments=arguments,
             ctx=ctx,
-            execution_timeout=handle.execution_timeout,
+            execution_timeout=timeout,
             progress_name=f"{server}__{tool}",
             # A parked owner never sees its subprocess die, so this call is the
             # only witness: a dead transport marks the server and wakes its
             # supervisor (M3 §1).  An ordinary tool error is not reported here
             # — the kernel only calls this for the transport-class ones.
             on_transport_error=lambda: self._manager.note_transport_death(server),
+            on_session_stale=on_session_stale,
         )
 
-    def _error(self, message: str, server: str, tool: str) -> ToolResult:
-        """A model-facing failure: named, and never out of the tool boundary."""
+    def _error(
+        self, message: str, server: str, tool: str, code: str = "mcp_tool_error"
+    ) -> ToolResult:
+        """A model-facing failure: named, classified, and never an exception."""
         return ToolResult(
             success=False,
             output=f"error: {message}",
-            error="mcp_error",
+            error=code,
             data={"server": server, "tool": tool},
         )
 

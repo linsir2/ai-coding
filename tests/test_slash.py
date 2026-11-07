@@ -4,7 +4,7 @@ Commands are the ``直接命令`` reserved in M4.  Unknown slash-prefixed input 
 plain text both return ``None`` (so they go to the model).  All pure and offline.
 """
 
-from ai_coding.app.slash import SlashCommand, parse_slash, suggest_command
+from ai_coding.app.slash import SlashCommand, command_names, parse_slash, suggest_command
 
 
 def test_plain_text_is_none():
@@ -123,3 +123,33 @@ def test_absorbed_command_points_at_its_replacement():
     assert suggest_command("/plan-run") == "plan"
     # still not a command: parse_slash must keep letting paths through
     assert parse_slash("/plan-run") is None
+
+
+def test_rewind_is_an_alias_for_undo():
+    """X-03c: any surface that parses through ``_ALIASES`` accepts the familiar
+    spelling.  The TUI's command list publishes canonical names only, so its
+    client-side parser does not offer ``/rewind``."""
+    for raw in ("/rewind", "/rewind now", "  /REWIND  "):
+        cmd = parse_slash(raw)
+        assert isinstance(cmd, SlashCommand)
+        assert cmd.name == "undo"
+
+
+def test_publishing_aliases_would_break_the_canonical_command_list():
+    """The TUI's "is this a command?" list must keep exactly the canonical names.
+
+    ``/rewind`` therefore is not offered by ``slash.list``; the alias itself is
+    still accepted by the shared parser.  Regression guard for X-03c's scope.
+    """
+    published = command_names()
+
+    assert "undo" in published
+    assert "rewind" not in published
+    assert len(published) == len(set(published))
+
+
+def test_help_names_the_rewind_alias():
+    from ai_coding.app.commands import HELP_TEXT
+
+    assert "/rewind" in HELP_TEXT
+    assert "/undo" in HELP_TEXT

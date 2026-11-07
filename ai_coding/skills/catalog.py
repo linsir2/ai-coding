@@ -30,7 +30,19 @@ SKILL_CATALOG_BUDGET_CHARS = 8_000
 #: Longest description kept in full before it is shortened. Claude Code caps the
 #: name+description entry at 1,536 chars; a skill description is a sentence or
 #: two, so anything past this is prose that belongs in the body.
-_MAX_DESCRIPTION_CHARS = 200
+MAX_DESCRIPTION_CHARS = 200
+
+
+def shorten_description(text: str) -> str:
+    """``text`` at catalog length, with an ellipsis when it was cut.
+
+    Public because the router injects the same descriptions into the tail
+    block; two ceilings would drift the day one of them changed.
+    """
+    if len(text) > MAX_DESCRIPTION_CHARS:
+        return text[:MAX_DESCRIPTION_CHARS].rstrip() + "…"
+    return text
+
 
 #: Room kept for the trailing count line, sized for three digits.
 _OMITTED_NOTE_RESERVE = len("(999 more skill(s) omitted: catalog budget)") + 1
@@ -65,10 +77,7 @@ def _entry(skill: Skill) -> list[str]:
 
 
 def _short_description(skill: Skill) -> str:
-    text = skill.description
-    if len(text) > _MAX_DESCRIPTION_CHARS:
-        text = text[:_MAX_DESCRIPTION_CHARS].rstrip() + "…"
-    return text
+    return shorten_description(skill.description)
 
 
 def _listing(skill: Skill) -> list[str]:
@@ -188,7 +197,9 @@ def superseded_note(previous: tuple[str, ...], current: tuple[Skill, ...]) -> st
 
 
 __all__ = [
+    "MAX_DESCRIPTION_CHARS",
     "SKILL_CATALOG_BUDGET_CHARS",
     "build_catalog",
+    "shorten_description",
     "superseded_note",
 ]

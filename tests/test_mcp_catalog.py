@@ -317,3 +317,26 @@ def test_a_budget_too_small_for_any_server_returns_no_catalog_at_all():
     # The header alone is ~184 characters. Emitting it anyway would mean
     # exceeding the budget and telling the model nothing.
     assert build_mcp_catalog([("a", [_tool("x")])], budget_chars=10) == ""
+
+
+# ---- MCP-05: a cut tool listing is declared, not silent --------------------
+
+
+def test_the_catalog_declares_an_incomplete_tool_listing():
+    text = build_mcp_catalog(
+        [("fs", [_tool("read_file")])], incomplete=(("fs", 20),)
+    )
+
+    assert "catalog incomplete" in text
+    assert "fs" in text
+    assert "20 pages" in text
+
+
+def test_the_incomplete_note_is_counted_in_the_budget():
+    servers = [("fs", [_tool("t", description="x" * 80)])]
+
+    for budget in range(1, 1_200, 7):
+        text = build_mcp_catalog(
+            servers, budget_chars=budget, incomplete=(("fs", 20),)
+        )
+        assert len(text) <= budget, f"budget {budget} produced {len(text)} characters"

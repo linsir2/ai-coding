@@ -18,6 +18,7 @@ below come from that:
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,23 @@ class InstallResult:
     @property
     def changed(self) -> bool:
         return bool(self.installed or self.replaced)
+
+
+def _first_symlink(root: Path) -> Path | None:
+    """The first symlink anywhere under ``root`` (dangling included), else None.
+
+    ``followlinks=False`` keeps the scan inside the tree: a symlinked directory
+    is reported by the walk, never entered, so detection cannot itself read
+    outside the candidate. ``is_symlink`` does not require the target to exist,
+    which is what catches a dangling link before ``copytree`` would dereference
+    it.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in (*dirnames, *filenames):
+            candidate = Path(dirpath) / name
+            if candidate.is_symlink():
+                return candidate
+    return None
 
 
 def _inspect(path: Path) -> Skill:
@@ -109,10 +127,28 @@ def install_from_path(
     force: bool = False,
 ) -> InstallResult:
     """Copy one skill, or every skill under a directory, into ``library``."""
-    source_path = Path(source).expanduser().resolve()
+    # The root is checked before ``resolve()``: resolving unbinds the link, so a
+    # caller that passes ``repo/"skills"`` -- the exact shape ``install_from_git``
+    # passes -- would walk the target and ``_first_symlink`` would never see the
+    # link itself (``os.walk`` does not report its root).
+    unresolved = Path(source).expanduser()
+    if unresolved.is_symlink():
+        raise InstallError(
+            f"{unresolved}: refusing a symlink; a real skill is a real file"
+        )
+    source_path = unresolved.resolve()
     library_path = Path(library).expanduser()
     if not source_path.is_dir():
         raise InstallError(f"{source_path}: not a directory")
+    # Refuse before choosing candidates: a repository can carry
+    # `skills -> /home/you/.ssh` above the directory that looks like a skill,
+    # and the per-candidate check would never see it.
+    found = _first_symlink(source_path)
+    if found is not None:
+        raise InstallError(
+            f"{source_path}: refusing a symlink at {found.relative_to(source_path)}; "
+            "a real skill is a real file"
+        )
 
     result = InstallResult(source=str(source_path))
     planned: list[tuple[Path, str]] = []
@@ -146,6 +182,25 @@ def install_from_path(
 
 # ---- git -------------------------------------------------------------------
 
+#: Path shapes that mean "a directory on this machine" before any repository
+#: parsing. ``~`` is included because a bare ``owner/repo`` never starts with it.
+_LOCAL_PREFIXES = ("./", "../", "/", "~")
+
+
+def _looks_local(source: str) -> bool:
+    """Local first: an explicit path prefix, or something that exists right now.
+
+    ``./my-skill`` used to be read as ``owner/repo`` (one slash, no scheme) and
+    cloned as ``https://github.com/./my-skill.git``. The local test runs before
+    the repository test so a directory that is here is never fetched from there.
+    """
+    if source.startswith(_LOCAL_PREFIXES):
+        return True
+    try:
+        return Path(source).expanduser().exists()
+    except OSError:
+        return False
+
 
 def git_source_url(source: str) -> str:
     """``owner/repo`` becomes a GitHub URL; anything with a scheme is used as
@@ -153,7 +208,13 @@ def git_source_url(source: str) -> str:
 
     The bare form exists because it is how people actually name a repository,
     and guessing wrong is visible immediately (it clones something, or nothing).
+    A local path is refused here so a direct caller gets "not a repository"
+    rather than a clone of ``github.com/./path``.
     """
+    if _looks_local(source):
+        raise InstallError(
+            f"{source}: looks like a local path, not a repository reference"
+        )
     if "://" in source or source.startswith("git@"):
         return source
     if source.count("/") == 1 and not source.startswith("/"):
@@ -173,7 +234,15 @@ async def install_from_git(
     Cloned into a temporary directory and installed from there, so the remote
     never gets to choose a destination. The clone is depth 1 and bounded: an
     unbounded ``git clone`` is a way to make the user wait without knowing why.
+
+    A local path is installed directly, from the working tree as it is now
+    (including uncommitted files) rather than from a commit. The CLI still
+    labels ``./repo`` as remote; this is the dispatch that makes the result
+    right without changing that spelling.
     """
+    if _looks_local(source):
+        return install_from_path(Path(source).expanduser(), library, force=force)
+
     import tempfile
 
     from ai_coding.infra.subprocess_runner import run_process_async
@@ -191,6 +260,13 @@ async def install_from_git(
             raise InstallError(f"git clone failed: {detail}")
         for folder in SKILL_CONTAINERS:
             candidate = Path(scratch) / folder
+            # A checkout can carry ``skills -> /home/you``. ``is_dir()`` follows
+            # the link, so without this the clone would be read from the host.
+            if candidate.is_symlink():
+                raise InstallError(
+                    f"{url}: refusing a symlink at {folder}; "
+                    "a real skill is a real file"
+                )
             if candidate.is_dir() and any(candidate.iterdir()):
                 result = install_from_path(candidate, library, force=force)
                 result.source = url

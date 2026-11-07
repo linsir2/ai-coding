@@ -33,7 +33,7 @@ from ai_coding.core.context_compression import (
     install_checkpoint,
     working_history_tokens,
 )
-from ai_coding.core.request_assembly import _observed_prompt_tokens
+from ai_coding.core.request_assembly import _LiveReadingWatch, _observed_prompt_tokens
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
@@ -324,3 +324,89 @@ def test_observed_prompt_tokens_ignores_a_previous_turns_measurement():
     assert observed == working_history_tokens(session)
     assert observed > CEILING
     assert _manager().should_compact(messages, observed) is True
+
+
+# ---- 6. CMP-05: a frozen provider reading must not silence the gate --------
+
+
+def test_a_frozen_reading_is_downgraded_after_three_repeats():
+    watch = _LiveReadingWatch()
+    session = _session()
+    session.live_context_tokens = 4_978
+    local = 10_000
+    returned = []
+    locals_seen = []
+    for _ in range(4):
+        locals_seen.append(local)
+        returned.append(watch.observe(session, local))
+        local = int(local * 1.06)
+
+    assert returned[:3] == [None, None, None], "three consistent repeats first"
+    assert returned[3] == locals_seen[3], "the fourth call uses the local estimate"
+
+
+def test_a_changed_reading_restarts_the_count():
+    watch = _LiveReadingWatch()
+    session = _session()
+    session.live_context_tokens = 4_978
+    watch.observe(session, 10_000)
+    watch.observe(session, 10_600)
+    watch.observe(session, 11_236)
+
+    session.live_context_tokens = 5_500
+    assert watch.observe(session, 11_910) is None, "a new reading is trusted again"
+    assert watch.observe(session, 12_625) is None
+
+
+def test_the_count_resets_when_the_turn_changes():
+    watch = _LiveReadingWatch()
+    session = _session()
+    session.turn_count = 1
+    session.live_context_tokens = 4_978
+    for local in (10_000, 10_600, 11_236, 11_910):
+        watch.observe(session, local)
+    assert watch._repeats == 3  # noqa: SLF001 - the heuristic under test
+
+    session.turn_count = 2
+    assert watch.observe(session, 12_625) is None
+    assert watch._repeats == 0  # noqa: SLF001 - a new turn observes afresh
+
+
+def test_observed_prompt_tokens_falls_back_to_the_working_view_when_frozen():
+    session = _session([ChatMessage(role="user", content="x" * 4_000, timestamp="")])
+    session.live_context_tokens = 4_978
+    watch = _LiveReadingWatch()
+    observed_values = []
+    local_values = []
+    for _ in range(4):
+        observed_values.append(_observed_prompt_tokens(session, watch=watch))
+        local_values.append(working_history_tokens(session))
+        session.messages.append(
+            ChatMessage(role="user", content="y" * 4_000, timestamp="")
+        )
+
+    assert observed_values[:3] == [4_978, 4_978, 4_978]
+    assert observed_values[3] == local_values[3]
+
+
+def test_a_live_reading_does_not_scan_the_whole_history(monkeypatch):
+    """P2-1: the provider's count is the answer, so the O(n) local estimate is
+    only paid once the frozen-reading heuristic can actually use it.  The old
+    code called ``working_history_tokens`` on every iteration with a live
+    reading, rescanning the entire history for a number it usually discarded."""
+    from ai_coding.core import request_assembly
+
+    session = _session(_big_history())
+    session.live_context_tokens = 12_345
+    calls: list[int] = []
+    monkeypatch.setattr(
+        request_assembly,
+        "working_history_tokens",
+        lambda _session: calls.append(1) or 1,
+    )
+
+    observed = _observed_prompt_tokens(session, watch=_LiveReadingWatch())
+
+    assert observed == 12_345
+    assert calls == [], "a moving/first reading must not scan the history"
+

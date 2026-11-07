@@ -65,11 +65,17 @@ class TurnPolicyConfig:
     # R4b: cumulative tokens one turn may spend (0 = no ceiling).  It counts the
     # re-sent context of every step, so it is a spend cap, not a window size.
     max_turn_tokens: int = 0
-    # R6b: the escalation ladder.  Repeated failures buy exactly one "change
-    # strategy" nudge; a turn in which nothing has ever succeeded stops early so
-    # the handoff can report it (docs/r6-analysis.md 2.2).
+    # R6b: the escalation ladder.  Repeated failures buy a "change strategy"
+    # nudge; a turn in which nothing has ever succeeded stops early so the
+    # handoff can report it (docs/r6-analysis.md 2.2).
     failed_streak_threshold: int = 2  # 0 disables the strategy nudge
-    max_strategy_nudges: int = 1
+    #: ORC-02: the strategy ladder's *level* cap, not a per-turn count.  L1..L3
+    #: may nudge and a failed window at L3 finishes; the default 3 reproduces
+    #: the ladder's historical L1 -> L2 -> L3 -> L4 behaviour.  ``0`` turns the
+    #: gate off entirely (no nudge, no early stop); values above 3 clamp to 3.
+    #: Explicit 1/2 users see fewer nudges than before (1 = one nudge then the
+    #: no-progress finish, 2 = L1 and L2 then the finish).
+    max_strategy_nudges: int = 3
     stall_iterations: int = 3  # 0 disables the early stop
     max_auto_continuations: int = 3
     #: B1/B2: consecutive look-only calls before the search ladder speaks.
@@ -103,7 +109,7 @@ class TurnPolicyConfig:
             failed_streak_threshold=int(
                 getattr(settings, "failed_streak_threshold", 2) or 0
             ),
-            max_strategy_nudges=int(getattr(settings, "max_strategy_nudges", 1) or 0),
+            max_strategy_nudges=int(getattr(settings, "max_strategy_nudges", 3) or 0),
             stall_iterations=int(getattr(settings, "stall_iterations", 3) or 0),
             max_auto_continuations=int(
                 getattr(settings, "max_auto_continuations", 3) or 0
@@ -259,6 +265,12 @@ class TurnPolicy:
         # round and does not inherit the build turn's step cap either; it is
         # bounded by the turn clock, the context window and the token budget,
         # and it ends when the model stops.
+        #
+        # ORC-01 (decided, not a defect): the plan-implementation turn and the
+        # planning turn have no step ceiling by design.  They are bounded by the
+        # context window/compaction, the PRE hard-stop ladders, the model
+        # stopping itself and the goal's round cap -- not by ``max_iterations``.
+        # Do not "restore" a cap here without a per-item resume design.
         ceiling = (
             -1
             if snapshot.plan_implementing or snapshot.mode == "plan"

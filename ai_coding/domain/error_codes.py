@@ -212,6 +212,12 @@ LEGACY_TO_FAMILY: dict[str, ToolError] = {
     "missing_query": ToolError.INVALID_ARGUMENT,
     # -- dependency / mechanism unavailable ---------------------------------
     "mcp_error": ToolError.UNAVAILABLE,
+    # MCP-07: three leaves instead of one, so a timeout, a dead transport and
+    # a remote tool's own refusal stop looking the same in a trace or a retry
+    # decision.  ``mcp_error`` stays for old traces and third-party producers.
+    "mcp_timeout": ToolError.DEADLINE_EXCEEDED,
+    "mcp_transport": ToolError.UNAVAILABLE,
+    "mcp_tool_error": ToolError.UNAVAILABLE,
     "memory_error": ToolError.UNAVAILABLE,
     "memory_unavailable": ToolError.UNAVAILABLE,
     "sandbox_unavailable": ToolError.UNAVAILABLE,
@@ -290,6 +296,10 @@ _RETRYABLE: frozenset[str] = frozenset(
         ToolError.UNAVAILABLE.value,
         ToolError.ABORTED.value,
         ToolError.INTERNAL.value,
+        # MCP-07: a timed-out remote call is worth retrying after the session
+        # is rebuilt; the other MCP leaves add nothing here (their families
+        # already carry the answer), and an unknown server/tool must not.
+        "mcp_timeout",
     }
 )
 
@@ -379,7 +389,9 @@ def is_neutral(error: str | None, detail: str | None = None) -> bool:
 
 def is_retryable(error: str | None) -> bool:
     """May the model retry the same call unchanged (after a back-off)?"""
-    return family_of(error) in _RETRYABLE
+    # A producer may still hand over the legacy leaf; the set is written in
+    # families, with the leaves that need to be named individually listed too.
+    return _code_text(error) in _RETRYABLE or family_of(error) in _RETRYABLE
 
 
 def tone_of(error: str | None) -> Literal["denied", "failed"]:

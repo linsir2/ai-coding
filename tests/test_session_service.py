@@ -1,6 +1,7 @@
 """TDD (M1-2): SessionService — create/save/load/list/delete + atomic persistence."""
 
 import json
+import threading
 
 from ai_coding.domain.message import ChatMessage
 from ai_coding.service.session_service import SessionService
@@ -386,3 +387,66 @@ def test_save_touches_last_access_time(tmp_path):
     svc.save(s)
 
     assert svc.load(s.session_id).last_access_time != "2000-01-01T00:00:00Z"
+
+
+class _CountingLock:
+    """Proxy for the service lock: counts entries (``RLock`` is a factory, not
+    a class, so a test cannot subclass it)."""
+
+    def __init__(self) -> None:
+        self.entries = 0
+        self._inner = threading.RLock()
+
+    def __enter__(self):
+        self.entries += 1
+        self._inner.acquire()
+        return self
+
+    def __exit__(self, *exc_info):
+        self._inner.release()
+        return False
+
+
+def test_every_marker_writer_uses_the_shared_lock(tmp_path):
+    """X-03b: the markers' temp name is shared, so an unlocked writer raced the
+    turn save (and a sibling marker) for the same ``.tmp`` path."""
+    svc = _svc(tmp_path / "sessions")
+    lock = _CountingLock()
+    svc._lock = lock
+    sid = "s1"
+
+    calls = [
+        lambda: svc.mark_pending_approval(sid, {"callId": "c1"}),
+        lambda: svc.mark_pending_posture(sid, {"agent": "plan"}),
+        lambda: svc.mark_pending_reminder(sid, [{"text": "hi"}]),
+        lambda: svc.mark_write_ahead(sid, [{"path": "a.py"}]),
+        lambda: svc.clear_write_ahead(sid),
+    ]
+    for call in calls:
+        before = lock.entries
+        call()
+        assert lock.entries == before + 1, call
+
+
+def test_concurrent_marker_writes_leave_one_complete_payload(tmp_path):
+    """With the shared lock, the same-session ``.tmp`` cannot be interleaved."""
+    svc = _svc(tmp_path / "sessions")
+    sid = "s1"
+    payloads = [{"callId": f"c{index}"} for index in range(8)]
+    errors: list[BaseException] = []
+
+    def _write(payload):
+        try:
+            svc.mark_pending_approval(sid, payload)
+        except BaseException as exc:  # pragma: no cover - the assertion reports
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_write, args=(payload,)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    stored = json.loads(svc._pending_path(sid).read_text(encoding="utf-8"))
+    assert stored in payloads, "the file must be one whole writer's payload"

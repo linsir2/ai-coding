@@ -73,7 +73,10 @@ class _Sessions:
 
 
 def _loop(
-    *tools: BaseTool, observer: RecordingObserver | None = None, **overrides: Any
+    *tools: BaseTool,
+    observer: RecordingObserver | None = None,
+    catalog_builder: Any = None,
+    **overrides: Any,
 ) -> tuple[AgentLoop, _Engine, RecordingObserver]:
     registry = ToolRegistry()
     for tool in tools:
@@ -87,6 +90,7 @@ def _loop(
         approval=AutoApproveCallback(),
         settings=AIConfig(max_tool_iterations=1, stop_policy="natural", **overrides),
         observer=seen,
+        catalog_builder=catalog_builder,
     )
     return loop, engine, seen
 
@@ -133,6 +137,51 @@ async def test_an_mcp_surface_over_its_own_ceiling_warns():
 @pytest.mark.asyncio
 async def test_no_warning_below_the_threshold():
     loop, _engine, observer = _loop(_Tool("tiny", "x"))
+    await loop.process_input(_session(), "一")
+    assert observer.of_type(ToolSurfaceWarning) == []
+
+
+# ---- MCP-10a: the per-step catalog is part of the MCP surface --------------
+
+
+@pytest.mark.asyncio
+async def test_a_large_mcp_catalog_warns_even_with_a_small_dispatcher_schema():
+    """After M2 the MCP cost is one ``mcp_call`` schema plus the catalog.
+
+    The old count only summed ``origin="mcp"`` schemas, so production could
+    never cross the ceiling no matter how big the catalog block grew.
+    """
+    loop, _engine, observer = _loop(
+        mcp_chars_warn=2_000,
+        catalog_builder=lambda: "x" * 3_000,
+    )
+    await loop.process_input(_session(), "一")
+
+    warnings = observer.of_type(ToolSurfaceWarning)
+    assert len(warnings) == 1
+    assert warnings[0].mcp_chars >= 3_000
+    assert warnings[0].threshold == 2_000
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_and_the_dispatcher_schema_are_both_counted():
+    loop, _engine, observer = _loop(
+        _Tool("remote", "z" * 3_000, origin="mcp"),
+        mcp_chars_warn=2_000,
+        catalog_builder=lambda: "c" * 2_500,
+    )
+    await loop.process_input(_session(), "一")
+
+    warning = observer.of_type(ToolSurfaceWarning)[0]
+    assert warning.mcp_chars > 2_500, "the catalog alone plus the schema"
+    assert warning.mcp_chars > dict(warning.origins)["mcp"]
+
+
+@pytest.mark.asyncio
+async def test_a_small_catalog_stays_quiet():
+    loop, _engine, observer = _loop(
+        _Tool("tiny", "x"), mcp_chars_warn=2_000, catalog_builder=lambda: ""
+    )
     await loop.process_input(_session(), "一")
     assert observer.of_type(ToolSurfaceWarning) == []
 

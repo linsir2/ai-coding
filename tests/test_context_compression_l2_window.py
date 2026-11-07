@@ -172,6 +172,22 @@ def test_a_write_failure_keeps_the_body_instead_of_eliding_it(tmp_path: Path):
     assert "chars elided" not in (out[0].content or "")
 
 
+def test_a_long_artifact_path_keeps_the_body_instead_of_growing_it(tmp_path: Path):
+    """CMP-04: the envelope names the artifact's absolute path, which can be
+    longer than the old 160-character allowance.  Then the "shrink" would make
+    the request bigger, so the body must stay."""
+    deep = tmp_path / ("x" * 120)
+    body = "B" * 161
+    out = placeholder_old_results(
+        [_tool(body, "c1"), _tool("r2", "c2")],
+        keep_recent=1,
+        window_chars=0,
+        elide_root=deep,
+    )
+    assert (out[0].content or "") == body
+    assert "chars elided" not in (out[0].content or "")
+
+
 # -------------------------------------------------------------- the pipeline
 
 

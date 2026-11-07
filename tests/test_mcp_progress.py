@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from _mcp_wait import until_mcp_settled
 
-from ai_coding.config.models import MCPConfig, MCPServerConfig
+from ai_coding.config.models import MCPConfig, MCPServerConfig, MCPTimeout
 from ai_coding.core.events import ToolChunk
 from ai_coding.core.mcp import MCPManager, MCPToolAdapter
 from ai_coding.tools.base import ToolContext
@@ -41,14 +41,16 @@ pytestmark = [
 
 
 def _config() -> MCPConfig:
+    # MCP-11: the models renamed/repolarised these fields and ``extra="ignore"``
+    # made the drift invisible — ``connection_timeout`` and ``enabled`` were
+    # silently dropped, so this fixture asserted against the 60s default.
     return MCPConfig(
         enabled=True,
-        connection_timeout=30,
         servers=[
             MCPServerConfig(
                 name="progress",
                 command=[sys.executable, str(SERVER)],
-                enabled=True,
+                timeout=MCPTimeout(startup=30_000),
             )
         ],
     )

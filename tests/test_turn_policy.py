@@ -107,6 +107,27 @@ def test_plan_implementing_ignores_the_turn_token_budget():
     assert normal.reason == "turn token budget exhausted"
 
 
+def test_plan_implementing_has_no_step_ceiling():
+    """ORC-01 guardrail: this is a design decision, not a missing cap.
+
+    The codex plan-execution turn is bounded by the context window/compaction,
+    the PRE ladders, the model stopping itself and the goal's round cap -- not
+    by ``max_iterations``.  A later "fix" that restores a step cap must fail
+    here first.
+    """
+    policy = TurnPolicy(_config(max_iterations=3))
+
+    implementing = policy.decide_next_iteration(
+        TurnSnapshot(iteration=10_000, plan_implementing=True)
+    )
+    assert implementing.action is TurnAction.ITERATE
+
+    # Not vacuous: the same iteration without the flag is far past the ceiling.
+    normal = policy.decide_next_iteration(TurnSnapshot(iteration=10_000))
+    assert normal.action is TurnAction.FINISH
+    assert normal.reason == "iteration budget exhausted"
+
+
 # ---- after a model step ----------------------------------------------------
 
 

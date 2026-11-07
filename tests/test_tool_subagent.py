@@ -154,6 +154,76 @@ async def test_subagent_tool_passes_artifacts():
     assert "parser.py" in result.output
 
 
+# ---- SUB-01: an isolated artifact path names a worktree that is already gone
+
+
+def _rendered(result: SubagentResult) -> str:
+    from ai_coding.tools.subagent_tool import _render
+
+    return _render(result, "probe")
+
+
+def test_render_marks_isolated_artifacts_as_gone():
+    text = _rendered(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            artifacts=(ToolArtifact(path="src/foo.py"),),
+            worktree_branch="ai_sub_x",
+            commit="abcdef123456",
+        )
+    )
+
+    assert "ai_sub_x" in text
+    assert "工作区已删除" in text
+    assert "  - src/foo.py" in text
+
+
+def test_render_marks_uncommitted_isolated_artifacts_as_lost():
+    text = _rendered(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            artifacts=(ToolArtifact(path="src/foo.py"),),
+            worktree_branch="ai_sub_x",
+            commit_error="git commit: no identity",
+        )
+    )
+
+    assert "已丢失" in text
+    assert "git commit: no identity" in text
+
+
+def test_render_never_claims_an_uncommitted_branch_was_committed():
+    text = _rendered(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            artifacts=(ToolArtifact(path="src/foo.py"),),
+            worktree_branch="ai_sub_x",
+            commit=None,
+        )
+    )
+
+    assert "未提交" in text
+    assert "ai_sub_x" in text
+
+
+def test_render_keeps_plain_artifact_list_without_branch():
+    """Regression guard: a non-isolated child's output stays byte-identical."""
+    text = _rendered(
+        SubagentResult(
+            status="completed",
+            conclusion="done",
+            artifacts=(ToolArtifact(path="parser.py"),),
+        )
+    )
+
+    assert "产物:" in text
+    assert "  - parser.py" in text
+    assert "已删除" not in text
+
+
 @pytest.mark.asyncio
 async def test_subagent_missing_task_fails():
     runner = _FakeRunner()

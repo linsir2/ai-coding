@@ -108,6 +108,67 @@ def test_terminal_outcome_defaults_to_max_iterations():
     assert outcome.status is TurnStatus.MAX_ITERATIONS
 
 
+# ---- ORC-05: a ladder finish names the ladder, as a suffix -------------------
+
+
+def test_terminal_outcome_names_the_strategy_ladder():
+    outcome = terminal_outcome(
+        TurnDecision(
+            TurnAction.FINISH,
+            "no progress: no tool call has succeeded in 3 iterations",
+            intervention="strategy",
+            level=4,
+        ),
+        budget_expired=False,
+        last_text=None,
+        iterations=9,
+    )
+    assert outcome.status is TurnStatus.MAX_ITERATIONS
+    assert outcome.reason == (
+        "no progress: no tool call has succeeded in 3 iterations "
+        "[strategy ladder L4]"
+    )
+
+
+def test_terminal_outcome_names_the_search_ladder():
+    outcome = terminal_outcome(
+        TurnDecision(
+            TurnAction.FINISH, "search unconverged", intervention="search", level=3
+        ),
+        budget_expired=False,
+        last_text=None,
+        iterations=16,
+    )
+    assert outcome.reason == "search unconverged [search ladder L3]"
+    # The suffix, not a prefix: the digest's label uses ``startswith``.
+    assert outcome.reason.startswith("search unconverged")
+
+
+def test_terminal_outcome_leaves_the_todo_reason_alone():
+    """The task reason is pinned by ``tests/golden/loop_events/todo_nudge.json``."""
+    outcome = terminal_outcome(
+        TurnDecision(
+            TurnAction.FINISH, "todo ladder exhausted", intervention="task", level=2
+        ),
+        budget_expired=False,
+        last_text=None,
+        iterations=4,
+    )
+    assert outcome.reason == "todo ladder exhausted"
+
+
+def test_terminal_outcome_leaves_the_token_budget_reason_alone():
+    """The token mouth is not a ladder; appending a source would invent one."""
+    outcome = terminal_outcome(
+        TurnDecision(TurnAction.FINISH, "turn token budget exhausted"),
+        budget_expired=False,
+        last_text=None,
+        iterations=3,
+    )
+    assert outcome.status is TurnStatus.BUDGET
+    assert outcome.reason == "turn token budget exhausted"
+
+
 def test_failed_outcome_names_the_label_that_timed_out():
     outcome = failed_outcome(
         DeadlineExpired("model_step", 30.0), last_text="半句", iterations=4

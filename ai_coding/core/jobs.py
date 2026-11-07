@@ -48,12 +48,13 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from ai_coding.core.events import BackgroundTaskDone, JobChanged
 from ai_coding.core.turn_report import emit_degraded
-from ai_coding.infra.time_utils import now_utc
+from ai_coding.infra.time_utils import now_utc, parse_iso8601
 from ai_coding.security.process_sandbox import (
     SHELL_ARGV0,
     ProcessSandboxPolicy,
@@ -64,6 +65,8 @@ from ai_coding.security.process_sandbox import (
 
 __all__ = [
     "MAX_JOB_LOG_BYTES",
+    "MAX_SETTLED_JOBS",
+    "SETTLED_RETENTION_DAYS",
     "WAIT_CANCELLED",
     "WAIT_SETTLED",
     "WAIT_TIMEOUT",
@@ -90,6 +93,15 @@ MAX_RUNNING_JOBS = 10
 #: wrote **1.59 GB** inside one 2s poll interval.  The watcher stays as a
 #: backstop for shells that ignore the limit.
 MAX_JOB_LOG_BYTES = 20_000_000
+
+#: How much *settled* history a workspace keeps.  Running jobs are bounded by
+#: ``MAX_RUNNING_JOBS``; settled ones had no bound at all, so a workspace that
+#: ran a command every day accumulated ledgers and logs forever.  Both limits
+#: are applied at startup, newest first, and are deliberately module constants:
+#: retention is not a knob this batch introduces into ``config/models.py``
+#: (X-03a).
+MAX_SETTLED_JOBS = 200
+SETTLED_RETENTION_DAYS = 7
 
 #: ``ulimit -f`` counts *blocks*, and how big one is depends on the shell: POSIX
 #: says 512 bytes, dash does that, and **bash counts 1024**.  One constant for
@@ -271,6 +283,7 @@ class JobRegistry:
         # the moment a publish called a reader.
         self._lock = threading.RLock()
         self._rescan()
+        self._prune_settled()
 
     # ---- starting ----------------------------------------------------------
 
@@ -847,6 +860,55 @@ class JobRegistry:
             job.settled = job.status != STATUS_RUNNING
             with self._lock:
                 self._jobs[job.id] = job
+
+    def _prune_settled(self) -> int:
+        """Drop settled history beyond the retention policy; return the count.
+
+        Startup only, and only rows this registry adopted: a job this process
+        just started must never disappear from under its owner.  Rows whose
+        timestamp cannot be parsed are skipped rather than deleted -- a missing
+        clock is not evidence of age.  Timestamps are normalised to UTC so a
+        ledger written with a naive local stamp (older builds) still compares.
+        """
+        if not self._root.is_dir():
+            return 0
+        cutoff = datetime.now(timezone.utc) - timedelta(days=SETTLED_RETENTION_DAYS)
+        removed = 0
+        kept: list[tuple[float, Job]] = []
+        with self._lock:
+            for job in list(self._jobs.values()):
+                if not job.settled or job.status == STATUS_RUNNING:
+                    continue
+                stamp = parse_iso8601(job.finished_at or job.started_at)
+                if stamp is None:
+                    _log.debug("keeping %s: no usable timestamp", job.id)
+                    continue
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                if stamp < cutoff:
+                    self._forget_settled(job)
+                    removed += 1
+                else:
+                    kept.append((stamp.timestamp(), job))
+            kept.sort(key=lambda item: item[0], reverse=True)
+            for _stamp, job in kept[MAX_SETTLED_JOBS:]:
+                self._forget_settled(job)
+                removed += 1
+        if removed:
+            _log.debug("pruned %d settled job(s) from %s", removed, self._root)
+        return removed
+
+    def _forget_settled(self, job: Job) -> None:
+        """Delete one settled job's ledger and log; caller holds ``self._lock``."""
+        self._jobs.pop(job.id, None)
+        paths = [self._root / f"{job.id}.json"]
+        if job.log_path:
+            paths.append(Path(job.log_path))
+        for path in paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                _log.debug("could not remove %s", path, exc_info=True)
 
     def _identity_matches(self, job: Job) -> bool:
         if job.start_ticks is None:

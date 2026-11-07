@@ -850,7 +850,7 @@ R7b 把这段话的前半句治掉了：L2 不再丢正文。实测同一份 70 
 | 档 | 触发（可测量） | 动作 |
 |---|---|---|
 | 局部修 | 同一 `(tool, params)` 重复 | 门卫拒绝（R4b 已有） |
-| 换策略 | 连续 `failed_streak_threshold`（默认 2）轮工具**全军覆没** | 注入一次 `[strategy-gate]`（每回合至多 `max_strategy_nudges=1` 次），要求先读错误、换手段或提问 |
+| 换策略 | 连续 `failed_streak_threshold`（默认 2）轮工具**全军覆没** | 注入一次 `[strategy-gate]`（每回合至多 `max_strategy_nudges` 次，默认 3、上限 L3），要求先读错误、换手段或提问 |
 | 收尾 | `stall_iterations`（默认 3）轮后**尝试过调用但零成功** | 提前 `FINISH` + 交接报告（R6a） |
 
 「尝试过但零成功」是判据的关键：只说话不调工具的回合归停止策略管（`strict` 会一直提醒），

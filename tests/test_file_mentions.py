@@ -9,6 +9,7 @@ is prose); a token that resolves to a skill is claimed by the skill path first.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from ai_coding.core.file_mentions import resolve_bare_paths, resolve_file_mentions
 from ai_coding.core.request_assembly import RequestAssembler
@@ -193,6 +194,23 @@ def test_a_pasted_absolute_path_reaches_the_model_as_a_pointer(tmp_path):
     assert "the answer is 42" not in text, "a bare path must not paste the body"
 
 
+def test_a_bare_pointer_does_not_read_the_file(tmp_path, monkeypatch):
+    """CTX-02: the pointer only needs the file's size.  Reading it in full to
+    count lines made every named path pay for its own bytes, every iteration."""
+    (tmp_path / "notes.txt").write_text("the answer is 42\n", encoding="utf-8")
+
+    def _no_read(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("a bare pointer must not read the file")
+
+    monkeypatch.setattr(Path, "read_text", _no_read)
+
+    text = _request_text(tmp_path, f"看下 {tmp_path}/notes.txt")
+
+    assert "notes.txt" in text
+    assert "约" in text, "the line count is an estimate and must say so"
+    assert "the answer is 42" not in text
+
+
 def test_a_pasted_relative_path_reaches_the_model_as_a_pointer(tmp_path):
     (tmp_path / "pkg").mkdir()
     (tmp_path / "pkg" / "a.py").write_text("MARKER\n", encoding="utf-8")
@@ -338,6 +356,90 @@ def test_a_huge_window_still_caps_the_block(tmp_path):
     assert len(block) <= 41_000
 
 
+# ---- CTX-01: directory/low-value blocks obey the budget too ----------------
+
+
+def test_a_directory_listing_scales_with_the_context_window(tmp_path):
+    from ai_coding.core.context_compression import estimate_tokens
+
+    (tmp_path / "pkg").mkdir()
+    for index in range(300):
+        (tmp_path / "pkg" / f"file_{index:03d}.py").write_text("x", encoding="utf-8")
+
+    narrow = _block(_request_text(tmp_path, "@pkg", window=6_000))
+    wide = _block(_request_text(tmp_path, "@pkg", window=200_000))
+
+    assert estimate_tokens(narrow) <= 900, "the 6k window's file budget"
+    assert narrow.count("file_") < wide.count("file_")
+    assert narrow.count("file_") < 300
+    assert "[+" in narrow and "more]" in narrow
+
+
+def test_bare_paths_stop_adding_once_the_budget_is_spent(tmp_path):
+    names = []
+    for index in range(200):
+        name = f"f{index:03d}.py"
+        (tmp_path / name).write_text("x", encoding="utf-8")
+        names.append(name)
+
+    text = _request_text(tmp_path, "看 " + " ".join(names), window=6_000)
+
+    assert "no room left" in text
+    block = _block(text)
+    assert block.endswith("</referenced-files>")
+
+
+def test_explicit_mentions_stop_once_the_budget_is_spent(tmp_path):
+    """P2-2: ``_no_room_line`` used to be free and an explicit ``@`` with no
+    room used ``continue``, so 400 named files paid 400 uncounted lines -- the
+    block grew far past its budget.  One degradation line, then stop."""
+    from ai_coding.core.context_compression import estimate_tokens
+
+    names = []
+    for index in range(400):
+        name = f"m{index:03d}.py"
+        (tmp_path / name).write_text("x", encoding="utf-8")
+        names.append("@" + name)
+
+    block = _block(_request_text(tmp_path, "看 " + " ".join(names), window=6_000))
+
+    assert block.count("no room left") == 1, "stop adding after the first miss"
+    # The block budget is 900 tokens; one uncounted line is what the old code
+    # left outside it.  Allow the single block cap (5_000) for a full file.
+    assert estimate_tokens(block) <= 900 + 5_000
+
+
+# ---- CTX-03: an explicit mention is not read in full to cut it -------------
+
+
+def test_an_explicit_mention_over_two_megabytes_is_a_pointer(tmp_path, monkeypatch):
+    (tmp_path / "huge.log").write_text("x" * 2_100_000, encoding="utf-8")
+
+    def _no_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("an oversized file must not be opened")
+
+    monkeypatch.setattr(Path, "open", _no_open)
+
+    text = _request_text(tmp_path, "@huge.log", window=6_000)
+
+    assert "too large or not text" in text
+    assert "x" * 100 not in text
+
+
+def test_a_binary_suffix_is_a_pointer_without_being_decoded(tmp_path, monkeypatch):
+    (tmp_path / "manual.pdf").write_text("PDFBODY", encoding="utf-8")
+
+    def _no_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("a binary file must not be decoded")
+
+    monkeypatch.setattr(Path, "open", _no_open)
+
+    text = _request_text(tmp_path, "@manual.pdf", window=6_000)
+
+    assert "too large or not text" in text
+    assert "PDFBODY" not in text
+
+
 def test_a_tiny_file_after_a_huge_one_still_arrives(tmp_path):
     """The 21-byte file used to become a bare pointer once the first ate the budget."""
     (tmp_path / "big.txt").write_text(_lines(6000), encoding="utf-8")
@@ -364,4 +466,8 @@ def test_the_truncation_note_says_what_it_holds_and_how_to_read_on(tmp_path):
     assert shown and offset, block[-400:]
     # `read`'s offset is 0-based, so "after line N" is exactly offset=N.
     assert int(offset.group(1)) == int(shown.group(1))
-    assert "6000 lines total" in block
+    # CTX-03: only a prefix is read, so the total is an estimate ("约") and the
+    # assertion allows the sampling error instead of pinning 6000 exactly.
+    total = re.search(r"约\s*(\d+)\s+lines total", block)
+    assert total, block[-400:]
+    assert abs(int(total.group(1)) - 6000) <= 60

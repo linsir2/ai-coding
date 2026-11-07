@@ -20,6 +20,7 @@ from ai_coding.domain.message import ChatMessage
 from ai_coding.domain.session import SessionData
 from ai_coding.domain.task import TaskState
 from ai_coding.domain.turn_digest import TurnDigest
+from ai_coding.skills.registry import SkillRegistry
 
 pytestmark = pytest.mark.asyncio
 
@@ -89,6 +90,7 @@ def _assembler(
     catalog: str = "",
     auto_compact: bool = True,
     workspace: str = "",
+    skills: Any = None,
 ) -> tuple[RequestAssembler, dict[str, Any]]:
     reporter = _Reporter()
     parts: dict[str, Any] = {
@@ -113,6 +115,7 @@ def _assembler(
         emit=parts["events"].append,
         catalog_builder=_catalog,
         workspace=workspace,
+        skills=skills,
     )
     return assembler, parts
 
@@ -570,3 +573,74 @@ async def test_plan_implementing_shows_the_task_and_not_a_full_plan_tail():
     assert "task" in tail_names
     assert "Step 6: RoomPage" in tail_text
     assert "<plan-state>" not in tail_text
+
+
+# ---- CTX-04: a named skill is not also recommended -------------------------
+
+
+def _write_triggered_skill(root: Any) -> None:
+    (root / "tidy").mkdir()
+    (root / "tidy" / "SKILL.md").write_text(
+        "---\n"
+        "name: tidy\n"
+        "description: tidies code\n"
+        "triggers:\n"
+        '  keywords: ["tidy"]\n'
+        "---\n"
+        "tidy 的正文\n",
+        encoding="utf-8",
+    )
+
+
+async def test_a_named_skill_is_not_also_recommended(tmp_path: Any):
+    _write_triggered_skill(tmp_path)
+    registry = SkillRegistry(tmp_path)
+    assembler, _parts = _assembler(workspace=str(tmp_path), skills=registry)
+    session = SessionData(session_id="s1", title="", created_time="t", last_access_time="t")
+    session.messages.append(ChatMessage(role="user", content="用 @tidy 收拾一下", timestamp="t"))
+
+    assembled = await _assemble(assembler, session=session)
+    text = "\n".join(m.content or "" for m in assembled.request)
+
+    assert "<requested-skills>" in text, "the explicit mention still loads the body"
+    assert "tidy 的正文" in text
+    assert "<recommended-skills>" not in text, (
+        "the router matched the same id; recommending it again is the duplicate"
+    )
+
+
+async def test_an_unmentioned_skill_is_still_recommended(tmp_path: Any):
+    _write_triggered_skill(tmp_path)
+    registry = SkillRegistry(tmp_path)
+    assembler, _parts = _assembler(workspace=str(tmp_path), skills=registry)
+    session = SessionData(session_id="s1", title="", created_time="t", last_access_time="t")
+    session.messages.append(ChatMessage(role="user", content="帮我 tidy 一下", timestamp="t"))
+
+    assembled = await _assemble(assembler, session=session)
+    text = "\n".join(m.content or "" for m in assembled.request)
+
+    assert "<recommended-skills>" in text
+    assert "<requested-skills>" not in text
+
+
+# ---- CTX-07a: the closing step has no tool schemas -------------------------
+
+
+async def test_offered_tools_false_asks_the_reporter_for_no_schema():
+    assembler, parts = _assembler()
+
+    await _assemble(assembler, offered_tools=False)
+
+    call = parts["reporter"].calls[-1]
+    assert call["offered_tools"] is False
+    assert call["tools_text"] is None, (
+        "an empty string would overwrite the reporter's cached tools text"
+    )
+
+
+async def test_an_ordinary_step_still_offers_tools():
+    assembler, parts = _assembler()
+
+    await _assemble(assembler)
+
+    assert parts["reporter"].calls[-1]["offered_tools"] is True

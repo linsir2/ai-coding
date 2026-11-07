@@ -11,11 +11,20 @@ So installing one is a supply-chain decision, and the rules here come from that:
   ``skills/x/SKILL.md -> /etc/shadow`` and nothing else about it looks odd.
 """
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from ai_coding.skills.install import InstallError, install_from_path, list_installed, remove_skill
+from ai_coding.skills.install import (
+    InstallError,
+    _looks_local,
+    git_source_url,
+    install_from_git,
+    install_from_path,
+    list_installed,
+    remove_skill,
+)
 
 
 def _skill_dir(root: Path, name: str, description: str = "a skill", body: str = "body") -> Path:
@@ -259,3 +268,131 @@ def test_a_directory_that_is_itself_a_skill_is_not_captured_by_a_nested_one(tmp_
     result = install_from_path(outer, tmp_path / "library")
 
     assert result.installed == ["my-skill"]
+
+
+# ---- SKL-02: a symlink at any depth is refused ------------------------------
+
+
+def test_a_nested_directory_symlink_is_refused(tmp_path):
+    """`copytree(symlinks=False)` dereferences, so `scripts -> /home/you`
+    would copy the host directory into the skill library."""
+    source = _skill_dir(tmp_path / "src", "tidy")
+    (tmp_path / "outside").mkdir()
+    (source / "scripts").symlink_to(tmp_path / "outside", target_is_directory=True)
+
+    with pytest.raises(InstallError) as excinfo:
+        install_from_path(source, tmp_path / "library")
+
+    message = str(excinfo.value)
+    assert "symlink" in message.lower()
+    assert "scripts" in message
+
+
+def test_a_nested_file_symlink_is_refused(tmp_path):
+    source = _skill_dir(tmp_path / "src", "tidy")
+    outside = tmp_path / "secret"
+    outside.write_text("host secret\n", encoding="utf-8")
+    (source / "reference").mkdir()
+    (source / "reference" / "secret").symlink_to(outside)
+
+    with pytest.raises(InstallError) as excinfo:
+        install_from_path(source, tmp_path / "library")
+
+    message = str(excinfo.value)
+    assert "symlink" in message.lower()
+    assert "reference/secret" in message or "reference\\secret" in message
+
+
+def test_a_dangling_symlink_is_refused(tmp_path):
+    source = _skill_dir(tmp_path / "src", "tidy")
+    (source / "missing").symlink_to(tmp_path / "does-not-exist")
+
+    with pytest.raises(InstallError) as excinfo:
+        install_from_path(source, tmp_path / "library")
+
+    assert "symlink" in str(excinfo.value).lower()
+
+
+def test_a_container_level_symlink_is_refused(tmp_path):
+    """The scan runs on the whole source, not just the chosen candidate:
+    `repo/skills -> /host/skills` must not slip past `_candidates`."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "host-skills").mkdir()
+    _skill_dir(tmp_path / "host-skills", "outside")
+    (repo / "skills").symlink_to(tmp_path / "host-skills", target_is_directory=True)
+
+    with pytest.raises(InstallError) as excinfo:
+        install_from_path(repo, tmp_path / "library")
+
+    message = str(excinfo.value)
+    assert "symlink" in message.lower()
+    assert "skills" in message
+
+
+def test_the_production_call_site_refuses_a_symlinked_skills_root(tmp_path):
+    """`install_from_git` hands ``install_from_path`` the repository's own
+    ``skills`` directory. Resolving that root first unbinds the link, so the
+    internal walk only ever saw the target -- a checkout could point ``skills``
+    at any host directory and have it copied into the library."""
+    host = tmp_path / "host-skills"
+    _skill_dir(host, "outside")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "skills").symlink_to(host, target_is_directory=True)
+    library = tmp_path / "library"
+
+    with pytest.raises(InstallError) as excinfo:
+        install_from_path(repo / "skills", library)
+
+    assert "symlink" in str(excinfo.value).lower()
+    assert not (library / "outside").exists()
+    assert not (library / "skills").exists()
+    assert not library.exists() or list(library.iterdir()) == []
+
+
+# ---- SKL-05: a local path is not a repository reference --------------------
+
+
+def test_a_dot_slash_path_is_not_a_repository_reference():
+    with pytest.raises(InstallError) as excinfo:
+        git_source_url("./x")
+
+    assert "local path" in str(excinfo.value)
+
+
+def test_absolute_and_home_paths_are_not_repository_references():
+    for source in ("/tmp/x", "~/x"):
+        with pytest.raises(InstallError):
+            git_source_url(source)
+
+
+def test_owner_repo_still_maps_to_github():
+    assert git_source_url("acme/skills") == "https://github.com/acme/skills.git"
+
+
+def test_full_url_and_scp_style_are_unchanged():
+    assert git_source_url("https://example.com/acme/skills") == (
+        "https://example.com/acme/skills"
+    )
+    assert git_source_url("git@example.com:acme/skills.git") == (
+        "git@example.com:acme/skills.git"
+    )
+
+
+def test_an_existing_relative_directory_is_local(tmp_path, monkeypatch):
+    (tmp_path / "acme" / "skills").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    assert _looks_local("acme/skills") is True
+
+
+def test_install_from_git_delegates_a_local_directory(tmp_path):
+    """`skill install ./repo` reaches install_from_git via the CLI; it must
+    install the working tree, not clone `github.com/./repo`."""
+    source = _skill_dir(tmp_path / "src", "tidy")
+
+    result = asyncio.run(install_from_git(str(source), tmp_path / "library"))
+
+    assert result.installed == ["tidy"]
+    assert (tmp_path / "library" / "tidy" / "SKILL.md").is_file()

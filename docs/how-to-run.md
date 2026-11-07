@@ -165,7 +165,7 @@ R6 的验收（回合摘要环 / 收尾交接 / 失败升级 / `ask_user` / 记�
 | `ai.working_memory_keep` | 12 | 压缩回合附带的「每轮一行摘要」条数（更早的细节请用 `memory_search` 或让记忆钉住决策） |
 | `ai.working_memory_chars` | 1200 | 该块渲染上限；普通回合不注入，所以不花钱 |
 | `ai.failed_streak_threshold` | 2 | 连续这么多轮「工具全军覆没」就注入一次 `[strategy-gate]`；0 关闭 |
-| `ai.max_strategy_nudges` | 1 | 每回合最多几次换策略提示 |
+| `ai.max_strategy_nudges` | 3 | 每回合最多几次换策略提示（级数上限，封顶 L3；0 关闭） |
 | `ai.stall_iterations` | 3 | 这么多轮后若「尝试过调用但一次都没成功」就提前收尾并给出交接报告；0 关闭 |
 | `tools.ask_user.enabled` | true | 是否允许模型主动提问（`ask` 与子智能体不会注册它，因为没有可问的人） |
 | `tools.ask_user.timeout_seconds` | 300 | 等人回答的上限（实际调用预算是它 +15s，且不超过回合剩余） |

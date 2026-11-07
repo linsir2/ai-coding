@@ -669,3 +669,215 @@ async def test_merge_source_falls_back_to_meta_when_the_journal_lacks_branch(tmp
 
     assert out["status"] == "merged"
     assert scheduler._merge_queue.tickets[0].branch == "ai_sub_meta"
+
+
+# ---- SUB-02: shutdown owns the children; stop owns its task ------------------
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_only_non_terminal_children():
+    runner = _Runner()
+    runner.rows = [
+        BackgroundTask(run_id="run_a", name="a", status="running", started=1.0),
+        BackgroundTask(run_id="run_b", name="b", status="completed", started=2.0),
+        BackgroundTask(run_id="run_c", name="c", status="cancelled", started=3.0),
+    ]
+    scheduler, _ = _scheduler(runner)
+
+    await scheduler.shutdown()
+
+    assert runner.closed == ["run_a"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_an_in_flight_turn():
+    runner = _Runner()
+    started = asyncio.Event()
+
+    async def hang(task, name="sub-agent", **kwargs):
+        runner.run_calls.append({"task": task, "name": name, **kwargs})
+        started.set()
+        await asyncio.Event().wait()
+
+    runner.run = hang  # type: ignore[method-assign]
+    scheduler, _ = _scheduler(runner)
+    request = TaskRequest.for_child(_task())
+    turn = asyncio.create_task(
+        scheduler.run(request, parent=None, observer=object(), emit=None)
+    )
+    await started.wait()
+
+    await scheduler.shutdown()
+
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+    assert scheduler._tasks == {}
+    assert scheduler.slots.active == 0
+
+
+@pytest.mark.asyncio
+async def test_shutdown_rejects_new_admissions():
+    scheduler, runner = _scheduler()
+
+    await scheduler.shutdown()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await scheduler.run(TaskRequest.for_child(_task()))
+    with pytest.raises(RuntimeError, match="closed"):
+        await scheduler.spawn(
+            TaskRequest.for_child(_task()), parent=None, observer=None, emit=None
+        )
+    with pytest.raises(RuntimeError, match="closed"):
+        await scheduler.fanout([ResearchQuestion("q1", "a")])
+    assert runner.run_calls == []
+    assert runner.spawn_calls == []
+    assert scheduler.records == []
+
+
+@pytest.mark.asyncio
+async def test_shutdown_is_idempotent():
+    scheduler, runner = _scheduler()
+
+    await scheduler.shutdown()
+    await scheduler.shutdown()
+
+    assert scheduler._closed is True
+    assert scheduler._tasks == {}
+    assert runner.closed == []
+
+
+@pytest.mark.asyncio
+async def test_stop_tracks_its_stop_task():
+    class _StoppingRunner(_Runner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stopped: list[str] = []
+
+        async def stop_run(self, run_id: str) -> bool:
+            self.stopped.append(run_id)
+            await asyncio.sleep(0)
+            return True
+
+    runner = _StoppingRunner()
+    scheduler, _ = _scheduler(runner)
+    request = TaskRequest.for_child(_task(), name="probe")
+    request_id, run_id = await scheduler.spawn(
+        request, parent=None, observer=None, emit=None
+    )
+
+    assert scheduler.stop(request_id) is True
+    assert f"stop:{run_id}" in scheduler._tasks
+    for _ in range(50):
+        if f"stop:{run_id}" not in scheduler._tasks:
+            break
+        await asyncio.sleep(0.01)
+    assert runner.stopped == [run_id]
+    assert f"stop:{run_id}" not in scheduler._tasks
+
+
+# ---- SUB-03: one idempotency key, one run -----------------------------------
+
+
+def _keyed_request(key="call-1", digest="d1"):
+    return TaskRequest.for_child(
+        _task(), name="probe", idempotency_key=key, payload_digest=digest,
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runs_with_the_same_key_start_only_once():
+    runner = _Runner()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def block(task, name="sub-agent", **kwargs):
+        runner.run_calls.append({"task": task, "name": name, **kwargs})
+        started.set()
+        await release.wait()
+        return runner.run_result
+
+    runner.run = block  # type: ignore[method-assign]
+    scheduler, _ = _scheduler(runner)
+    turn = asyncio.create_task(
+        scheduler.run(_keyed_request(), parent=None, observer=object(), emit=None)
+    )
+    await started.wait()
+
+    with pytest.raises(IdempotencyConflict):
+        await scheduler.run(_keyed_request(), parent=None, observer=object(), emit=None)
+
+    release.set()
+    result = await turn
+
+    assert result.status == "completed"
+    assert len(runner.run_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_run_releases_the_key_for_retry():
+    """Guard for the SUB-03 release path (green before, red if ``_idem_forget``
+    is ever dropped)."""
+    runner = _Runner()
+    calls: list[int] = []
+
+    async def boom(task, name="sub-agent", **kwargs):
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    runner.run = boom  # type: ignore[method-assign]
+    scheduler, _ = _scheduler(runner)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await scheduler.run(_keyed_request(), parent=None, observer=object(), emit=None)
+    with pytest.raises(RuntimeError, match="boom"):
+        await scheduler.run(_keyed_request(), parent=None, observer=object(), emit=None)
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_releases_the_key_for_retry():
+    """Guard for the SUB-03 release path on cancellation."""
+    runner = _Runner()
+    calls: list[int] = []
+    started = asyncio.Event()
+    hang = asyncio.Event()
+
+    async def block(task, name="sub-agent", **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            runner.run_calls.append({"task": task, "name": name, **kwargs})
+            started.set()
+            await hang.wait()
+        return runner.run_result
+
+    runner.run = block  # type: ignore[method-assign]
+    scheduler, _ = _scheduler(runner)
+    turn = asyncio.create_task(
+        scheduler.run(_keyed_request(), parent=None, observer=object(), emit=None)
+    )
+    await started.wait()
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    result = await scheduler.run(
+        _keyed_request(), parent=None, observer=object(), emit=None
+    )
+
+    assert result.status == "completed"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_completed_run_still_returns_the_cached_result():
+    """Regression guard: the settle path must keep answering from the cache."""
+    scheduler, runner = _scheduler()
+
+    first = await scheduler.run(_keyed_request(), parent=None, observer=object(),
+                                emit=None)
+    second = await scheduler.run(_keyed_request(), parent=None, observer=object(),
+                                 emit=None)
+
+    assert first is second is runner.run_result
+    assert len(runner.run_calls) == 1

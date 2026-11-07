@@ -37,6 +37,34 @@ def _lines(recorder):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def test_a_recorder_without_a_session_writes_nothing_and_invents_no_directory(tmp_path):
+    """X-02a: the recorder is built at world start, before a session exists.
+
+    An empty id means "not bound yet", not a session called ``unknown``.
+    """
+    recorder, store = _recorder(tmp_path, session_id="")
+
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+    recorder.on_event(ModelStepFinished(index=1, usage=None, latency_ms=1))
+
+    assert recorder.current_path is None
+    assert not (store.root / "unknown").exists()
+
+
+def test_events_before_the_session_is_bound_are_dropped_not_replayed(tmp_path):
+    """The minimal fix: pre-session events are not persisted (adjudicated)."""
+    recorder, store = _recorder(tmp_path, session_id="")
+    recorder.on_event(IterationStarted(index=1, max_iterations=1))
+
+    recorder.session_id = "sess-2"
+    recorder.on_event(ToolStarted(call_id="c1", tool_name="read", params={}))
+
+    lines = _lines(recorder)
+    assert [line["evt"] for line in lines] == ["ToolStarted"]
+    assert lines[0]["session"] == "sess-2"
+    assert not (store.root / "unknown").exists()
+
+
 def test_every_event_becomes_one_json_line(tmp_path):
     recorder, _ = _recorder(tmp_path)
     recorder.on_event(IterationStarted(index=1, max_iterations=5))

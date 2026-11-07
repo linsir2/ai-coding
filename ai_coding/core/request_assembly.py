@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +75,19 @@ _FILES_BLOCK_TOKENS_CAP = 10_000
 _FILES_BLOCK_MIN_TOKENS = 150
 _FILE_TOKENS_CAP = 5_000
 _DIR_ENTRIES = 200
+#: Rough cost of one directory entry (name + indent + optional ``/``).  Used to
+#: scale a listing to whatever is left of the block budget instead of always
+#: paying for 200 names a 6k window cannot afford.
+_DIR_ENTRY_TOKENS = 8
+#: Source trees and prose average ~40 bytes a line; only used for "about N
+#: lines" pointers, never for a line-accurate range.
+_AVG_LINE_BYTES = 40
+#: Above this an explicit ``@file`` is not inlined: reading it to count its lines
+#: (and then cutting 99% of it) costs more than the pointer is worth.
+_MAX_INLINE_FILE_BYTES = 2_000_000
+_BINARY_SUFFIXES = frozenset(IMAGE_MIME_BY_SUFFIX) | frozenset(
+    {".pdf", ".zip", ".gz", ".tar", ".whl", ".exe", ".so", ".dll", ".class", ".jar"}
+)
 
 #: C-2 (codex path): the one volatile instruction a plan turn carries.  It goes
 #: in the tail, before the task slot, so the model reads it as this request's
@@ -152,6 +165,27 @@ def _file_tag(rel: str) -> str:
     return f'<file path="{rel}">\n'
 
 
+def _no_room_line(rel: str) -> str:
+    """The one-line fallback when the file block has no budget left."""
+    return (
+        f"- {rel}: [no room left in this request's file budget; "
+        "read it with the read tool instead]"
+    )
+
+
+def _approx_lines(total_bytes: int, shown_lines: int = 0, shown_bytes: int = 0) -> int:
+    """About how many lines a file has, from its size and a shown prefix.
+
+    Exact line counts needed the whole file in memory, which defeated the point
+    of cutting it.  With a prefix we know the average line length, which is a
+    better answer than the 40-byte guess; without one the guess is all there is.
+    Every caller says "about", so no reader mistakes it for a count.
+    """
+    if shown_lines > 0 and shown_bytes > 0:
+        return max(shown_lines, round(shown_lines * total_bytes / shown_bytes))
+    return max(1, (total_bytes + _AVG_LINE_BYTES - 1) // _AVG_LINE_BYTES)
+
+
 def _file_content(rel: str, target: Path, *, room_tokens: int) -> str:
     """One file's text, wrapped, cut to ``room_tokens``.
 
@@ -160,15 +194,34 @@ def _file_content(rel: str, target: Path, *, room_tokens: int) -> str:
     names the range it holds plus the ``read`` call that continues it -- S3's
     model read a 497-line head of a 6000-line log and concluded the file was
     complete, because the old note only said how many *characters* existed.
+
+    Only a prefix is read.  Reading the whole file to count its lines made an
+    ``@`` mention of a 3 MB log pay for the 3 MB -- and a ``.pdf``/``.zip`` paid
+    for a decode that produced replacement characters.  ``stat`` answers "is it
+    worth inlining" first; the prefix answers "how much fits".
     """
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        size = target.stat().st_size
     except OSError as exc:
         return f'<file path="{rel}">[unreadable: {exc}]</file>'
-    limit = chars_for_tokens(text, room_tokens)
-    if limit >= len(text):
-        return f'<file path="{rel}">\n{text}\n</file>'
-    cut = text[:limit]
+    if size > _MAX_INLINE_FILE_BYTES or target.suffix.lower() in _BINARY_SUFFIXES:
+        lines = _approx_lines(size)
+        return (
+            f"- {rel}（约 {lines} 行，{size} 字节）："
+            "[too large or not text; read it with the read tool]"
+        )
+    # Four characters per token is the most any text can fit, so this probe is
+    # never shorter than the cut that follows it.
+    probe_chars = max(1, room_tokens * 4)
+    try:
+        with target.open("r", encoding="utf-8", errors="replace") as handle:
+            probe = handle.read(probe_chars + 1)
+    except OSError as exc:
+        return f'<file path="{rel}">[unreadable: {exc}]</file>'
+    limit = chars_for_tokens(probe, room_tokens)
+    if len(probe) <= limit:
+        return f'<file path="{rel}">\n{probe}\n</file>'
+    cut = probe[:limit]
     # Land on a line boundary so ``offset`` below names a whole line (a leading
     # blank line is boundary 0 and must be kept, not mistaken for "no newline").
     boundary = cut.rfind("\n")
@@ -176,24 +229,32 @@ def _file_content(rel: str, target: Path, *, room_tokens: int) -> str:
         cut = cut[: boundary + 1]
     # Split the same way ``read`` does (splitlines counts \x0c and \u2028 too),
     # otherwise the note's line numbers drift from the tool's offsets.
-    total = len(text.splitlines())
     if cut.count("\n") == 0:
         shown = 0
     else:
         shown = len(cut.splitlines())
+    cut_bytes = len(cut.encode("utf-8"))
+    total = _approx_lines(size, shown, cut_bytes)
+    # The total character count is an estimate now too: the file was never read
+    # past the probe, so it comes from the same byte ratio as the line count.
+    total_chars = (
+        round(len(cut) * size / cut_bytes) if cut_bytes > 0 else size
+    )
     if shown == 0:
         # A file with no line break in the shown part cannot be paged by
         # ``read``'s line offset; saying "lines 1-0, offset=0" would send the
         # model back to the beginning.
         note = (
-            f"\n[truncated: {len(text)} chars, {total} line{'s' if total != 1 else ''} total; "
+            f"\n[truncated: 约 {total_chars} chars, 约 {total} "
+            f"line{'s' if total != 1 else ''} total; "
             f"this text is the first {len(cut)} chars of line 1]"
         )
     else:
         # ``read``'s offset is 0-based, so "already shown lines 1-N" continues at
         # offset=N -- exactly the number in this note.
         note = (
-            f"\n[truncated: {len(text)} chars, {total} lines total; this text is lines 1-{shown}; "
+            f"\n[truncated: 约 {total_chars} chars, 约 {total} lines total; "
+            f"this text is lines 1-{shown}; "
             f"read offset={shown} limit=500 for the rest]"
         )
     return f'<file path="{rel}">\n{cut}{note}\n</file>'
@@ -210,20 +271,120 @@ def _bare_pointer(rel: str, target: Path) -> str:
 
     The read tool is one call away and asks for approval on its own; a pointer is
     enough.  An explicit ``@file`` keeps the inline: that is a request to paste.
+
+    ``stat`` is enough for "how big is this": the old version read the whole
+    file on every iteration just to count lines, which made a wave seed of log
+    paths pay for the logs themselves.  The line count is therefore "about".
     """
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        size = target.stat().st_size
     except OSError as exc:
         return f"- {rel}: [unreadable: {exc}]"
-    lines = len(text.splitlines())
+    lines = _approx_lines(size)
     return (
-        f"- {rel} ({lines} line{'s' if lines != 1 else ''}): "
+        f"- {rel}（约 {lines} 行）："
         "[not inlined this request; read it with the read tool]"
     )
 
 
+class _LiveReadingWatch:
+    """Detect a provider count that stopped moving while the history grows.
+
+    Some providers (and compatibility modes) return a cached prompt count that
+    does not follow the request.  ``live_context_tokens`` is treated as ground
+    truth, so a frozen reading silently disables the compaction gate: the
+    history grows past the window while the gate keeps seeing the old number.
+
+    Three consecutive readings that are *identical* while the local estimate
+    grew by more than 5% are enough to distrust it for this request.  The state
+    is keyed on ``(session_id, turn_count)``: a new turn starts observing from
+    scratch, and one loop serving several sessions cannot mix them up.
+
+    The cost of a wrong call is a compaction that opens earlier or later than it
+    otherwise would; the local estimate only *replaces* the gate input, it never
+    changes the request.
+    """
+
+    _GROWTH = 1.05
+    _REPEATS = 3
+
+    def __init__(self) -> None:
+        self._key: tuple[str, int] = ("", -1)
+        self._live = 0
+        self._local = 0
+        self._repeats = 0
+
+    def observe_lazy(
+        self, session: SessionData, local_tokens: Callable[[], int]
+    ) -> int | None:
+        """``observe`` without paying the O(n) local estimate every iteration.
+
+        The assembler asks once per iteration, and ``working_history_tokens``
+        scans the whole history just to feed a heuristic that resets whenever
+        the provider's reading changes.  The scan is therefore deferred until
+        it can change the answer: once to capture the baseline when the
+        reading first repeats, and once more at the threshold.  A reading that
+        keeps moving never pays for it.
+        """
+        key = (
+            str(getattr(session, "session_id", "") or ""),
+            int(getattr(session, "turn_count", 0) or 0),
+        )
+        if key != self._key:
+            self._key = key
+            self._live = 0
+            self._local = 0
+            self._repeats = 0
+        live = int(getattr(session, "live_context_tokens", 0) or 0)
+        if live <= 0:
+            self._live = 0
+            self._local = 0
+            self._repeats = 0
+            return None
+        if live != self._live:
+            self._live = live
+            self._local = 0
+            self._repeats = 0
+            return None
+        self._repeats += 1
+        if self._repeats < self._REPEATS:
+            if self._repeats == 1:
+                self._local = local_tokens()
+            return None
+        local = local_tokens()
+        grew = self._local > 0 and local > self._local * self._GROWTH
+        return local if grew else None
+
+    def observe(self, session: SessionData, local_tokens: int) -> int | None:
+        """Return the local estimate once the live reading looks frozen."""
+        key = (
+            str(getattr(session, "session_id", "") or ""),
+            int(getattr(session, "turn_count", 0) or 0),
+        )
+        if key != self._key:
+            self._key = key
+            self._live = 0
+            self._local = 0
+            self._repeats = 0
+        live = int(getattr(session, "live_context_tokens", 0) or 0)
+        if live <= 0:
+            # No reading this turn: the normal fallback path handles it.
+            self._live = 0
+            self._local = local_tokens
+            self._repeats = 0
+            return None
+        grew = self._local > 0 and local_tokens > self._local * self._GROWTH
+        self._repeats = self._repeats + 1 if (live == self._live and grew) else 0
+        self._live = live
+        self._local = local_tokens
+        return local_tokens if self._repeats >= self._REPEATS else None
+
+
 def _observed_prompt_tokens(
-    session: SessionData, view: Sequence[ChatMessage] | None = None
+    session: SessionData,
+    view: Sequence[ChatMessage] | None = None,
+    *,
+    watch: _LiveReadingWatch | None = None,
 ) -> int:
     """The best measurement of the request that is about to be sent.
 
@@ -247,6 +408,15 @@ def _observed_prompt_tokens(
     """
     live = int(getattr(session, "live_context_tokens", 0) or 0)
     if live > 0:
+        # P2-1: the provider's reading *is* the answer here.  The local
+        # estimate only feeds the frozen-reading heuristic, and it scans the
+        # whole history; ask for it lazily, so a moving reading never pays O(n).
+        if watch is not None:
+            override = watch.observe_lazy(
+                session, lambda: working_history_tokens(session)
+            )
+            if override is not None:
+                return override
         return live
     # No provider reading yet this turn: ``view`` is the history this request
     # will actually carry (checkpoint note + L0).  ``working_history_tokens``
@@ -344,7 +514,25 @@ class RequestAssembler:
         self._settings = settings
         self._emit = emit
         # M2: SOP router for recommending skills based on current context.
-        self._router = SOPRouter(skills) if skills is not None else None
+        # E-5: the deny list is the same boundary the catalog, @mention block
+        # and tool gate enforce; without it the tail recommends refused skills.
+        denied = (
+            denied_skill_ids(skills, getattr(settings, "skill_permissions", None))
+            if skills is not None
+            else frozenset()
+        )
+        # F3: the index lives in the workspace's state directory, not the
+        # process CWD. No workspace (old constructors/tests) keeps it off.
+        dendritic_path = (
+            Path(workspace).expanduser() / ".ai-coding" / "dendritic" / "index.json"
+            if workspace
+            else None
+        )
+        self._router = (
+            SOPRouter(skills, dendritic_path=dendritic_path, denied=denied)
+            if skills is not None
+            else None
+        )
         # Kept beside the router so an explicitly named skill can be resolved
         # against the same registry the automatic recommendation uses.
         self._skills = skills
@@ -356,6 +544,10 @@ class RequestAssembler:
         # off ``settings`` because ``AIConfig`` is not ``ToolsConfig``: reaching
         # across the two would be a lookup by accident.
         self._extra_roots = tuple(extra_workspace_roots)
+        # CMP-05: a provider count that stops moving must not silence the gate.
+        # The observation state lives here (not on ``SessionData``) because the
+        # session model is outside this unit's contract.
+        self._live_watch = _LiveReadingWatch()
 
     def _active_policy(self) -> Any:
         """The policy in force for this request (R01): the provider's answer
@@ -376,8 +568,16 @@ class RequestAssembler:
         index: int,
         previous_request: str | None,
         pinned: Sequence[ChatMessage] = (),
+        offered_tools: bool = True,
     ) -> Assembled:
-        """Compress, instruct, inject, tail — in that order, every iteration."""
+        """Compress, instruct, inject, tail — in that order, every iteration.
+
+        ``offered_tools=False`` says this step sends no tool schemas (the closing
+        step).  It changes the *measurement* only: the reporter renders the
+        canonical form without a schema for this call and leaves its cached
+        tools text untouched, so the next ordinary step is not silently reported
+        as schema-less.  The engine's own ``tools=[]`` is still the caller's.
+        """
         # I3: capture anchor before compaction
         if self._router is not None:
             constraints = self._get_active_constraints(session)
@@ -502,6 +702,10 @@ class RequestAssembler:
         recommended_skills_block = ""
         recovery_block = ""
         user_input = self._extract_user_input(session)
+        # A skill the human named is stated by a person, not inferred: it rides
+        # the explicit block with its full body and must not also be advertised
+        # by the router (same id twice, one of them weaker).
+        requested = list(resolve_mentions(user_input, self._skills))
         if self._router is not None:
             recent_tools = self._extract_recent_tools(session, books)
             task_goal = task.goal if task else ""
@@ -532,6 +736,12 @@ class RequestAssembler:
                     stats=getattr(session, "skill_stats", None),
                     phase=phase,
                 )
+                if requested:
+                    # CTX-04: an explicitly named skill is already being sent in
+                    # full; recommending it again spends tail tokens on the
+                    # weaker of the two signals.
+                    claimed = set(requested)
+                    matches = [m for m in matches if m.name not in claimed]
                 recommended_skills_block = SOPRouter.format_block(matches)
                 # F3: soft intervention appends pattern_dna
                 if intervention.mode == "soft":
@@ -545,7 +755,6 @@ class RequestAssembler:
             # the full content rides this tail block, so the turn needs no
             # round trip through the tool. The block is volatile: rebuilt from
             # the last user message every iteration, gone with the next one.
-            requested = resolve_mentions(user_input, self._skills)
             if requested:
                 recommended_skills_block += "\n\n" + self._requested_skills_block(requested)
         # r17/T4: @path references ride their own volatile block -- independent
@@ -602,9 +811,10 @@ class RequestAssembler:
             previous=previous_request,
             tools_text=(
                 self._tools_text_provider(session)
-                if self._tools_text_provider is not None
+                if offered_tools and self._tools_text_provider is not None
                 else None
             ),
+            offered_tools=offered_tools,
         )
         return Assembled(
             history=history,
@@ -769,24 +979,57 @@ class RequestAssembler:
                 continue
             target = root / rel
             if target.is_dir():
-                block = self._directory_listing(rel, target)
-            elif rel not in explicit_paths:
+                listing = self._directory_listing(
+                    rel,
+                    target,
+                    # CTX-01: the number of names scales with what is left.  A
+                    # 200-entry listing costs the same on a 6k window as on a
+                    # 200k one, so an unscaled list could be the whole request.
+                    max_entries=max(
+                        1,
+                        min(_DIR_ENTRIES, max(0, budget - used) // _DIR_ENTRY_TOKENS),
+                    ),
+                )
+                cost = estimate_tokens(listing)
+                if used + cost > budget:
+                    # Out of room: stop admitting, do not swap the listing for
+                    # an equally expensive one.  The pointer stays honest, and
+                    # its own cost is counted so the block cannot creep past the
+                    # budget by one uncounted line.
+                    line = _no_room_line(rel)
+                    lines.append(line)
+                    used += estimate_tokens(line)
+                    break
+                used += cost
+                lines.append(listing)
+                continue
+            if rel not in explicit_paths:
                 # Named, not attached: a pointer plus the read tool's name.
-                block = _bare_pointer(rel, target)
-            else:
-                pending -= 1
-                room = min(_FILE_TOKENS_CAP, budget - used - pending * _FILES_BLOCK_MIN_TOKENS)
-                if room <= 0:
-                    # D5: a file the user named is asked for, so the budget
-                    # decides how much of it the model reads -- never whether it
-                    # reads it.  Out of room here now means "a pointer with the
-                    # read call", not "a fragment of three hundred characters".
-                    lines.append(
-                        f"- {rel}: [no room left in this request's file budget; "
-                        "read it with the read tool instead]"
-                    )
-                    continue
-                block = _file_content(rel, target, room_tokens=room)
+                pointer = _bare_pointer(rel, target)
+                cost = estimate_tokens(pointer)
+                if used + cost > budget:
+                    line = _no_room_line(rel)
+                    lines.append(line)
+                    used += estimate_tokens(line)
+                    break
+                used += cost
+                lines.append(pointer)
+                continue
+            pending -= 1
+            room = min(_FILE_TOKENS_CAP, budget - used - pending * _FILES_BLOCK_MIN_TOKENS)
+            if room <= 0:
+                # D5: a file the user named is asked for, so the budget
+                # decides how much of it the model reads -- never whether it
+                # reads it.  Out of room here now means "a pointer with the
+                # read call", not "a fragment of three hundred characters".
+                # The line is counted and the loop stops: adding one pointer
+                # per remaining mention made a 200-file request pay hundreds of
+                # uncounted lines past the budget.
+                line = _no_room_line(rel)
+                lines.append(line)
+                used += estimate_tokens(line)
+                break
+            block = _file_content(rel, target, room_tokens=room)
             used += estimate_tokens(block)
             lines.append(block)
         lines.append("</referenced-files>")
@@ -806,13 +1049,16 @@ class RequestAssembler:
         return max(_FILES_BLOCK_MIN_TOKENS, min(_FILES_BLOCK_TOKENS_CAP, scaled))
 
     @staticmethod
-    def _directory_listing(rel: str, target: Path) -> str:
+    def _directory_listing(
+        rel: str, target: Path, *, max_entries: int = _DIR_ENTRIES
+    ) -> str:
         try:
             entries = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
         except OSError as exc:
             return f'<file path="{rel}" type="dir">[unreadable: {exc}]</file>'
-        shown = entries[:_DIR_ENTRIES]
-        note = f"\n[+{len(entries) - _DIR_ENTRIES} more]" if len(entries) > _DIR_ENTRIES else ""
+        limit = max(1, int(max_entries))
+        shown = entries[:limit]
+        note = f"\n[+{len(entries) - limit} more]" if len(entries) > limit else ""
         return f'<file path="{rel}" type="dir">\n' + "\n".join(shown) + note + "\n</file>"
 
     def _requested_skills_block(self, requested: Sequence[str]) -> str:
@@ -841,6 +1087,17 @@ class RequestAssembler:
             if not skill.is_healthy:
                 lines.append(f"- {name}: 无法加载（{skill.error}）。")
                 continue
+            # SKL-03: the body is the unbounded part; the wrapper stays intact
+            # so a truncated mention is still a well-formed <skill_content>.
+            body = skill.body
+            if body and estimate_tokens(body) > _FILE_TOKENS_CAP:
+                cut = chars_for_tokens(body, _FILE_TOKENS_CAP)
+                skill = replace(
+                    skill,
+                    body=body[:cut].rstrip()
+                    + "\n\n[截断：完整内容请用 skill(action=\"read\", name=\""
+                    f"{skill.id}\") 读取]",
+                )
             lines.append(render_skill_content(skill))
         lines.append("</requested-skills>")
         return "\n".join(lines)
@@ -964,7 +1221,9 @@ class RequestAssembler:
                 view = None
         wanted = {
             "session": session,
-            "observed_tokens": _observed_prompt_tokens(session, view),
+            "observed_tokens": _observed_prompt_tokens(
+                session, view, watch=self._live_watch
+            ),
         }
         return {name: value for name, value in wanted.items() if name in accepted}
 

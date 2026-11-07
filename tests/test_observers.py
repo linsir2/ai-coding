@@ -14,7 +14,7 @@ from ai_coding.core.events import (
     ScopedEvent,
     ToolStarted,
 )
-from ai_coding.core.observers import Braid, ScopedObserver
+from ai_coding.core.observers import Braid, SafeObserver, ScopedObserver
 
 
 def test_braid_forwards_to_every_observer_in_order():
@@ -47,6 +47,49 @@ def test_a_failing_observer_cannot_stop_the_others():
 
 def test_an_empty_braid_is_harmless():
     Braid().on_event(IterationStarted(index=1, max_iterations=1))
+
+
+class _Boom:
+    def on_event(self, event: LoopEvent) -> None:
+        raise RuntimeError("renderer exploded")
+
+
+def test_a_braid_counts_its_own_swallowed_failures():
+    """X-02c: without this counter the TurnReporter reads 0 and never reports
+    the degradation, because the Braid is the observer it sees."""
+    braid = Braid(_Boom(), RecordingObserver())
+
+    braid.on_event(IterationStarted(index=1, max_iterations=1))
+
+    assert braid.failures == 1
+
+
+def test_a_braid_aggregates_safe_observers_without_double_counting():
+    safe = SafeObserver(_Boom())
+    braid = Braid(safe, RecordingObserver())
+
+    braid.on_event(IterationStarted(index=1, max_iterations=1))
+
+    assert safe.failures == 1
+    assert braid.failures == 1, "the child counted it; the parent must not add again"
+
+
+def test_a_nested_braid_is_counted_once():
+    inner = Braid(_Boom())
+    outer = Braid(inner)
+
+    outer.on_event(IterationStarted(index=1, max_iterations=1))
+
+    assert inner.failures == 1
+    assert outer.failures == 1
+
+
+def test_a_healthy_braid_reports_zero_failures():
+    braid = Braid(RecordingObserver(), SafeObserver(RecordingObserver()))
+
+    braid.on_event(IterationStarted(index=1, max_iterations=1))
+
+    assert braid.failures == 0
 
 
 def test_scoped_observer_stamps_scope_and_parent():

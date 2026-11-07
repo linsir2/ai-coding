@@ -152,6 +152,21 @@ async def test_a_partial_undo_still_reloads_the_transcript(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rewind_is_the_same_command_as_undo(tmp_path):
+    """X-03c: the alias reaches the real undo branch, not the model."""
+    root = _repo(tmp_path)
+    loop, sessions = _loop(tmp_path, root)
+    session = sessions.create()
+    await _seeded_turn(loop, session, root)
+    console, _sink = _console()
+
+    action, _ = await handle_input(loop, "/rewind", session, sessions, console)
+
+    assert action is REPLAction.RELOAD
+    assert session.messages == [], "the history half must unroll like /undo"
+
+
+@pytest.mark.asyncio
 async def test_a_partial_redo_still_reloads_the_transcript(tmp_path):
     """M-A3: redo appends the history unconditionally, so a partial file
     restore must still RELOAD -- the same lie undo had, on the other half."""

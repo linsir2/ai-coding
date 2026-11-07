@@ -573,7 +573,7 @@ R6 只改了**一处**对外行为（未完成回合的返回值），其余全�
 | `ai.working_memory_keep` | 12 | 摘要环保留的回合数 |
 | `ai.working_memory_chars` | 1200 | `<working-memory>` 渲染上限（含包装与提示行） |
 | `ai.failed_streak_threshold` | 2 | 连续「全失败」多少轮后换策略；0 关闭 |
-| `ai.max_strategy_nudges` | 1 | 每回合最多几次换策略提示 |
+| `ai.max_strategy_nudges` | 3 | 每回合最多几次换策略提示（级数上限，封顶 L3；0 关闭） |
 | `ai.stall_iterations` | 3 | 多少轮后若仍「尝试过但零成功」就提前收尾；0 关闭 |
 | `tools.ask_user` | `ToolConfig(timeout_seconds=300)` | 提问工具的开关与等待上限 |
 

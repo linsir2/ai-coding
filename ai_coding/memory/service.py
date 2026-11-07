@@ -114,6 +114,18 @@ STAKE_SLASH_RATE = 0.3
 _INDEX_OPEN = "<memory-constraints>"
 _INDEX_CLOSE = "</memory-constraints>"
 _INDEX_OVERHEAD = len(_INDEX_OPEN) + len(_INDEX_CLOSE) + 1
+#: CTX-05: how much of one note the index may carry.  The block is injected on
+#: every request, and a single 3,000-character note used to blow through the
+#: 600-character budget because the selection loop exempted the first note.
+_MAX_NOTE_CHARS = 400
+
+
+def _clip_note_text(text: str, limit: int) -> str:
+    """One note's text, cut to ``limit`` characters with an explicit ellipsis."""
+    body = str(text or "")
+    if limit <= 0:
+        return ""
+    return body if len(body) <= limit else body[: limit - 1] + "…"
 
 
 def _default_config(**overrides: Any) -> SimpleNamespace:
@@ -712,10 +724,18 @@ class MemoryService:
         chosen: list[MemoryNote] = []
         used = 0
         for note in selected:
-            line = f"- [{note.kind.value}#{note.id[:8]}] {note.text}"
-            if used + len(line) > budget and chosen:
+            prefix = f"- [{note.kind.value}#{note.id[:8]}] "
+            room = budget - used - len(prefix) - 1
+            if room <= 1:
                 break
-            chosen.append(note)
+            # CTX-05: clip the *rendered* text to what is left.  Previously the
+            # first note was admitted unconditionally, so one long memory could
+            # push the block past ``index_max_chars`` on every request.
+            text = _clip_note_text(note.text, room)
+            line = prefix + text
+            # The note object carries the clipped text so the renderer cannot
+            # re-expand it and diverge from this calculation.
+            chosen.append(replace(note, text=text))
             used += len(line) + 1
             if used >= budget:
                 break
@@ -723,10 +743,19 @@ class MemoryService:
 
     @staticmethod
     def render_index_block(notes: Sequence[MemoryNote]) -> str:
-        """Render the constraint block (empty when there is nothing to say)."""
+        """Render the constraint block (empty when there is nothing to say).
+
+        ``index_notes`` already clips each note to the remaining budget; this
+        second clip is the guard for a caller that hands in notes from
+        elsewhere, so no single note can dominate the always-on block.
+        """
         if not notes:
             return ""
-        lines = [f"- [{note.kind.value}#{note.id[:8]}] {note.text}" for note in notes]
+        lines = [
+            f"- [{note.kind.value}#{note.id[:8]}] "
+            f"{_clip_note_text(note.text, _MAX_NOTE_CHARS)}"
+            for note in notes
+        ]
         return "\n".join([_INDEX_OPEN, *lines, _INDEX_CLOSE])
 
     # ---- harvest ----------------------------------------------------------
@@ -911,6 +940,10 @@ class MemoryService:
                 continue
             if _is_volatile_note(text):
                 continue
+            # CTX-05: bound what a new (or updated) note may store, so the
+            # read-side budget is not fighting an unbounded write.  Existing
+            # notes are untouched -- this is not a storage migration.
+            text = _clip_note_text(text, _MAX_NOTE_CHARS)
             note = new_note(
                 text,
                 kind=candidate.kind,

@@ -471,8 +471,14 @@ class AIConfig(BaseModel):
     # what Anthropic's sub-agent guidance describes - and it means the parent MUST
     # put every fact the child needs into the task text (docs/r7e-analysis.md 3.4).
     subagent_context_mode: Literal["full", "task_only"] = "full"
-    # R7e-3, recalibrated by r22: warn once per loop when the MCP part of the
-    # tool surface costs more than this.  0 disables.
+    # R7e-3, recalibrated by r22 and by MCP-10a: warn once per loop when the MCP
+    # part of the tool surface costs more than this.  0 disables.
+    #
+    # Since M2 an MCP server contributes a dispatcher schema (``mcp_call``) plus
+    # the per-step ``<mcp-catalog>`` text, so both are counted.  The default
+    # 2,000 is deliberately below a typical catalog (it is built with an 8,000
+    # char budget), which means most sessions with MCP servers will warn -- the
+    # block really is re-sent on every step, and this is the number to trim.
     #
     # It used to gate the *whole* surface at 12,000, a number picked when the
     # built-in tools serialised to 4,280 chars.  They are 12,760 now, so the
@@ -556,10 +562,19 @@ class AIConfig(BaseModel):
     # docs/r8-analysis.md 1.1 / 3.1).
     working_memory_note_chars: int = 120
     # R6b: the escalation ladder (docs/r6-analysis.md 2.2).  A streak of failed
-    # iterations buys one strategy nudge; a turn in which nothing succeeds stops
-    # early.  0 disables either half.
+    # iterations buys a "change strategy" nudge; a turn in which nothing
+    # succeeds stops early.  ``failed_streak_threshold`` 0 disables the nudge.
     failed_streak_threshold: int = 2
-    max_strategy_nudges: int = 1
+    #: ORC-02: the strategy ladder's *level* cap, not a per-turn count.  L1..L3
+    #: may nudge and a failed window at the cap finishes; 3 reproduces the
+    #: ladder's historical L1 -> L2 -> L3 -> L4 behaviour.  0 turns the whole
+    #: gate off (no nudge and no early stop); values above 3 clamp to 3.
+    #: Explicit 1/2 users see fewer nudges than before.  **Below 2 the
+    #: structured-repeat guard is never armed**: ``armed()`` keys on an open L2
+    #: window, so with a cap of 1 that rung never fires and ``strict_repeats``
+    #: stays unarmed for the whole turn -- 1 is not just "fewer nudges", it
+    #: loses the repeat protection entirely.
+    max_strategy_nudges: int = 3
     stall_iterations: int = 3
     #: M1: turns between background skill reviews (0=disabled).  After every N
     #: turns, a background task reviews the conversation delta and optionally
@@ -790,6 +805,10 @@ class MCPConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
+    #: MCP-01: run local servers' argv through the OS process sandbox.  Off by
+    #: default so an existing config behaves exactly as before; ``enforce``
+    #: refuses a server it cannot wrap rather than spawning it unisolated.
+    sandbox: bool = False
     servers: list[MCPServerConfig] = Field(default_factory=list)
 
 

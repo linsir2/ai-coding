@@ -21,9 +21,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import replace
+from typing import Any
 
 from ai_coding.core.budget import BudgetLedger
-from ai_coding.core.context_compression import estimate_tokens
+from ai_coding.core.context_compression import estimate_tokens, image_tokens
 from ai_coding.core.events import (
     ContextAssembled,
     Degraded,
@@ -40,6 +41,27 @@ from ai_coding.domain.usage import cache_from_usage
 __all__ = ["TurnReporter", "emit_degraded", "report_degraded"]
 
 _log = logging.getLogger(__name__)
+
+
+def _observer_failures(observer: LoopObserver) -> int:
+    """Sum ``failures`` along the wrapper chain.
+
+    The loop may hand the reporter a ``SafeObserver`` wrapping a ``Braid``.  A
+    ``SafeObserver`` only counts what *it* swallowed, so the braid's own
+    children were invisible; walking ``_inner`` reaches every wrapper and adds
+    each counter that exists once.  ``Braid`` already aggregates its children,
+    so the walk stops there (it has no ``_inner``).
+    """
+    total = 0
+    seen: set[int] = set()
+    current: Any = observer
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        value = getattr(current, "failures", None)
+        if value is not None:
+            total += int(value or 0)
+        current = getattr(current, "_inner", None)
+    return total
 
 
 def emit_degraded(
@@ -111,7 +133,7 @@ class TurnReporter:
 
     def begin_turn(self, observer: LoopObserver) -> None:
         """Remember the observer's failure count so the turn can report its own."""
-        self._failures_before = int(getattr(observer, "failures", 0) or 0)
+        self._failures_before = _observer_failures(observer)
         # T4: the ledger is *this turn's* spend.  It used to live for the whole
         # loop, so turn 2's usage re-stated turn 1's, `session.turnUsages` rows
         # were cumulative values shaped as per-turn, and `tokens_spent()` made a
@@ -128,6 +150,7 @@ class TurnReporter:
         tail_blocks: tuple[tuple[str, int], ...],
         previous: str | None,
         tools_text: str | None = None,
+        offered_tools: bool = True,
     ) -> str:
         """Report how this request was assembled; return its canonical form.
 
@@ -138,20 +161,35 @@ class TurnReporter:
         registry-wide text includes deferred tools that are not advertised, so
         using it here made every report ~1.8x the real request (27,181 chars
         reported, 15,169 sent).
+
+        ``offered_tools=False`` says this step sends no schemas (the closing
+        step).  The canonical form and the event use an empty schema for this
+        call only; the cached ``self._tools_text`` is left alone, so the next
+        ordinary step is not silently reported as schema-less (CTX-07a).
         """
         if tools_text is not None:
             self._tools_text = tools_text
             self._tools_chars = len(tools_text)
-        canonical = canonical_request(instructions, request, self._tools_text)
+        effective_tools = self._tools_text if offered_tools else ""
+        canonical = canonical_request(instructions, request, effective_tools)
         shared_chars, shared_ratio = prefix_shared(previous, canonical)
         event = ContextAssembled(
             iteration=iteration,
             system_chars=len(instructions or ""),
-            tools_chars=self._tools_chars,
+            tools_chars=len(effective_tools),
             history_messages=len(history),
-            history_chars=sum(len(message.content or "") for message in history),
+            # CTX-07c: a tool call's arguments are request content too.  The
+            # canonical form has always counted them; this field did not, so a
+            # tool-heavy request looked smaller than it was.
+            history_chars=sum(
+                len(message.content or "")
+                + sum(len(call.arguments or "") for call in (message.tool_calls or ()))
+                for message in history
+            ),
             tail_blocks=tail_blocks,
-            estimated_tokens=estimate_tokens(canonical),
+            # CTX-07b: images cost context but are not in the canonical text;
+            # charge them here so the estimate matches what the model receives.
+            estimated_tokens=estimate_tokens(canonical) + image_tokens(list(request)),
             prefix_shared_chars=shared_chars,
             prefix_shared_ratio=shared_ratio,
             digest=digest_of(canonical),
@@ -203,7 +241,7 @@ class TurnReporter:
         (docs/r4-analysis.md 4.2).
         """
         outcome = replace(outcome, usage=self._ledger.usage_dict())
-        if int(getattr(observer, "failures", 0) or 0) > self._failures_before:
+        if _observer_failures(observer) > self._failures_before:
             self.report_degraded(
                 "observer",
                 "an observer raised while rendering",

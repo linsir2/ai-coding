@@ -15,12 +15,16 @@ and the append-only prefix the prompt cache depends on are untouched.
 """
 
 import asyncio
+import time
 from types import SimpleNamespace
+
+import pytest
 
 from ai_coding.config.models import AIConfig
 from ai_coding.core.context_compression import (
     ContextManager,
     _anchor_of,
+    _history_chars,
     _history_tokens,
     estimate_tokens,
     install_checkpoint,
@@ -245,13 +249,30 @@ def test_a_compaction_reinjects_the_recently_read_files(tmp_path):
     manager = _manager(tmp_path, {"src/a.py": "ALPHA-CANARY\n" * 20})
     session = _session([("src/a.py", "c1")])
 
+    # CMP-01: the snapshot is mounted by ``compress_if_needed`` after the hard
+    # trim; ``compress`` itself no longer appends it.
     out = asyncio.run(
-        manager.compress(_tool_heavy(30, 2_000, "第一批"), session=session)
+        manager.compress_if_needed(
+            _tool_heavy(30, 2_000, "第一批"), session=session, force=True
+        )
     )
     body = "\n".join(m.content or "" for m in out)
 
     assert "压缩后重新载入" in body
     assert "ALPHA-CANARY" in body
+
+
+def test_compress_itself_no_longer_appends_the_snapshot(tmp_path):
+    """CMP-01: the public ``compress`` contract is the compressed history only.
+    The snapshot belongs to the request view, not to the pass."""
+    manager = _manager(tmp_path, {"src/a.py": "ALPHA-CANARY\n" * 20})
+    session = _session([("src/a.py", "c1")])
+
+    out = asyncio.run(
+        manager.compress(_tool_heavy(30, 2_000, "第一批"), session=session)
+    )
+
+    assert "压缩后重新载入" not in "\n".join(m.content or "" for m in out)
 
 
 def test_the_refresh_is_capped(tmp_path):
@@ -261,11 +282,13 @@ def test_the_refresh_is_capped(tmp_path):
     session = _session([(f"src/f{i}.py", f"c{i}") for i in range(10)])
 
     out = asyncio.run(
-        manager.compress(_tool_heavy(30, 2_000, "第一批"), session=session)
+        manager.compress_if_needed(
+            _tool_heavy(30, 2_000, "第一批"), session=session, force=True
+        )
     )
     body = "\n".join(m.content or "" for m in out)
 
-    assert body.count("### src/f") <= 5
+    assert 1 <= body.count("### src/f") <= 5
     assert estimate_tokens(body) < 12_000
 
 
@@ -274,7 +297,9 @@ def test_a_missing_file_is_not_reinjected(tmp_path):
     session = _session([("src/gone.py", "c1")])
 
     out = asyncio.run(
-        manager.compress(_tool_heavy(30, 2_000, "第一批"), session=session)
+        manager.compress_if_needed(
+            _tool_heavy(30, 2_000, "第一批"), session=session, force=True
+        )
     )
     body = "\n".join(m.content or "" for m in out)
     assert "压缩后重新载入" not in body
@@ -290,7 +315,9 @@ def test_no_reader_means_no_refresh(tmp_path):
     session = _session([("src/a.py", "c1")])
 
     out = asyncio.run(
-        manager.compress(_tool_heavy(30, 2_000, "第一批"), session=session)
+        manager.compress_if_needed(
+            _tool_heavy(30, 2_000, "第一批"), session=session, force=True
+        )
     )
     body = "\n".join(m.content or "" for m in out)
     assert "压缩后重新载入" not in body
@@ -301,8 +328,182 @@ def test_an_oversized_file_is_truncated_with_a_notice(tmp_path):
     session = _session([("src/huge.py", "c1")])
 
     out = asyncio.run(
-        manager.compress(_tool_heavy(30, 2_000, "第一批"), session=session)
+        manager.compress_if_needed(
+            _tool_heavy(30, 2_000, "第一批"), session=session, force=True
+        )
     )
     body = "\n".join(m.content or "" for m in out)
     assert "文件过长" in body
     assert len(body) < 60_000
+
+
+def test_the_snapshot_rides_every_checkpoint_view_exactly_once(tmp_path):
+    """CMP-01: two consecutive requests each carry one snapshot -- stable and
+    never duplicated."""
+    manager = _manager(tmp_path, {"src/a.py": "ALPHA-CANARY\n" * 20})
+    session = _session([("src/a.py", "c1")])
+    messages = _tool_heavy(30, 2_000, "第一批")
+    install_checkpoint(
+        session, GOOD_SUMMARY, consumed=2, anchor=_anchor_of(messages[:2])
+    )
+    session.messages = list(messages)
+
+    first = manager.checkpoint_view(messages, session=session)
+    second = manager.checkpoint_view(messages, session=session)
+
+    assert first is not None and second is not None
+    for view in (first, second):
+        body = "\n".join(m.content or "" for m in view)
+        assert body.count("[压缩后重新载入的文件快照]") == 1
+        assert "ALPHA-CANARY" in body
+
+
+def test_a_compact_that_changes_nothing_does_not_mount_a_snapshot(tmp_path):
+    """CMP-01 decision: a no-op ``/compact`` must not grow the list, or it looks
+    like it compacted when it did not."""
+    from ai_coding.domain.message import CHECKPOINT_MARK
+
+    manager = _manager(tmp_path, {"src/a.py": "ALPHA-CANARY\n" * 20})
+    session = _session([("src/a.py", "c1")])
+    # The raw list is already exactly the view the checkpoint describes.
+    already_view = [
+        ChatMessage(
+            role="user", content=f"{CHECKPOINT_MARK}\n{GOOD_SUMMARY}", timestamp=""
+        ),
+        ChatMessage(role="user", content="继续", timestamp=""),
+    ]
+
+    out = asyncio.run(
+        manager.compress_if_needed(already_view, session=session, force=True)
+    )
+
+    assert "压缩后重新载入" not in "\n".join(m.content or "" for m in out)
+
+
+def test_a_checkpointless_view_never_mounts_a_snapshot(tmp_path):
+    """P1-1: without a checkpoint L0 may save only a few thousand tokens; an 8k
+    snapshot then makes the "compressed" view *larger* than the raw history
+    (measured 45,025 -> 48,696 tokens).  The snapshot belongs to a checkpoint
+    view, and ``checkpoint_view`` never returns something bigger than its
+    input either way."""
+    manager = _manager(tmp_path, {"src/huge.py": "Z" * 40_000})
+    session = _session([("src/huge.py", "c1")])
+    messages = _tool_heavy(18, 3_000, "第一批")
+
+    view = manager.checkpoint_view(messages, session=session)
+
+    assert view is not None, "L0 still applies without a checkpoint"
+    body = "\n".join(m.content or "" for m in view)
+    assert "压缩后重新载入" not in body, "a checkpointless view must not pay 8k"
+    assert _history_chars(view) <= _history_chars(messages)
+
+
+# ---- CMP-02: the view is memoised per request shape ------------------------
+
+
+def test_checkpoint_view_scans_once_per_request_shape(tmp_path, monkeypatch):
+    import ai_coding.core.context_compression as compression
+
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(20, 2_000)
+    session = _real_session(messages)
+    calls: list[int] = []
+    real = compression.microcompact_old_results
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(compression, "microcompact_old_results", counting)
+
+    first = manager.checkpoint_view(messages, session=session)
+    second = manager.checkpoint_view(messages, session=session)
+
+    assert len(calls) == 1, "the same request must not rescan the whole history"
+    assert [m.content for m in first or []] == [m.content for m in second or []]
+
+    grown = [
+        *messages,
+        ChatMessage(role="user", content="新的一轮", timestamp=""),
+    ]
+    manager.checkpoint_view(grown, session=session)
+    assert len(calls) == 2, "a new message is a new shape"
+
+
+def test_the_memo_key_covers_the_window_and_protect_budget(tmp_path, monkeypatch):
+    import ai_coding.core.context_compression as compression
+
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(20, 2_000)
+    session = _real_session(messages)
+    calls: list[int] = []
+    real = compression.microcompact_old_results
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(compression, "microcompact_old_results", counting)
+    manager.checkpoint_view(messages, session=session)
+    manager._max_context_tokens = 6_000  # changes protect and the L2 window
+
+    manager.checkpoint_view(messages, session=session)
+
+    assert len(calls) == 2, "a window change must not reuse the old view"
+
+
+def test_the_memo_key_covers_the_session(tmp_path, monkeypatch):
+    """P2-3: one manager serves every session; a view built for one session must
+    never be reused for another, even when the message objects are shared."""
+    import ai_coding.core.context_compression as compression
+
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(20, 2_000)
+    first = _real_session(messages)
+    first.session_id = "s1"
+    second = _real_session(messages)
+    second.session_id = "s2"
+    calls: list[int] = []
+    real = compression.microcompact_old_results
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(compression, "microcompact_old_results", counting)
+    manager.checkpoint_view(messages, session=first)
+    manager.checkpoint_view(messages, session=second)
+
+    assert len(calls) == 2, "a different session is a different view"
+
+
+def test_twenty_requests_finish_well_under_a_second(tmp_path):
+    """A per-request view must not make each request cost a full rescan."""
+    manager = _wide_manager(tmp_path)
+    messages: list[ChatMessage] = []
+    started = time.perf_counter()
+    for turn in range(20):
+        messages = [*messages, *_tool_heavy(3, 500, f"t{turn}")]
+        session = _real_session(messages)
+        manager.checkpoint_view(messages, session=session)
+        manager.checkpoint_view(messages, session=session)
+    assert time.perf_counter() - started < 1.0
+
+
+# ---- CMP-03: the protect window scales with the context window -------------
+
+
+@pytest.mark.parametrize(
+    ("window", "expected"),
+    [
+        (6_000, 8_000),
+        (48_000, 16_000),
+        (131_072, 40_000),
+        (393_216, 40_000),
+    ],
+)
+def test_protect_tokens_scales_with_the_window(tmp_path, window, expected):
+    manager = ContextManager(
+        AIConfig(**{"max_context_tokens": window}), transcripts_root=tmp_path
+    )
+    assert manager._microcompact_protect_tokens() == expected

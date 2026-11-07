@@ -1416,17 +1416,71 @@ class AgentLoop:
                         ),
                     )
                     decision = self.policy.decide_after_step(snapshot)
+                    # ORC-04: a POST nudge written on the last allowed iteration
+                    # is never read -- the next PRE decision finishes the turn
+                    # before the model could see it.  Predict that next decision
+                    # instead of guessing from the ceiling: C3 may still return
+                    # NUDGE ("continue unfinished work"), and only a FINISH means
+                    # the injection would be wasted.  Convert it into the turn's
+                    # terminal note rather than spending a message.
+                    #
+                    # Two FINISH reasons are exempt: G8-2 makes one more model
+                    # call for a closing word on them, and that call *does* read
+                    # the message -- so the nudge is spent, not wasted.
+                    budget_closed_nudge = False
+                    if decision.action is TurnAction.NUDGE:
+                        budget_expired_now = (
+                            frame.deadline is not None and frame.deadline.expired
+                        )
+                        next_step = self.policy.decide_next_iteration(
+                            replace(snapshot, iteration=index + 1),
+                            budget_expired=budget_expired_now,
+                        )
+                        if (
+                            next_step.action is TurnAction.FINISH
+                            and next_step.reason
+                            not in (_ITERATION_BUDGET, interventions.SEARCH_UNCONVERGED)
+                        ):
+                            budget_closed_nudge = True
+                            decision = replace(
+                                decision,
+                                action=TurnAction.FINISH,
+                                # The converted nudge ends on the *next* decision,
+                                # so its reason is that one -- keeping the nudge's
+                                # reason made the digest say "ladder" for a turn
+                                # that actually died on the clock or the token cap.
+                                reason=next_step.reason,
+                                note=(
+                                    decision.inject
+                                    or decision.note
+                                    or decision.reason
+                                ),
+                            )
                     self._note_intervention(session, decision, snapshot)
                     if decision.action is TurnAction.FINISH:
-                        outcome = TurnOutcome(
-                            status=TurnStatus.COMPLETED,
-                            text=step.text,
-                            iterations=books.total_iterations,
-                            reason=decision.reason,
-                            # I1/R-7: a ladder FINISH's terminal line rides the
-                            # decision, so every way a turn can end shows it.
-                            note=decision.note,
-                        )
+                        if budget_closed_nudge:
+                            # One factory for every terminal state: status and
+                            # the ladder suffix both live there.
+                            outcome = replace(
+                                terminal_outcome(
+                                    next_step,
+                                    budget_expired=budget_expired_now,
+                                    last_text=step.text,
+                                    iterations=books.total_iterations,
+                                ),
+                                note=decision.note,
+                            )
+                        else:
+                            outcome = TurnOutcome(
+                                status=TurnStatus.COMPLETED,
+                                text=step.text,
+                                iterations=books.total_iterations,
+                                reason=decision.reason,
+                                # I1/R-7: a ladder FINISH's terminal line rides
+                                # the decision, so every way a turn can end shows
+                                # it.
+                                note=decision.note,
+                            )
                         break
                     books.note_nudge()
                     session.add_message(
@@ -1714,6 +1768,9 @@ class AgentLoop:
         if getattr(session, "plan_implementing", False):
             # A per-turn clock would cut a long plan mid-item, which is exactly
             # the interruption this executor exists to remove.
+            # ORC-01: no wall clock either -- the turn has neither a step nor a
+            # time ceiling, and is bounded by the context window/compaction, the
+            # PRE ladders, the model stopping itself and the goal's round cap.
             deadline = None
         else:
             turn_timeout = float(getattr(self.settings, "turn_timeout_seconds", 0.0) or 0.0)
@@ -1837,7 +1894,12 @@ class AgentLoop:
 
         * ``mcp_chars_warn`` (r22) judges only what the operator configured --
           the built-in tools are a fixed cost, and warning about them told
-          nobody anything they could act on;
+          nobody anything they could act on.  Since M2 the MCP cost is not one
+          schema per tool: it is the single ``mcp_call`` dispatcher schema
+          *plus* the per-step ``<mcp-catalog>`` block (MCP-10a).  Both are
+          counted, additively; with the default 2,000 ceiling most catalogs
+          cross the line on their own (the catalog is built with an 8,000-char
+          budget), which is the point -- this is the real per-step spend.
         * ``tools_chars_warn`` (R2-8, default 0 = off) judges the whole surface
           for the operator who wants to know the per-step floor.  Measured on
           this repository: 23,418 characters across 28 tools, with ``bash``
@@ -1855,9 +1917,19 @@ class AgentLoop:
         self._tools_chars = len(self._tools_text)
         self._tools_by_origin = _tools_by_origin(tools)
         mcp_threshold = int(getattr(self.settings, "mcp_chars_warn", 0) or 0)
-        mcp_chars = sum(
+        total_threshold = int(getattr(self.settings, "tools_chars_warn", 0) or 0)
+        origin_mcp_chars = sum(
             chars for origin, chars in self._tools_by_origin.items() if origin != "local"
         )
+        # MCP-10a: the catalog is the other half of the MCP surface.  Only build
+        # it while a warning is still pending -- after that it is pure cost.
+        catalog_chars = 0
+        if self.catalog_builder is not None and (
+            (mcp_threshold > 0 and not self._tools_warned)
+            or (total_threshold > 0 and not self._total_tools_warned)
+        ):
+            catalog_chars = len(self.catalog_builder() or "")
+        mcp_chars = origin_mcp_chars + catalog_chars
         if not self._tools_warned and mcp_threshold > 0 and mcp_chars > mcp_threshold:
             self._tools_warned = True
             biggest = next(
@@ -1870,14 +1942,18 @@ class AgentLoop:
                     threshold=mcp_threshold,
                     origins=tuple(self._tools_by_origin.items()),
                     hint=(
-                        "MCP 工具 schema 每一步都会重发；"
-                        f"最贵的是 '{biggest}'。用 mcp.servers[].tools 只注册需要的工具，"
+                        "MCP 工具 schema 与每步的 <mcp-catalog> 都会重发；"
+                        + (
+                            f"最贵的是 '{biggest}'。"
+                            if biggest
+                            else "主要成本是每步重发的 <mcp-catalog>。"
+                        )
+                        + "用 mcp.servers[].tools 只注册需要的工具，"
                         "或关掉用不到的 server。"
                     ),
                 )
             )
 
-        total_threshold = int(getattr(self.settings, "tools_chars_warn", 0) or 0)
         if (
             not self._total_tools_warned
             and total_threshold > 0
@@ -2754,6 +2830,9 @@ class AgentLoop:
         A plan turn (planning) and the codex plan-implementation turn are
         bounded by the turn clock, the context window and the model stopping,
         not by a step count -- see ``TurnPolicy.decide_next_iteration``.
+
+        ORC-01: ``-1`` also means "there is always another round" to
+        ``_has_a_round_left``; it is a contract, not a placeholder.
         """
         if (
             bool(getattr(session, "plan_implementing", False))
@@ -2945,6 +3024,10 @@ class AgentLoop:
                 index=self.policy.config.max_iterations + 1,
                 previous_request=previous_request,
                 pinned=(self._current_instruction,) if self._current_instruction else (),
+                # CTX-07a: this step sends ``tools=[]`` below, so the report
+                # must not charge the full schema.  The reporter keeps its
+                # cached tools text; only this call's estimate changes.
+                offered_tools=False,
             )
             request = [
                 *assembled.request,
@@ -3530,6 +3613,11 @@ class AgentLoop:
             readonly = bool(getattr(session, "readonly", False))
             session_rules = self._effective_session_rules(session)
             agent_rules = self._agent_rules(session)
+        # SUB-04: the catalog is the table the model may delegate to.  Read it
+        # defensively (older stacks may not carry one) and let an empty table
+        # render nothing.
+        catalog_agents = getattr(self, "agents", None)
+        subagents = getattr(catalog_agents, "subagents", None)
         return self.prompt.build(
             project_instructions=project_text,
             skills_catalog=catalog,
@@ -3548,6 +3636,11 @@ class AgentLoop:
                 plan_implementing=bool(
                     getattr(session, "plan_implementing", False)
                 ),
+            ),
+            agents=(
+                subagents()
+                if catalog_agents is not None and callable(subagents)
+                else None
             ),
         )
 

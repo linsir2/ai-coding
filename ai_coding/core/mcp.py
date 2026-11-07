@@ -44,10 +44,11 @@ import itertools
 import json
 import logging
 import os
+import shlex
 import tempfile
 import time
 import urllib.parse as urllib_parse
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +59,9 @@ from ai_coding.core.events import ToolChunk
 from ai_coding.core.turn_report import report_degraded
 from ai_coding.domain.message import ToolResult
 from ai_coding.infra.deadline import DeadlineExpired, run_with_deadline
+from ai_coding.infra.text_clip import clip_head_tail
 from ai_coding.paths import data_home
+from ai_coding.security.process_sandbox import SandboxGap, spawn_argv
 from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 
 SessionFactory = Callable[[MCPServerConfig], Any]
@@ -88,9 +91,27 @@ _current_errlog: contextvars.ContextVar[Any] = contextvars.ContextVar(
 )
 
 # How long a *connected* session may take to shut down before it is cancelled.
-# A session that never connected is cancelled almost immediately instead.
 _CLOSE_TIMEOUT = 5.0
 _CLOSE_TIMEOUT_NEVER_CONNECTED = 0.2
+#: MCP-02: after a forced cancel, how long to wait for the owner task to run
+#: its ``AsyncExitStack`` down.  A cancel is a signal, not a shutdown: returning
+#: immediately leaves the child process, stdio fd and HTTP client to the loop's
+#: next tick (or to process exit, which never runs them at all).
+_CLOSE_CANCEL_GRACE = 1.0
+
+#: MCP-04: the cap on one remote call's text output (~50k chars ≈ 12k tokens).
+#: ``turn_close._bounded_data`` already bounds ``structured``; this is the other
+#: channel, which had no bound at all.
+_MAX_RESULT_CHARS = 50_000
+
+#: MCP-05: ``tools/list`` is paginated.  Twenty pages is the hard stop; a cut
+#: listing is *declared* (catalog + panel) rather than silently partial.
+_LIST_TOOLS_MAX_PAGES = 20
+
+#: MCP-08: a session has to last this long before a reconnect may reset the
+#: backoff.  "It connected" is not "it is healthy": a server that connects and
+#: drops immediately used to reset the pause to one second on every cycle.
+_STABLE_SESSION_S = 60.0
 
 #: Description length per tool in the catalog, as OpenCode bounds it
 #: (packages/core/src/codemode/catalog.ts:48).
@@ -321,11 +342,19 @@ def _tool_line(handle: MCPToolHandle) -> str:
 def build_mcp_catalog(
     servers: list[tuple[str, list[MCPToolHandle]]],
     budget_chars: int = _CATALOG_BUDGET_CHARS,
+    *,
+    incomplete: Iterable[tuple[str, int]] = (),
 ) -> str:
     """The catalog text: one entry per callable remote tool (M2).
 
     Pure, and deliberately so — the budget discipline is the whole reason this
     exists, and it is testable without a connection.
+
+    ``incomplete`` names servers whose tool listing was cut short, with the
+    number of pages actually read (MCP-05).  Saying so is the whole point: a
+    server that returned page one and stopped looks identical to a server with
+    one page of tools, and the model then reasons from an absence that is ours.
+    Its room is reserved before anything is added, like the trailing note.
 
     Order is the config's (see :meth:`MCPManager.available`), and the budget is
     **shared round-robin**: every server gets one tool before any server gets a
@@ -348,10 +377,19 @@ def build_mcp_catalog(
         "server and tool must be spelled exactly as listed here.\n"
     )
     lines: list[str] = []
+    incomplete_pairs = [(str(name), int(pages)) for name, pages in incomplete]
+    incomplete_note = ""
+    if incomplete_pairs:
+        named = "; ".join(f"{name} ({pages} pages)" for name, pages in incomplete_pairs)
+        incomplete_note = f"(catalog incomplete: {named}; not every tool is listed)"
     # Every character of the output is accounted for before anything is added:
     # the opening header, the newline after it, and the closing tag. Leaving the
-    # tag out is how a 240-character budget produced 282 characters.
-    used = len(header) + 1 + len("</mcp-catalog>") + _OMITTED_NOTE_RESERVE
+    # tag out is how a 240-character budget produced 282 characters.  The
+    # incomplete note is reserved up front for the same reason.
+    used = (
+        len(header) + 1 + len("</mcp-catalog>") + _OMITTED_NOTE_RESERVE
+        + (len(incomplete_note) + 1 if incomplete_note else 0)
+    )
     shown = [0] * len(servers)
     taken = [0] * len(servers)
 
@@ -396,6 +434,8 @@ def build_mcp_catalog(
         return ""
     if omitted:
         lines.append(f"({omitted} more server(s) omitted: catalog budget)")
+    if incomplete_note:
+        lines.append(incomplete_note)
     return header + "\n".join(lines) + "\n</mcp-catalog>"
 
 
@@ -407,6 +447,13 @@ class _MCPSessionOwner:
         self.connected = asyncio.Event()
         self.ready = asyncio.Event()
         self.tools: list[Any] = []
+        #: MCP-05: how many ``tools/list`` pages were read, and whether the
+        #: listing stopped early (page cap, or a cursor that would not advance).
+        self.tools_pages: int = 0
+        self.tools_incomplete: bool = False
+        #: MCP-08: when the session became usable.  The supervisor resets its
+        #: backoff only if the session then lived long enough to be healthy.
+        self.ready_at: float | None = None
         self.session: Any = None
         self.error: BaseException | None = None
         #: Set when a call learned the transport is gone (M3 §1).  Keeps the
@@ -456,8 +503,8 @@ class _MCPSessionOwner:
                 finally:
                     _current_errlog.reset(token)
                 self.connected.set()
-                listed = await self.session.list_tools()
-                self.tools = list(getattr(listed, "tools", None) or [])
+                await self._list_tools()
+                self.ready_at = time.monotonic()
                 self.ready.set()
                 await self._stop.wait()
         except asyncio.CancelledError:
@@ -468,6 +515,52 @@ class _MCPSessionOwner:
             # budget would be spent in full on a server that already failed.
             self.connected.set()
             self.ready.set()
+
+    async def _list_tools(self) -> None:
+        """Read every ``tools/list`` page, up to the hard stop (MCP-05).
+
+        The first call is made without arguments, so a fake or an older SDK
+        whose ``list_tools`` takes only ``self`` keeps working; only a second
+        page ever passes ``cursor``.  A cursor that does not advance is treated
+        as an abnormal server: stop, and declare the listing incomplete instead
+        of looping for twenty pages over the same one.
+        """
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        seen_names: set[str] = set()
+        tools: list[Any] = []
+        pages = 0
+        incomplete = False
+        while pages < _LIST_TOOLS_MAX_PAGES:
+            listed = (
+                await self.session.list_tools()
+                if cursor is None
+                else await self.session.list_tools(cursor=cursor)
+            )
+            pages += 1
+            for tool in getattr(listed, "tools", None) or []:
+                name = str(getattr(tool, "name", ""))
+                if name and name not in seen_names:
+                    seen_names.add(name)
+                    tools.append(tool)
+            next_cursor = getattr(listed, "nextCursor", None)
+            if not next_cursor:
+                break
+            if next_cursor == cursor or next_cursor in seen_cursors:
+                incomplete = True
+                _log.warning(
+                    "MCP server %r repeated cursor %r; its tool list is incomplete",
+                    self.server.name,
+                    next_cursor,
+                )
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        else:
+            incomplete = True
+        self.tools = tools
+        self.tools_pages = pages
+        self.tools_incomplete = incomplete
 
     async def wait_ready(
         self, startup_s: float, catalog_s: float
@@ -501,15 +594,41 @@ class _MCPSessionOwner:
         return True, None
 
     async def close(self) -> None:
-        """Release the session in *its own* task (cancel it if it will not go)."""
+        """Release the session in *its own* task (cancel it if it will not go).
+
+        MCP-02: a cancel is a request, not a shutdown.  The owner's
+        ``AsyncExitStack`` only unwinds when the task next runs, so after
+        cancelling we wait (bounded) for that to happen — otherwise the child
+        process, the stdio fd and the HTTP client outlive the "closed" session.
+        ``asyncio.wait`` is used rather than ``await task`` so the task's own
+        ``CancelledError`` is not raised into the caller.
+        """
         self._stop.set()
         task = self._task
         if task is None or task.done():
             return
         budget = _CLOSE_TIMEOUT if self.ready.is_set() else _CLOSE_TIMEOUT_NEVER_CONNECTED
         done, _pending = await asyncio.wait({task}, timeout=budget)
+        if done:
+            return
+        task.cancel()
+        done, _pending = await asyncio.wait({task}, timeout=_CLOSE_CANCEL_GRACE)
         if not done:
-            task.cancel()
+            _log.warning("MCP session %r ignored cancellation", self.server.name)
+
+
+def _session_was_stable(owner: _MCPSessionOwner, now: float | None = None) -> bool:
+    """Whether this session lived long enough for a reset to be honest (MCP-08).
+
+    A server that connects and drops immediately used to reset the reconnect
+    pause to its minimum every cycle — a steady one-second storm.  Time is the
+    missing dimension: only a session that stayed usable for
+    ``_STABLE_SESSION_S`` earns a fresh schedule.
+    """
+    started = owner.ready_at
+    if started is None:
+        return False
+    return ((now if now is not None else time.monotonic()) - started) >= _STABLE_SESSION_S
 
 
 def _auth_store_path() -> Path:
@@ -595,6 +714,21 @@ class _TokenStore:
             del servers[self._server]
             self._write(doc)
 
+    def clear_client_info(self) -> None:
+        """Forget the registered client, keeping the tokens (MCP-09).
+
+        Dynamic client registration binds the client to the redirect URI it was
+        registered with.  When the callback port falls back to an OS-assigned
+        one, reusing that registration sends the authorization server a
+        redirect URI it was never told about — so the registration is dropped
+        and the next flow registers again with the actual port.
+        """
+        doc = self._read()
+        entry = doc.get("servers", {}).get(self._server)
+        if isinstance(entry, dict) and "client_info" in entry:
+            del entry["client_info"]
+            self._write(doc)
+
 
 class _CallbackServer:
     """The local endpoint an authorization redirect returns to (M4).
@@ -609,15 +743,29 @@ class _CallbackServer:
         self.port = port
         self._server: asyncio.Server | None = None
         self._code: asyncio.Future[tuple[str, str]] | None = None
+        #: MCP-09: the configured port was taken and the OS assigned another.
+        #: The redirect URI is built from ``self.port`` after ``start()``, so it
+        #: follows automatically; the cached client registration does not.
+        self.fell_back = False
 
     async def start(self) -> None:
         self._code = asyncio.get_running_loop().create_future()
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
-        # The configured port may be taken (another login in progress, another
-        # program); the OS assigns one and the redirect URI is built from it, so
-        # the operator is never sent to a port nothing is listening on.
-        if self.port == 0:
-            self.port = self._server.sockets[0].getsockname()[1]
+        try:
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
+        except OSError:
+            # The configured port may be taken (another login in progress,
+            # another program).  Refusing to sign in over it would turn a
+            # common situation into "sign-in failed: [Errno 98]" — so fall back
+            # to an OS-assigned port, which the redirect URI is built from.
+            if self.port == 0:
+                raise
+            _log.warning(
+                "MCP OAuth callback port %s is busy; using an OS-assigned port",
+                self.port,
+            )
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+            self.fell_back = True
+        self.port = self._server.sockets[0].getsockname()[1]
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -796,6 +944,11 @@ def _remote_session_factory(
                 else None
             )
             store = _TokenStore(_token_key(server))
+            if callback is not None and callback.fell_back:
+                # The redirect URI changed with the port, so a client
+                # registration cached against the old one is no longer usable
+                # (MCP-09).  Tokens are kept; only the registration is dropped.
+                store.clear_client_info()
             # With a manual bearer there is nothing to discover: the provider's
             # whole job is to turn a 401 into a login, and a header already
             # answers the challenge.  Building it anyway is not merely wasted —
@@ -866,11 +1019,11 @@ async def _open_browser(url: str) -> None:
         _log.warning("open this URL to sign in: %s", url)
 
 
-def _server_parameters(server: MCPServerConfig) -> Any:
+def _server_parameters(server: MCPServerConfig, *, argv: Sequence[str] | None = None) -> Any:
     """Build ``StdioServerParameters`` (kept separate so it can be unit-tested)."""
     from mcp import StdioServerParameters
 
-    command = list(server.command)
+    command = list(server.command if argv is None else argv)
     return StdioServerParameters(
         command=command[0] if command else "",
         args=command[1:],
@@ -879,7 +1032,47 @@ def _server_parameters(server: MCPServerConfig) -> Any:
     )
 
 
-def _default_session_factory(server: MCPServerConfig) -> Any:
+def _sandboxed_command(
+    command: Sequence[str],
+    policy: Any,
+    backend: Any,
+    roots: Sequence[Path],
+    *,
+    emit: Callable[[str], None] | None = None,
+) -> tuple[list[str], str | None]:
+    """``(argv, fallback reason)`` for a stdio server under the sandbox (MCP-01).
+
+    ``spawn_argv`` is the same entry point bash and jobs use, so an MCP child
+    is isolated by exactly the mechanism (and network mode) they are.  It is
+    fail-closed under ``enforce``: a ``SandboxGap`` is *raised* and the caller
+    refuses the server rather than spawning it unwrapped.  The other modes
+    return the original argv plus a stable reason code, which the caller
+    reports as Degraded — never a silent direct spawn.
+    """
+    if not command:
+        raise SandboxGap("mcp.sandbox.command.missing")
+    if policy is None:
+        return list(command), "sandbox.policy.missing"
+    if getattr(policy, "mode", "off") == "off" or getattr(policy, "bypass", False):
+        return list(command), None
+    if backend is None:
+        if getattr(policy, "mode", "off") == "enforce":
+            raise SandboxGap("sandbox.backend.missing")
+        return list(command), "sandbox.backend.missing"
+    if not backend.available():
+        if getattr(policy, "mode", "off") == "enforce":
+            raise SandboxGap(backend.gap())
+        return list(command), backend.gap()
+    reasons: list[str] = []
+    argv = spawn_argv(
+        shlex.join(list(command)), policy, backend, roots, emit=reasons.append
+    )
+    return argv, (reasons[0] if reasons else None)
+
+
+def _default_session_factory(
+    server: MCPServerConfig, *, parameters: Any | None = None
+) -> Any:
     """Connect a stdio MCP server and yield an initialized ``ClientSession``."""
     from mcp import ClientSession
     from mcp.client.stdio import stdio_client
@@ -893,7 +1086,7 @@ def _default_session_factory(server: MCPServerConfig) -> Any:
         # capture must be a *real* file — ``anyio`` asks it for a ``fileno``
         # and dups that into the child, which then writes it directly.
         async with stdio_client(
-            _server_parameters(server),
+            parameters if parameters is not None else _server_parameters(server),
             errlog=_current_errlog.get() or _devnull(),
         ) as (read, write):
             async with ClientSession(read, write) as session:
@@ -909,13 +1102,19 @@ def _default_session_factory(server: MCPServerConfig) -> Any:
 
 
 def _join_text(content: Any) -> str:
-    """Concatenate the text blocks of a ``CallToolResult.content`` list."""
+    """Concatenate the text blocks of a ``CallToolResult.content`` list.
+
+    MCP-04: the result crosses a process and a network boundary with no size
+    contract of its own, and this text goes into the next request verbatim.
+    ``clip_head_tail`` keeps both ends and states what it dropped; the middle is
+    the only part that is lost, and a marker makes that loss readable.
+    """
     parts: list[str] = []
     for block in content or []:
         text = getattr(block, "text", None)
         if isinstance(text, str) and text:
             parts.append(text)
-    return "\n".join(parts)
+    return clip_head_tail("\n".join(parts), _MAX_RESULT_CHARS)
 
 
 async def invoke_remote_tool(
@@ -928,6 +1127,7 @@ async def invoke_remote_tool(
     execution_timeout: float | None,
     progress_name: str,
     on_transport_error: Callable[[], None] | None = None,
+    on_session_stale: Callable[[], None] | None = None,
 ) -> ToolResult:
     """Call one remote tool and normalize whatever comes back (M2 kernel).
 
@@ -971,22 +1171,30 @@ async def invoke_remote_tool(
                 tool_name, arguments, progress_callback=_progress
             )
     except DeadlineExpired:
+        # MCP-03: an abandoned ``call_tool`` can still complete in the
+        # background and deliver its response to a session that now looks
+        # healthy.  The timeout therefore retires the *session*, not just this
+        # call; the supervisor rebuilds it.  ``on_session_stale`` is only wired
+        # when an execution bound actually exists (see ``MCPCallTool``).
+        if on_session_stale is not None:
+            on_session_stale()
         return ToolResult(
             success=False,
             output=f"error: MCP tool '{tool_name}' did not answer within "
             f"{execution_timeout:g}s",
-            error="mcp_error",
+            error="mcp_timeout",
             data={"server": server, "tool": tool_name},
         )
     except Exception as exc:  # noqa: BLE001 — tool boundary
-        if on_transport_error is not None and _is_transport_death(exc):
+        transport = _is_transport_death(exc)
+        if on_transport_error is not None and transport:
             # The session is gone, not just this call: whoever owns the server
             # needs to know before the model tries again.
             on_transport_error()
         return ToolResult(
             success=False,
             output=f"error: MCP tool '{tool_name}' failed: {exc}",
-            error="mcp_error",
+            error="mcp_transport" if transport else "mcp_tool_error",
             data={"server": server, "tool": tool_name},
         )
 
@@ -1007,7 +1215,7 @@ async def invoke_remote_tool(
             "is_error": is_error,
             "structured": getattr(result, "structured_content", None),
         },
-        error="mcp_error" if is_error else None,
+        error="mcp_tool_error" if is_error else None,
     )
 
 
@@ -1096,16 +1304,31 @@ class MCPManager:
         *,
         session_factory: SessionFactory | None = None,
         observer: Any | None = None,
+        sandbox: tuple[Any, Any] | None = None,
+        sandbox_roots: Any = (),
     ) -> None:
         self._config = config or MCPConfig()
         self._session_factory = session_factory or _default_session_factory
         self._observer = observer
+        #: MCP-01: ``(policy, backend)`` from the composition root, and the
+        #: writable face ``spawn_argv`` needs.  Both are inert unless
+        #: ``mcp.sandbox`` is on, so an existing config sees no change.
+        policy, backend = sandbox or (None, None)
+        self._sandbox_policy: Any = policy
+        self._sandbox_backend: Any = backend
+        self._sandbox_roots = sandbox_roots
+        #: Servers already reported as running without the sandbox.
+        self._sandbox_degraded: set[str] = set()
         # Settled owners, in config order (``available`` reads them in that
         # order, which is the catalog's order: first configured, first listed).
         self._owners: list[_MCPSessionOwner] = []
         self._supervisors: dict[str, asyncio.Task[None]] = {}
         #: Per-server "try now" flags: a manual connect, or a dead transport.
         self._wake: dict[str, asyncio.Event] = {}
+        #: Servers whose wake came from ``request_connect`` (a human asked for
+        #: an immediate attempt), so the healthy-session pause can be skipped
+        #: without treating a transport death the same way (MCP-08).
+        self._manual: set[str] = set()
         #: Servers already reported degraded once (M3: the first failure only).
         self._degraded: set[str] = set()
         self._stop = asyncio.Event()
@@ -1231,7 +1454,19 @@ class MCPManager:
                     # dead transport: either way this session is finished.
                     self._mark_dead(server.name, "连接已断开，正在重连")
                     self._publish(server.name)
-                    delay = _BACKOFF_MIN
+                    # MCP-08: "it connected" is not "it is healthy".  Only a
+                    # session that lasted may reset the pause; a crash loop
+                    # doubles like any other repeated failure, and now waits
+                    # before spawning again — a connect/drop cycle used to
+                    # reconnect with no pause at all.
+                    manual = server.name in self._manual
+                    self._manual.discard(server.name)
+                    if _session_was_stable(owner):
+                        delay = _BACKOFF_MIN
+                    else:
+                        delay = min(delay * 2, _BACKOFF_MAX)
+                    if not manual:
+                        await self._pause(server.name, delay)
                 else:
                     self._install(owner)
                     self._publish(server.name)
@@ -1251,13 +1486,17 @@ class MCPManager:
                         await self._hold(server.name)
                         if self._stop.is_set():
                             return
-                        delay = _BACKOFF_MIN
+                        # No reset here (MCP-08): a login is not a stable
+                        # session, and a server that keeps landing back in
+                        # needs_auth must not restore the minimum pause.
                         continue
-                    woken = await self._pause(server.name, delay)
-                    if woken:
-                        delay = _BACKOFF_MIN
-                    else:
-                        delay = min(delay * 2, _BACKOFF_MAX)
+                    await self._pause(server.name, delay)
+                    # A wake only ends the wait early; it does not earn a fresh
+                    # schedule.  Keeping the doubling after a manual retry is
+                    # deliberate: the operator asked "try now", not "forget
+                    # the last failures" (MCP-08).
+                    self._manual.discard(server.name)
+                    delay = min(delay * 2, _BACKOFF_MAX)
         finally:
             if previous is not None:
                 try:
@@ -1321,12 +1560,46 @@ class MCPManager:
         that refuse to spawn anything); ``remote`` is built here because its
         pieces — the SDK transport, the token store, the callback server — are
         exactly what this module owns.
+
+        MCP-01 wraps a local server's argv here.  With ``mcp.sandbox`` off the
+        factory is returned untouched — no argv inspection, no report, no
+        behaviour change.  An injected factory is also returned untouched: it
+        is the test seam, and there is no argv for it to wrap.
         """
         if server.type == "remote":
             return lambda _s: _remote_session_factory(
                 server, interactive=interactive, callback_timeout=callback_timeout
             )
-        return self._session_factory
+        if not self._config.sandbox or self._session_factory is not _default_session_factory:
+            return self._session_factory
+        return lambda s: _default_session_factory(s, parameters=self._stdio_parameters(s))
+
+    def _stdio_parameters(self, server: MCPServerConfig) -> Any:
+        """``StdioServerParameters`` for a local server, sandboxed if asked.
+
+        A ``SandboxGap`` raised by the policy propagates: under ``enforce`` the
+        server is *refused* (the owner records the error and nothing is
+        spawned), never run unwrapped.  Under the other modes the original argv
+        is used and the fallback is reported once per server, because "it runs"
+        and "it is isolated" must not be the same observation.
+        """
+        roots = (
+            self._sandbox_roots()
+            if callable(self._sandbox_roots)
+            else tuple(self._sandbox_roots)
+        )
+        argv, reason = _sandboxed_command(
+            server.command, self._sandbox_policy, self._sandbox_backend, roots
+        )
+        if reason and server.name not in self._sandbox_degraded:
+            self._sandbox_degraded.add(server.name)
+            report_degraded(
+                self._observer,
+                "mcp_sandbox",
+                reason,
+                "the MCP server runs without the OS process sandbox",
+            )
+        return _server_parameters(server, argv=argv)
 
     async def login(self, name: str, timeout: float = _LOGIN_TIMEOUT) -> dict[str, Any]:
         """Run the OAuth dance for a remote server (``mcp.login``).
@@ -1436,17 +1709,36 @@ class MCPManager:
     def request_connect(self, name: str) -> bool:
         """Wake a server's supervisor for an immediate attempt (``mcp.connect``).
 
-        False for anything not connectable right now — unknown, disabled, or
-        the master switch off.  The panel only offers this on a failed row, so
-        this is the guard behind that button.
+        False for anything not connectable right now — unknown, disabled, the
+        master switch off, or after shutdown.  The panel only offers this on a
+        failed row, so this is the guard behind that button.
+
+        MCP-06: the shape check is ``_is_connectable_shape``, not
+        ``server.command``.  A remote server has no command *by design*, so the
+        old check made "reconnect" permanently false for every remote server.
         """
-        if not self._config.enabled:
+        if not self._config.enabled or self._stop.is_set():
             return False
         server = next((s for s in self._config.servers if s.name == name), None)
-        if server is None or server.disabled or not server.command:
+        if server is None or server.disabled or not _is_connectable_shape(server):
             return False
+        self._manual.add(name)
         self._wake_event(name).set()
         return True
+
+    def _retire(self, name: str, reason: str) -> None:
+        """Take a session out of service and wake its supervisor (MCP-03).
+
+        One path for both death signals — a call that learned the transport is
+        gone, and a call that timed out.  Idempotent per session: the first
+        reason wins, the second is not a second death.
+        """
+        owner = self._owner(name)
+        if owner is None or owner.dead is not None:
+            return
+        owner.mark_dead(reason)
+        self._wake_event(name).set()
+        self._publish(name)
 
     def note_transport_death(self, name: str) -> None:
         """Learn that a call to ``name`` failed on a dead transport (M3 §1).
@@ -1456,12 +1748,17 @@ class MCPManager:
         is the point of the exercise.  Idempotent: a batch of calls failing
         together is one death.
         """
-        owner = self._owner(name)
-        if owner is None or owner.dead is not None:
-            return
-        owner.mark_dead("连接已断开，正在重连")
-        self._wake_event(name).set()
-        self._publish(name)
+        self._retire(name, "连接已断开，正在重连")
+
+    def note_session_stale(self, name: str, reason: str = "调用超时，正在重连") -> None:
+        """Learn that a call to ``name`` timed out (MCP-03).
+
+        A timed-out ``call_tool`` is abandoned, not stopped: it may still
+        complete and deliver a response to a session that now looks healthy.
+        The session is therefore retired through the same path as a transport
+        death, and the supervisor rebuilds it.
+        """
+        self._retire(name, reason)
 
     # -- what the rest of the system reads -----------------------------------
 
@@ -1551,8 +1848,11 @@ class MCPManager:
         if owner is None:
             if cfg.disabled:
                 return f"MCP server '{server}' is disabled."
-            if not cfg.command:
-                return f"MCP server '{server}' has no command configured."
+            # MCP-06: a remote server has a url and no command; naming the
+            # wrong missing field sent the operator looking for the wrong typo.
+            if not _is_connectable_shape(cfg):
+                missing = "url" if cfg.type == "remote" else "command"
+                return f"MCP server '{server}' has no {missing} configured."
             if server in self._supervisors:
                 return f"MCP server '{server}' is still connecting."
             return (
@@ -1560,6 +1860,24 @@ class MCPManager:
                 "Reconnect it from the MCP panel."
             )
         return None
+
+    def incomplete_servers(self) -> tuple[tuple[str, int], ...]:
+        """Connected servers whose tool listing stopped early, with pages read.
+
+        MCP-05: ``tools/list`` is paginated, and a cut listing is otherwise
+        indistinguishable from a server with few tools.  The catalog says so
+        explicitly (``build_mcp_catalog(..., incomplete=...)``).
+        """
+        order = {server.name: index for index, server in enumerate(self._config.servers)}
+        incomplete = [
+            (owner.server.name, owner.tools_pages)
+            for owner in self._owners
+            if owner.ready.is_set()
+            and owner.error is None
+            and owner.dead is None
+            and owner.tools_incomplete
+        ]
+        return tuple(sorted(incomplete, key=lambda item: order.get(item[0], len(order))))
 
     @property
     def enabled(self) -> bool:
@@ -1588,7 +1906,13 @@ class MCPManager:
         elapsed = max(0.0, time.monotonic() - started)
         detail = f"正在连接（第 {attempts} 次，已等待 {elapsed:.0f}s / 上限 {limit:g}s）"
         if elapsed > max(10.0, limit / 2):
-            detail += "；本地 server 通常数秒内完成握手，超时多半是命令或协议不兼容"
+            if server.type == "remote":
+                # MCP-06: a remote connect has nothing to do with a local
+                # handshake; it is the network, the authorization server, or a
+                # token the operator has not supplied.
+                detail += "；远程 server 若需登录，请在 MCP 面板选择登录，并检查网络与授权服务器"
+            else:
+                detail += "；本地 server 通常数秒内完成握手，超时多半是命令或协议不兼容"
         return detail
 
     def servers(self) -> list[dict[str, Any]]:
@@ -1675,6 +1999,13 @@ class MCPManager:
                 else:
                     row["status"] = "connected"
                     row["toolCount"] = len(listed)
+                if owner.tools_incomplete:
+                    # MCP-05: the listing stopped early; a connected row with a
+                    # silent half-list is the same lie as a truncated catalog.
+                    note = f"工具列表仅读取 {owner.tools_pages} 页，可能不完整"
+                    row["detail"] = (
+                        f"{row['detail']}；{note}" if row["detail"] else note
+                    )
             rows.append(row)
         return rows
 

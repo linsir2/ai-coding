@@ -571,11 +571,31 @@ class ToolDispatcher:
         through a mutable ``timing`` slot rather than appended to every early
         return -- one missed return would crash the caller's unpacking.
         """
-        timing = {"approval_ms": 0}
-        result, denied, halted = await self._decide_inner(
-            item, ctx, deadline, view, allow_replay=allow_replay, timing=timing
-        )
-        return result, denied, halted, timing["approval_ms"]
+        timing: dict[str, Any] = {"approval_ms": 0, "once": None}
+        try:
+            result, denied, halted = await self._decide_inner(
+                item, ctx, deadline, view, allow_replay=allow_replay, timing=timing
+            )
+            return result, denied, halted, int(timing["approval_ms"])
+        finally:
+            # X-01d: a one-off "yes" is for exactly this call.  Consuming it at
+            # the call boundary (success, refusal, failure or cancellation)
+            # keeps the sandbox's path check honest for the whole call -- the
+            # tool may resolve the same path several times -- without leaving a
+            # permanent writable root behind afterwards.
+            #
+            # The key must be the one ``_ask`` actually recorded: a guard/hook
+            # rewrite has already replaced ``call.params``, so recycling the
+            # outer ``item`` would discard a key nobody stored and leave the
+            # rewritten one in ``_once_grants`` forever.
+            once = timing.get("once")
+            if once is not None:
+                try:
+                    consume = getattr(self.gate, "consume_once", None)
+                    if callable(consume):
+                        consume(*once)
+                except Exception:  # noqa: BLE001 — cleanup must not change the outcome
+                    pass
 
     async def _decide_inner(
         self,
@@ -585,7 +605,7 @@ class ToolDispatcher:
         view: TurnView | None = None,
         *,
         allow_replay: bool = False,
-        timing: dict[str, int],
+        timing: dict[str, Any],
     ) -> tuple[ToolResult, bool, bool]:
         """Return ``(result, denied, halted)`` for one prepared call."""
         call = item.call
@@ -756,6 +776,10 @@ class ToolDispatcher:
                 return self._approval_timeout(call, approval_budget), True, False
             if verdict_from_user is not ApprovalVerdict.APPROVED:
                 return self._not_approved(call, "user declined"), True, False
+            # X-01d: ``_ask`` records the one-off key for these exact params
+            # (after any guard/hook rewrite), so remember them for the cleanup
+            # in ``_decide`` instead of recycling the pre-rewrite call.
+            timing["once"] = (named, dict(call.params))
             if (
                 bool(getattr(self.approval, "is_human", False))
                 and call.name.lower() in ("read", "grep")

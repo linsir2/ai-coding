@@ -15,13 +15,21 @@ from types import SimpleNamespace
 import pytest
 
 from ai_coding.ai.engine import ChatEngine, EngineError
-from ai_coding.config.models import AIConfig
+from ai_coding.config.models import (
+    AIConfig,
+    AppConfig,
+    MCPConfig,
+    MCPServerConfig,
+    MCPToolRules,
+)
 from ai_coding.core.events import Degraded, RecordingObserver, ScopedEvent
 from ai_coding.core.subagent import SubAgentRunner
 from ai_coding.core.worktree import WorktreeError
 from ai_coding.domain.loop import StepResult
 from ai_coding.domain.message import ChatMessage, ToolCallRef, ToolResult
+from ai_coding.domain.model_config import ModelConfig
 from ai_coding.domain.subagent import ParentContext, SubAgentPoolFull, SubagentTask
+from ai_coding.security.permission_gate import PermissionDecision
 from ai_coding.tools.base import BaseTool
 from ai_coding.tools.registry import ToolRegistry
 from ai_coding.tools.todo_write_tool import TodoWriteTool
@@ -440,6 +448,72 @@ async def test_subagent_worktree_failure_degrades(tmp_path):
     )
     assert seen == [None]
     assert result.status == "completed"
+
+
+# ---- SUB-05 (DEFERRED): the dispatcher gate stays on the main workspace ----
+
+
+def _gate_runner(workspace, app: AppConfig | None = None) -> SubAgentRunner:
+    return SubAgentRunner(
+        app
+        or AppConfig(
+            default_model="m",
+            models={"m": ModelConfig(name="m", base_url="https://x/v1", api_key="k")},
+        ),
+        engine_factory=lambda: _Engine(),
+        build_tools=lambda _workdir: ToolRegistry(),
+        workspace=str(workspace),
+    )
+
+
+def test_the_child_gate_does_not_switch_to_the_worktree(tmp_path):
+    """Regression guard for the review finding: binding the gate to a worktree
+    makes the main tree's "always" grants invisible (``GrantStore`` is keyed by
+    workspace), so the gate must stay on the main workspace even for a child
+    whose tools run inside a worktree.  The cost is documented in
+    ``_child_gate`` and tracked as SUB-05 (deferred)."""
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    main.mkdir()
+    wt.mkdir()
+    runner = _gate_runner(main)
+    target = str(wt / "a.py")
+
+    decision = runner._child_gate().check("read", {"path": target})
+
+    assert "outside workspace" in decision.reason
+
+
+def test_a_degraded_child_keeps_the_main_workspace_gate(tmp_path):
+    """Regression guard: no workdir means the main tree, exactly as before."""
+    main = tmp_path / "main"
+    main.mkdir()
+    runner = _gate_runner(main)
+
+    decision = runner._child_gate().check(
+        "read", {"path": str(main / "a.py")}
+    )
+
+    assert "outside workspace" not in decision.reason
+
+
+def test_a_worktree_child_still_obeys_a_config_deny(tmp_path):
+    main = tmp_path / "main"
+    wt = tmp_path / "wt"
+    main.mkdir()
+    wt.mkdir()
+    app = AppConfig(
+        default_model="m",
+        models={"m": ModelConfig(name="m", base_url="https://x/v1", api_key="k")},
+        mcp=MCPConfig(
+            servers=[MCPServerConfig(name="srv", permissions=MCPToolRules(deny=["danger"]))]
+        ),
+    )
+    runner = _gate_runner(main, app)
+
+    decision = runner._child_gate().check("srv__danger", {})
+
+    assert decision.decision is PermissionDecision.DENY
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from ai_coding.domain.message import ChatMessage
 from ai_coding.skills.registry import SkillRegistry
 
@@ -394,3 +396,289 @@ def test_a_disabled_skill_is_not_recommended(tmp_path):
     router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
 
     assert router.route("沙箱越界了", [], "", []) == []
+
+
+# ---------------------------------------------------------------------------
+# SKL-01: an operator deny applies to every automatic injection face
+# ---------------------------------------------------------------------------
+
+
+def _deniable_skill(tmp_path, name: str) -> None:
+    _write_skill(
+        tmp_path,
+        name,
+        f"name: {name}\ndescription: d\npattern_dna: 用{name}修复\n"
+        "triggers:\n"
+        "  keywords: ['沙箱']\n"
+        "  failure_patterns: ['boom']\n",
+    )
+
+
+class TestDeniedSkills:
+    def test_a_denied_skill_is_not_routed(self, tmp_path):
+        from ai_coding.core.sop_router import SOPRouter
+
+        _deniable_skill(tmp_path, "sandbox-fix")
+        router = SOPRouter(
+            SkillRegistry(tmp_path), threshold=1.0,
+            denied=frozenset({"sandbox-fix"}),
+        )
+
+        assert router.route("沙箱越界了", [], "", ["boom"]) == []
+
+    def test_a_denied_skill_does_not_intervene(self, tmp_path):
+        from ai_coding.core.sop_router import SOPRouter
+
+        _deniable_skill(tmp_path, "sandbox-fix")
+        router = SOPRouter(
+            SkillRegistry(tmp_path), threshold=1.0,
+            denied=frozenset({"sandbox-fix"}),
+        )
+
+        assert router.intervene(["boom", "boom"], None, None, None).mode == "none"
+
+    def test_a_denied_skill_does_not_recover(self, tmp_path):
+        from ai_coding.core.sop_router import SOPRouter
+
+        _deniable_skill(tmp_path, "sandbox-fix")
+        router = SOPRouter(
+            SkillRegistry(tmp_path), threshold=1.0,
+            denied=frozenset({"sandbox-fix"}),
+        )
+
+        assert router.check_recovery(["boom"], None) is None
+
+    def test_denial_does_not_leak_to_other_skills(self, tmp_path):
+        """Deny one id, not the whole tail."""
+        from ai_coding.core.sop_router import SOPRouter
+
+        _deniable_skill(tmp_path, "sandbox-fix")
+        _deniable_skill(tmp_path, "other-fix")
+        router = SOPRouter(
+            SkillRegistry(tmp_path), threshold=1.0,
+            denied=frozenset({"sandbox-fix"}),
+        )
+
+        names = [m.name for m in router.route("沙箱越界了", [], "", ["boom"])]
+
+        assert "other-fix" in names
+        assert "sandbox-fix" not in names
+
+
+# ---------------------------------------------------------------------------
+# SKL-03: injected text has a budget
+# ---------------------------------------------------------------------------
+
+
+class TestInjectionBudget:
+    def test_format_block_shortens_a_long_description(self):
+        from ai_coding.core.sop_router import SkillMatch, SOPRouter
+
+        match = SkillMatch(
+            name="verbose", description="d" * 400, score=3.0,
+            matched_dimensions=("keyword",),
+        )
+
+        block = SOPRouter.format_block([match])
+
+        assert "d" * 400 not in block
+        assert "d" * 200 + "…" in block
+
+    def test_format_block_keeps_a_short_description(self):
+        from ai_coding.core.sop_router import SkillMatch, SOPRouter
+
+        match = SkillMatch(
+            name="short", description="fix sandbox issues", score=3.0,
+            matched_dimensions=("keyword",),
+        )
+
+        assert "fix sandbox issues" in SOPRouter.format_block([match])
+
+    def test_hard_intervention_steps_are_capped(self, tmp_path):
+        from ai_coding.core.sop_router import MAX_INTERVENTION_STEPS_CHARS, SOPRouter
+
+        _write_skill(
+            tmp_path,
+            "verbose-fix",
+            "name: verbose-fix\ndescription: d\n"
+            "triggers:\n  failure_patterns: ['boom']\n",
+            body="## 步骤\n" + ("x" * 2_000),
+        )
+        router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+        result = router.intervene(["boom", "boom"], None, None, None)
+
+        assert result.mode == "hard"
+        assert len(result.content) <= MAX_INTERVENTION_STEPS_CHARS + 1
+        assert result.content.endswith("…")
+
+    def test_soft_pattern_dna_is_capped(self, tmp_path):
+        from ai_coding.core.sop_router import MAX_INTERVENTION_STEPS_CHARS, SOPRouter
+
+        _write_skill(
+            tmp_path,
+            "verbose-dna",
+            "name: verbose-dna\ndescription: d\n"
+            f"pattern_dna: {'y' * 2_000}\n"
+            "triggers:\n  failure_patterns: ['boom']\n",
+        )
+        router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+        result = router.intervene(["boom"], None, None, None)
+
+        assert result.mode == "soft"
+        assert len(result.content) <= MAX_INTERVENTION_STEPS_CHARS + 1
+
+    def test_recovery_pattern_dna_is_capped(self, tmp_path):
+        from ai_coding.core.sop_router import MAX_INTERVENTION_STEPS_CHARS, SOPRouter
+
+        _write_skill(
+            tmp_path,
+            "verbose-dna",
+            "name: verbose-dna\ndescription: d\n"
+            f"pattern_dna: {'y' * 2_000}\n"
+            "triggers:\n  failure_patterns: ['boom']\n",
+        )
+        router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+        recovery = router.check_recovery(["boom"], None)
+
+        assert recovery is not None
+        assert len(recovery) <= MAX_INTERVENTION_STEPS_CHARS + 1
+
+    def test_a_body_without_a_steps_section_says_that_it_was_cut(self, tmp_path):
+        """The fallback sliced ``body[:limit]`` and then clipped, so the cut was
+        silent: the model read a sentence that stopped mid-word with no sign
+        that anything was missing."""
+        from ai_coding.core.sop_router import MAX_INTERVENTION_STEPS_CHARS, SOPRouter
+
+        _write_skill(
+            tmp_path,
+            "long-body",
+            "name: long-body\ndescription: d\n"
+            "triggers:\n  failure_patterns: ['boom']\n",
+            body="z" * 2_000,
+        )
+        router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+        result = router.intervene(["boom", "boom"], None, None, None)
+
+        assert result.mode == "hard"
+        assert result.content.endswith("…")
+        assert len(result.content) <= MAX_INTERVENTION_STEPS_CHARS + 1
+
+
+# ---------------------------------------------------------------------------
+# SKL-06: Dendritic index robustness and phase validation
+# ---------------------------------------------------------------------------
+
+
+class TestDendriticAndPhase:
+    def test_match_once_per_route(self, tmp_path, monkeypatch):
+        from ai_coding.core import sop_router as sr
+
+        calls: list[int] = []
+
+        def fake_match(self, tools, errors, task_keywords):
+            calls.append(1)
+            return []
+
+        monkeypatch.setattr(sr.DendriticIndex, "match", fake_match)
+        for name in ("a", "b", "c"):
+            _write_skill(
+                tmp_path, name,
+                f"name: {name}\ndescription: d\ntriggers:\n  keywords: ['x']\n",
+            )
+        router = sr.SOPRouter(
+            SkillRegistry(tmp_path), threshold=1.0,
+            dendritic_path=tmp_path / "index.json",
+        )
+
+        router.route("x", [], "", [])
+
+        assert len(calls) == 1
+
+    def test_a_corrupt_signatures_field_is_ignored(self, tmp_path):
+        """A hand-edited index must not crash every request once wired in."""
+        from ai_coding.core.sop_router import DendriticIndex
+
+        path = tmp_path / "index.json"
+        path.write_text('{"version": 1, "signatures": "not-a-list"}', encoding="utf-8")
+        idx = DendriticIndex(path)
+
+        assert idx.match(tools={"bash"}, errors=set(), task_keywords=set()) == []
+
+    def test_an_empty_query_matches_nothing(self, tmp_path):
+        """∅∩∅ is 1.0 in Jaccard; without a guard that boosts every skill."""
+        from ai_coding.core.sop_router import (
+            DendriticIndex,
+            StructuralSignature,
+        )
+
+        idx = DendriticIndex(tmp_path / "index.json")
+        idx.record(StructuralSignature(
+            tools=frozenset(),
+            error_keywords=frozenset(),
+            task_keywords=frozenset(),
+            skill_name="anything",
+            timestamp="2024-01-01T00:00:00Z",
+        ))
+
+        assert idx.match(tools=set(), errors=set(), task_keywords=set()) == []
+
+    def test_a_dimension_empty_on_both_sides_is_skipped(self, tmp_path):
+        """The query guard above only covers a wholly empty context. Here the
+        tools match but neither side carries an error or a task keyword --
+        ``_jaccard(∅, ∅) == 1.0`` used to add 0.3 + 0.3 of free similarity."""
+        from ai_coding.core.sop_router import (
+            WEIGHT_TOOLS,
+            DendriticIndex,
+            StructuralSignature,
+        )
+
+        idx = DendriticIndex(tmp_path / "index.json")
+        idx.record(StructuralSignature(
+            tools=frozenset({"bash"}),
+            error_keywords=frozenset(),
+            task_keywords=frozenset(),
+            skill_name="shell-fix",
+            timestamp="2024-01-01T00:00:00Z",
+        ))
+
+        matches = idx.match(tools={"bash"}, errors=set(), task_keywords=set())
+
+        assert [name for name, _ in matches] == ["shell-fix"]
+        assert matches[0][1] == pytest.approx(WEIGHT_TOOLS)
+
+    def test_an_unknown_phase_value_is_not_a_permanent_lock(self, tmp_path):
+        """A typo (``debuging``) loads as no lock, so it still routes."""
+        from ai_coding.core.sop_router import SOPRouter
+
+        _write_skill(
+            tmp_path,
+            "typo-skill",
+            "name: typo-skill\ndescription: d\nphase: debuging\n"
+            "triggers:\n  keywords: ['沙箱']\n",
+        )
+        router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+        names = [m.name for m in router.route("沙箱越界", [], "", [], phase="debugging")]
+
+        assert names == ["typo-skill"]
+
+    def test_a_known_mismatched_phase_is_still_filtered(self, tmp_path):
+        from ai_coding.core.sop_router import SOPRouter
+
+        _write_skill(
+            tmp_path,
+            "plan-skill",
+            "name: plan-skill\ndescription: d\nphase: planning\n"
+            "triggers:\n  keywords: ['沙箱']\n",
+        )
+        router = SOPRouter(SkillRegistry(tmp_path), threshold=1.0)
+
+        assert router.route("沙箱越界", [], "", [], phase="debugging") == []
+        assert [m.name for m in router.route("沙箱越界", [], "", [], phase="planning")] == [
+            "plan-skill"
+        ]
+

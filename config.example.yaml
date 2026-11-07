@@ -55,6 +55,19 @@ ai:
   # I1/R-7: hard stop.  This many consecutive look-only calls (no write/edit/bash
   # in between) ends the turn and asks the model for a closing word.  0 disables.
   search_streak_l3: 16
+  # ORC-02: the strategy ladder's *level* cap, not a per-turn count.  L1..L3 may
+  # nudge and a failed window at L3 finishes the turn, so the default 3 keeps the
+  # L1 -> L2 -> L3 -> L4 ladder unchanged.  0 turns the whole gate off (no nudge
+  # and no early stop); values above 3 clamp to 3.  Explicit 1/2 users see fewer
+  # nudges than before (1 = one nudge then the no-progress finish).
+  max_strategy_nudges: 3
+  # MCP 10: warn once per loop when the MCP surface -- the `mcp_call` dispatcher
+  # schema plus the per-step `<mcp-catalog>` block -- exceeds this many chars.
+  # 0 disables.  2000 is below a typical catalog (built with an 8000-char
+  # budget), so most sessions with MCP servers will see this warning.
+  mcp_chars_warn: 2000
+  # R2-8: the whole tool-schema surface, built-ins included.  0 disables.
+  tools_chars_warn: 0
   # B1: what the harness runs itself when the ladder reaches its second rung.
   # OFF unless you opt in: export AI_CODING_STATIC_CHECK=1.  That is deliberate --
   # this field can be set by a repository's tracked config.example.yaml, and a repo
@@ -282,6 +295,12 @@ mcp:
   # (~/.config/ai-coding/config.yaml), or set AI_CODING_TRUST_PROJECT=1 to let a
   # project's own config apply.  Dropped keys are reported as a warning.
   enabled: false                  # master switch; per-server default is ON
+  # 2026-11: a local stdio server is spawned through the process sandbox when
+  # this is on (same policy/backend as bash).  Off by default: a sandbox that
+  # cannot be built would otherwise stop every local MCP server from starting.
+  # With it on, an `enforce` policy that cannot wrap the command REFUSES that
+  # server instead of running it unsandboxed.
+  sandbox: false
   # servers:                     # v2 shape (docs/specs/2026-10-10-external-mcp.md)
   #   - name: echo               # the repo's own stdio server: no network, ~2s
   #     command: ["/path/to/repo/.venv/bin/python",

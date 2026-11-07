@@ -96,7 +96,12 @@ class LadderLimits:
 
     fail_streak_threshold: int = 2
     stall_iterations: int = 3
-    strategy_l1: int = 1
+    #: ORC-02: the strategy ladder's *level* cap, not a per-turn count.  L1..Lcap
+    #: may nudge; a failed window at or above the cap finishes the turn.  ``0``
+    #: turns the whole gate off (no nudge and no early stop).  The default is 3
+    #: because that is what the ladder did before this field was consumed
+    #: (L1 -> L2 -> L3 -> L4), so the default configuration is unchanged.
+    strategy_l1: int = 3
     fatigue_l1: int = 1
     task_l1: int = 2
     #: B1/B2: consecutive look-only calls before the search ladder speaks.  4 is
@@ -162,13 +167,10 @@ def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
     if gate == STRATEGY:
         return _strategy_triggered(snap, limits)
     if gate == SEARCH:
-        # A repeated successful result is no-progress regardless of whether the
-        # tool was classified as retrieval or action.
-        if snap.repeat_streak >= 1:
-            return True
-        # A planning or read-only posture is *supposed* to be look-only: nagging it
-        # to "stop looking" would be wrong every single time, so the gate is off
-        # there.  Measured: plan/readonly turns reached L1 and L2 within 8 reads.
+        # ORC-03: the posture check comes first -- a planning or read-only turn
+        # is *supposed* to be look-only, so every advice rung (including
+        # ``repeat_streak``) is silent there.  Measured: plan/readonly turns
+        # reached L1 and L2 within 8 reads.
         if snap.mode == "plan" or snap.readonly:
             return False
         # I1/R-7: the hard stop is a *count* rung on purpose -- a turn of only
@@ -178,8 +180,25 @@ def _triggered(gate: str, snap: TurnSnapshot, limits: LadderLimits) -> bool:
         # exactly the case the fingerprint cannot help with.
         if limits.search_streak_l3 and snap.search_streak >= limits.search_streak_l3:
             return True
+        # ORC-03 review fix: stale L3 is the *other* hard stop, and it has its
+        # own switch (``stale_l3``).  Judged here, before the threshold guard,
+        # because otherwise ``threshold=0`` made it unreachable -- the default
+        # ``stale_l3=6`` never fired.
+        if (
+            limits.stale_l3
+            and snap.stale_streak >= limits.stale_l3
+            and snap.repeated_nonempty >= 2
+        ):
+            return True
+        # ORC-03: 0 disables this gate's *advice* rungs (count / repeat / stale
+        # L1).  It must sit after the hard stops above, which have their own
+        # switches.
         if not limits.search_streak_threshold:
             return False
+        # A repeated successful result is no-progress regardless of whether the
+        # tool was classified as retrieval or action.
+        if snap.repeat_streak >= 1:
+            return True
         # R20/RC-1: the count rung only fires when the streak produced no new
         # evidence.  Measured on T2: streak=4, novel=4, stale_streak=0 still
         # fired, and the model answered every nudge with `ruff` -- the rung was
@@ -340,15 +359,18 @@ def _search_due(
         and snap.repeated_nonempty >= 2
     ):
         return (L3, "finish", "stale_evidence")
+    # ORC-03: 0 disables the advice rungs -- including the repeat-output bypass
+    # that used to sit above this guard.  The two hard stops above keep their
+    # own switches (``search_streak_l3`` / ``stale_l3``).
+    threshold = limits.search_streak_threshold
+    if not threshold:
+        return None
     if snap.repeat_streak >= 1:
         if entry is None:
             return (L1, "nudge", "repeat_output")
         ref: Mapping[str, Any] = entry.get("ref") or {}
         if snap.repeat_streak >= int(ref.get("repeat", 0) or 0) + 2:
             return (L1, "nudge", "repeat_output")
-    threshold = limits.search_streak_threshold
-    if not threshold:
-        return None
     # ``+1`` rather than ``max(l2, threshold)``: a threshold at or above the L2
     # constant would otherwise earn L2 on the very same look that earned L1, and
     # L1 would never be seen.
@@ -384,6 +406,41 @@ def _search_due(
     return None
 
 
+def _strategy_due(
+    entry: Mapping[str, Any] | None,
+    snap: TurnSnapshot,
+    limits: LadderLimits,
+) -> tuple[int, str, str] | None:
+    """The strategy rung, capped by the per-turn level budget (ORC-02).
+
+    ``strategy_l1`` used to be read nowhere, so the ladder always ran
+    L1 -> L2 -> L3 -> L4 whatever the operator configured.  It is a *level*
+    cap: L1..Lcap may nudge, and a failed window at or above the cap finishes
+    the turn.  Values above ``L3`` are clamped (L3 is the last nudging level);
+    ``0`` turns the whole gate off -- no nudge and no early stop.
+    """
+    del snap  # ``_due`` passes it for the other gates; the cap needs nothing else
+    cap = min(max(0, int(limits.strategy_l1 or 0)), L3)
+    if cap <= 0:
+        return None
+    if entry is None:
+        return (L1, "nudge", "")
+    outcome = str(entry.get("outcome", ""))
+    level = int(entry.get("level", 0) or 0)
+    if outcome == "pending":
+        return None                            # observing window
+    if outcome == "failed":
+        if level >= cap:
+            # P2 review fix: report the level that actually finished.  It used
+            # to be hardcoded L4, so a cap of 1/2 still showed "[strategy ladder
+            # L4]" in the terminal reason.
+            return (level, "finish", "")
+        return (level + 1, "nudge", "")
+    if outcome == "unfinished":
+        return (min(max(level, L1), cap), "nudge", "")
+    return (L1, "nudge", "")                   # helped / exhausted / unknown
+
+
 def _due(
     gate: str,
     entry: Mapping[str, Any] | None,
@@ -397,6 +454,8 @@ def _due(
     """
     if gate == SEARCH:
         return _search_due(snap, entry, limits)
+    if gate == STRATEGY:
+        return _strategy_due(entry, snap, limits)
     if entry is None:
         return (L1, "nudge", "")
     outcome = str(entry.get("outcome", ""))
@@ -410,10 +469,8 @@ def _due(
                     else (L2, "nudge", "")
                 )
             return (L2, "finish", "")            # the ask was ignored
-        return None                           # strategy/fatigue: observing
+        return None                           # fatigue: observing (strategy left above)
     if outcome == "failed":
-        if gate == STRATEGY:
-            return (L4, "finish", "") if level >= L3 else (level + 1, "nudge", "")
         if gate == FATIGUE:
             return (L3, "finish", "") if level >= L3 else (level + 1, "nudge", "")
         return (L2, "finish", "") if level >= L2 else (L2, "nudge", "")

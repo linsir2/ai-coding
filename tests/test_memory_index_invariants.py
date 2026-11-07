@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ai_coding.config.models import MemoryConfig
 from ai_coding.memory.note import NoteKind, new_note
+from ai_coding.memory.schema import HarvestCandidate
 from ai_coding.memory.service import MemoryService
 from ai_coding.memory.store import MemoryStore
 
@@ -58,3 +59,33 @@ def test_index_does_not_grow_when_the_store_grows(tmp_path):
         store.add_note(new_note(f"后续事实 {index}：读到的细节", kind=NoteKind.FACT))
     assert service.index_block() == before  # L2/L3 增长不推高索引
     assert len(service.index_block()) <= 600
+
+
+# ---- CTX-05: one long note must not blow the block's budget ----------------
+
+
+def test_one_long_note_is_clipped_to_the_budget(tmp_path):
+    service, store = _service(tmp_path, index_max_chars=600)
+    store.add_note(new_note("记忆开头" + "约定" * 1_500, kind=NoteKind.DECISION))
+
+    block = service.index_block()
+
+    assert len(block) <= 600
+    assert "记忆开头" in block
+    assert "…" in block, "the truncation is explicit, not silent"
+    assert block.endswith("</memory-constraints>")
+
+
+def test_harvest_clips_a_long_candidate_before_storing_it(tmp_path):
+    service, store = _service(tmp_path, index_max_chars=600)
+
+    service._reconcile(  # noqa: SLF001 - the write-side limit under test
+        [HarvestCandidate(text="约定" * 1_500)],
+        turn_index=1,
+        session_id="s",
+        now=None,
+    )
+
+    stored = store.active()
+    assert stored, "the candidate was still stored"
+    assert all(len(note.text) <= 400 for note in stored)

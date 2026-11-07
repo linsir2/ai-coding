@@ -36,7 +36,7 @@ HELP_TEXT = (
     "  /review        review current changes\n"
     "  /config         show effective configuration\n"
     "  /compact        compact conversation history\n"
-    "  /undo           roll the last turn back (history + files)\n"
+    "  /undo, /rewind  roll the last turn back (history + files)\n"
     "  /redo           put back the turn /undo removed\n"
     "  /memory         show memory status\n"
     "  /trace          show last turn trace\n"

@@ -71,7 +71,31 @@ class ShellReadTool(BashTool):
         """
         return None
 
+    @staticmethod
+    def _requested_network(params: dict[str, Any]) -> str | None:
+        """A read-only inspection never asks for the host network.
+
+        Overriding the parent's per-call override is the execution-layer half of
+        X-01a: even a direct ``execute`` call cannot carry ``inherit`` into the
+        process sandbox, so the read-only guarantee does not depend on the
+        caller remembering the policy check.
+        """
+        return None
+
     def precheck(self, params: dict[str, Any]) -> ToolResult | None:
+        if "network_permissions" in params or "justification" in params:
+            return ToolResult(
+                success=False,
+                output=(
+                    "error: shell_read never requests network; "
+                    "use bash with approval when a command needs it"
+                ),
+                error="read_only_shell_required",
+            )
+        # Defensive: the parent may grow validation this override would skip.
+        blocked = super().precheck(params)
+        if blocked is not None:
+            return blocked
         problem = read_only_problem(str(params.get("command") or ""))
         if problem:
             return ToolResult(

@@ -29,6 +29,11 @@ _ALIASES: dict[str, str] = {
     "/status": "status",
     "/compact": "compact",
     "/undo": "undo",
+    # Aliases are accepted by every surface that parses through this table.
+    # The TUI does not publish them in ``command_names()`` (it resolves the
+    # canonical name only), so ``/rewind`` works here but is not offered by
+    # the TUI's client-side command list.
+    "/rewind": "undo",
     "/redo": "redo",
     "/memory": "memory",
     "/trace": "trace",

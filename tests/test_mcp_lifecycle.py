@@ -238,10 +238,12 @@ async def test_the_pause_grows_and_stays_under_the_cap(monkeypatch):
     assert len(gaps) >= 3  # it kept trying, which is the point of the loop
 
 
-# ---- R4: a manual connect skips the pause and resets it -------------------
+# ---- R4: a manual connect skips the pause ---------------------------------
 
 
-async def test_a_manual_connect_tries_now_and_resets_the_pause(monkeypatch):
+async def test_a_manual_connect_tries_now_without_waiting_out_the_pause(monkeypatch):
+    """MCP-08 renamed this: a wake cuts the wait short; it no longer resets the
+    schedule.  "Try now" is not "forget the last failures"."""
     monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 5.0)  # would wait forever
     monkeypatch.setattr(mcp_module, "_BACKOFF_MAX", 5.0)
     factory = _Factory([RuntimeError("cold"), _session()])
@@ -404,3 +406,214 @@ async def test_a_disabled_server_is_never_attempted_and_says_why(fast_backoff):
     assert factory.attempted  # the manager did try
     assert set(factory.attempted) == {"on"}  # but never the disabled one
     await manager.aclose()
+
+
+# ---- MCP-02: close waits for the owner task it just cancelled --------------
+
+
+async def test_close_awaits_a_cancelled_owner_task(monkeypatch):
+    """MCP-02: ``cancel()`` is a signal.  Returning on it leaves the session's
+    ``AsyncExitStack`` (child process, stdio fd, HTTP client) unwound only on
+    the loop's next tick — or never, when the process is exiting."""
+    from ai_coding.core.mcp import _MCPSessionOwner
+
+    exited: list[bool] = []
+
+    @asynccontextmanager
+    async def factory(server):
+        try:
+            yield _session()
+        finally:
+            # Cleanup that genuinely yields: this is the work the old close()
+            # returned without waiting for.  A real exit stack finishes its
+            # teardown even when the first cancellation lands inside it.
+            try:
+                await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)
+            exited.append(True)
+
+    owner = _MCPSessionOwner(_server("fs"), factory)
+    owner.start()
+    assert await _until(lambda: owner.ready.is_set())
+
+    monkeypatch.setattr(mcp_module, "_CLOSE_TIMEOUT", 0.01)
+    monkeypatch.setattr(mcp_module, "_CLOSE_CANCEL_GRACE", 1.0)
+    await owner.close()
+
+    assert owner._task.done() is True
+    assert exited == [True]
+
+
+async def test_close_is_bounded_even_if_a_session_ignores_cancellation(monkeypatch):
+    """The 1s grace is a ceiling, not a promise: a stuck session must not make
+    shutdown wait forever."""
+    from ai_coding.core.mcp import _MCPSessionOwner
+
+    escape = asyncio.Event()
+
+    @asynccontextmanager
+    async def factory(server):
+        try:
+            yield _session()
+        finally:
+            # Deliberately swallow cancellation, like a badly written context
+            # manager that rewrites its own cancellation.
+            while not escape.is_set():
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    continue
+            exited.append(True)
+
+    exited: list[bool] = []
+    owner = _MCPSessionOwner(_server("fs"), factory)
+    owner.start()
+    assert await _until(lambda: owner.ready.is_set())
+
+    monkeypatch.setattr(mcp_module, "_CLOSE_TIMEOUT", 0.05)
+    monkeypatch.setattr(mcp_module, "_CLOSE_CANCEL_GRACE", 0.1)
+    started = time.monotonic()
+    await owner.close()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, f"close ignored its grace ({elapsed})"
+    assert owner._task.done() is False  # bounded, not hung
+
+    # Tidy up the task the production path correctly refused to wait for.
+    escape.set()
+    owner._task.cancel()
+    await asyncio.wait({owner._task}, timeout=1.0)
+    assert exited == [True]
+
+
+async def test_close_is_idempotent_after_a_forced_cancel(monkeypatch):
+    # Regression guard: idempotency held before the fix too.  It stays because
+    # the added second ``asyncio.wait`` must not turn "close twice" into an
+    # error on an already-done task.
+    from ai_coding.core.mcp import _MCPSessionOwner
+
+    @asynccontextmanager
+    async def factory(server):
+        try:
+            yield _session()
+        finally:
+            await asyncio.sleep(0.05)
+
+    owner = _MCPSessionOwner(_server("fs"), factory)
+    owner.start()
+    assert await _until(lambda: owner.ready.is_set())
+    monkeypatch.setattr(mcp_module, "_CLOSE_TIMEOUT", 0.01)
+    monkeypatch.setattr(mcp_module, "_CLOSE_CANCEL_GRACE", 1.0)
+    await owner.close()
+    await owner.close()  # second close returns at once, no exception
+
+
+# ---- MCP-06: remote servers can be reconnected, and the copy is right ------
+
+
+async def test_a_remote_server_can_be_reconnected_manually():
+    """MCP-06: a remote server has no command *by design*; the old
+    ``not server.command`` guard made its "reconnect" button dead forever."""
+    manager = MCPManager(
+        _cfg(MCPServerConfig(name="r", type="remote", url="https://example.test/mcp"))
+    )
+
+    assert manager.request_connect("r") is True
+    assert manager.request_connect("nope") is False
+
+
+async def test_a_remote_server_without_a_url_says_url_not_command():
+    manager = MCPManager(
+        _cfg(MCPServerConfig(name="r", type="remote", url=""))
+    )
+
+    reason = manager.unreachable_reason("r")
+
+    assert reason is not None
+    assert "no url" in reason
+    assert "command" not in reason
+
+
+async def test_a_remote_connecting_row_advises_login_not_a_local_handshake():
+    manager = MCPManager(MCPConfig(enabled=True, servers=[]))
+    server = MCPServerConfig(
+        name="r",
+        type="remote",
+        url="https://example.test/mcp",
+        timeout=MCPTimeout(startup=60_000),
+    )
+    manager._attempt_started["r"] = time.monotonic() - 40
+
+    detail = manager._connecting_detail(server)
+
+    assert "登录" in detail
+    assert "本地 server" not in detail
+
+
+# ---- MCP-08: only a session that lasted may reset the backoff --------------
+
+
+async def test_an_unstable_session_does_not_reset_the_backoff(monkeypatch):
+    """A server that connects and drops immediately used to reset the pause to
+    its minimum every cycle.  Three deaths in a row must grow, not repeat."""
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.02)
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MAX", 0.4)
+    monkeypatch.setattr(mcp_module, "_STABLE_SESSION_S", 3_600.0)
+    factory = _Factory([_session()])
+    manager = MCPManager(_cfg(_server("fs")), session_factory=factory)
+
+    await manager.open_all()
+    for _ in range(3):
+        assert await _until(lambda: bool(manager.available()))
+        manager.note_transport_death("fs")
+    assert await _until(lambda: factory.attempts >= 4)
+    gaps = [
+        b - a
+        for a, b in zip(factory.attempt_times, factory.attempt_times[1:], strict=False)
+    ]
+    await manager.aclose()
+
+    assert len(gaps) >= 3
+    assert gaps[1] > gaps[0], gaps
+    assert gaps[2] > gaps[1], gaps
+
+
+async def test_a_session_stable_for_a_minute_resets_the_backoff():
+    from ai_coding.core.mcp import _MCPSessionOwner
+
+    owner = _MCPSessionOwner(_server("fs"), _ok_factory())
+
+    owner.ready_at = time.monotonic() - 120
+    assert mcp_module._session_was_stable(owner) is True
+
+    owner.ready_at = time.monotonic() - 5
+    assert mcp_module._session_was_stable(owner) is False
+
+    owner.ready_at = None
+    assert mcp_module._session_was_stable(owner) is False
+
+
+async def test_a_stable_session_gets_the_minimum_pause_again(monkeypatch):
+    """The other half of MCP-08: the reset still exists, it just requires a
+    session that actually lived."""
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.02)
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MAX", 0.4)
+    monkeypatch.setattr(mcp_module, "_STABLE_SESSION_S", 0.0)
+    factory = _Factory([_session()])
+    manager = MCPManager(_cfg(_server("fs")), session_factory=factory)
+
+    await manager.open_all()
+    for _ in range(3):
+        assert await _until(lambda: bool(manager.available()))
+        manager.note_transport_death("fs")
+    assert await _until(lambda: factory.attempts >= 4)
+    gaps = [
+        b - a
+        for a, b in zip(factory.attempt_times, factory.attempt_times[1:], strict=False)
+    ]
+    await manager.aclose()
+
+    # Every cycle is a fresh minimum: no doubling.
+    assert all(gap < 0.15 for gap in gaps), gaps
+

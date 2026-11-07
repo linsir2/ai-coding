@@ -77,7 +77,7 @@ def test_an_archived_skill_still_resolves_when_it_is_named(tmp_path):
 # ---- the block the model actually reads ------------------------------------
 
 
-def _assembler(registry, permissions=None) -> RequestAssembler:
+def _assembler(registry, permissions=None, workspace="") -> RequestAssembler:
     class _Compactor:
         async def compress(self, history, **kwargs):
             return history
@@ -109,6 +109,7 @@ def _assembler(registry, permissions=None) -> RequestAssembler:
         settings=_Settings(),
         emit=lambda event: None,
         skills=registry,
+        workspace=workspace,
     )
 
 
@@ -176,7 +177,38 @@ def test_mention_resolution_is_usable_without_a_registry():
 
 def test_sop_router_format_block_still_accepts_nothing():
     """Ignore case for the new path: the automatic recommendation keeps working."""
-    assert SOPRouter.format_block([]) == "" or True
+    assert SOPRouter.format_block([]) == ""
+
+
+def test_the_assembler_passes_the_deny_list_to_the_router(tmp_path):
+    """The catalog, @mention block and tool gate already refuse a denied skill;
+    the automatic recommendation must be the fourth face, not a hole."""
+    _write_skill(tmp_path, "tidy", alias="clean")
+
+    assembler = _assembler(SkillRegistry(tmp_path), {"clean": "deny"})
+
+    assert assembler._router._denied == frozenset({"tidy"})
+
+
+def test_a_denied_skill_is_not_recommended_in_the_tail(tmp_path):
+    (tmp_path / "tidy").mkdir(parents=True)
+    (tmp_path / "tidy" / "SKILL.md").write_text(
+        "---\n"
+        "name: clean\n"
+        "description: tidy things\n"
+        "triggers:\n"
+        "  keywords: [\"沙箱\"]\n"
+        "---\n"
+        "tidy 的正文\n",
+        encoding="utf-8",
+    )
+
+    text = _request_text(
+        SkillRegistry(tmp_path), "沙箱越界了", permissions={"clean": "deny"}
+    )
+
+    assert "<recommended-skills>" not in text
+
 
 def test_the_named_skill_content_travels_with_the_request(tmp_path):
     """E-3: the model acts in the naming turn — no round trip through the
@@ -219,3 +251,66 @@ def test_a_denied_skill_is_withheld_from_the_mention_block(tmp_path):
 
     assert "已被配置禁止" in text
     assert "tidy 的正文" not in text
+
+
+# ---- SKL-03: the mention block has a budget --------------------------------
+
+
+def _write_big_skill(root, name: str, chars: int) -> None:
+    (root / name).mkdir(parents=True, exist_ok=True)
+    (root / name / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: d\n---\n" + ("长" * chars) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_a_long_mentioned_skill_is_truncated_and_marked(tmp_path):
+    """A 40k-character body used to be re-sent in full on every naming turn."""
+    _write_big_skill(tmp_path, "long", 40_000)
+
+    text = _request_text(SkillRegistry(tmp_path), "@long 看一下")
+
+    assert '<skill_content name="long">' in text, "the opening tag survives"
+    assert "</skill_content>" in text, "the closing tag survives"
+    assert "[截断" in text, "the cut is announced"
+    assert "长" * 40_000 not in text
+
+
+def test_a_short_mentioned_skill_is_not_marked_truncated(tmp_path):
+    _write_skill(tmp_path, "tidy")
+
+    text = _request_text(SkillRegistry(tmp_path), "@tidy 看一下")
+
+    assert "tidy 的正文" in text
+    assert "[截断" not in text
+
+
+# ---- SKL-06: the dendritic index is wired, not dormant ---------------------
+
+
+def test_the_assembler_wires_the_dendritic_index(tmp_path):
+    from ai_coding.core.sop_router import StructuralSignature
+
+    _write_skill(tmp_path, "tidy")
+    assembler = _assembler(SkillRegistry(tmp_path), workspace=str(tmp_path))
+
+    assert assembler._router._dendritic is not None
+    assembler._router.record_signature(
+        StructuralSignature(
+            tools=frozenset({"bash"}),
+            error_keywords=frozenset(),
+            task_keywords=frozenset({"tidy"}),
+            skill_name="tidy",
+            timestamp="2024-01-01T00:00:00Z",
+        )
+    )
+    assert (tmp_path / ".ai-coding" / "dendritic" / "index.json").is_file()
+
+
+def test_no_workspace_keeps_the_dendritic_index_off(tmp_path):
+    _write_skill(tmp_path, "tidy")
+
+    assembler = _assembler(SkillRegistry(tmp_path), workspace="")
+
+    assert assembler._router._dendritic is None
+

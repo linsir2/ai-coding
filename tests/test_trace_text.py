@@ -6,6 +6,7 @@ much / what degraded" without opening the JSONL by hand
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -643,3 +644,21 @@ def test_the_price_map_is_keyed_by_the_wire_name(tmp_path):
 
     assert recorder is not None
     assert list(recorder.pricings) == ["qwen3.8-2.4t-a95b"]
+
+
+def test_the_recorder_uses_the_one_resolved_trace_root(tmp_path):
+    """X-02b: writer and ``trace overview`` must resolve ``tracing.dir`` alike."""
+    from ai_coding.cli import _make_recorder, _trace_root
+    from ai_coding.config.models import AIConfig, AppConfig
+
+    cfg = AppConfig(ai=AIConfig())
+    cfg.tracing.enabled = True
+    cfg.tracing.dir = "~/b6-custom-traces"
+
+    expected = Path("~/b6-custom-traces").expanduser().resolve()
+    assert _trace_root(cfg, str(tmp_path)) == expected
+
+    recorder = _make_recorder(cfg, str(tmp_path), session=None)
+
+    assert recorder is not None
+    assert recorder.store.root == expected

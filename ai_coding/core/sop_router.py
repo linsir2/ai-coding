@@ -29,9 +29,15 @@ from typing import Any
 from ai_coding.core.events import LoopEvent, ToolFinished
 from ai_coding.infra.json_utils import from_json_file, to_json_pretty
 from ai_coding.infra.time_utils import now_utc
+from ai_coding.skills.catalog import shorten_description
 from ai_coding.skills.registry import Skill, SkillRegistry, SkillTriggers
 
 _log = logging.getLogger(__name__)
+
+#: Ceiling for anything the router *injects* from a skill body: hard-intervention
+#: steps and soft ``pattern_dna`` share it.  Unbounded, a 50 KB SKILL.md became a
+#: 50 KB tail block on every turn that touched its failure pattern.
+MAX_INTERVENTION_STEPS_CHARS = 500
 
 # Scoring weights — see module docstring for rationale.
 _WEIGHT_KEYWORD = 3.0
@@ -62,6 +68,16 @@ SIGNATURE_MATCH_WEIGHT = 2.0       #: multiplier for dendritic boost
 WEIGHT_TOOLS = 0.4                 #: tool overlap weight in similarity
 WEIGHT_ERRORS = 0.3                #: error keyword overlap weight
 WEIGHT_TASK = 0.3                  #: task keyword overlap weight
+
+
+def _clip(text: str, limit: int = MAX_INTERVENTION_STEPS_CHARS) -> str:
+    """``text`` at ``limit`` characters, telling the reader it was cut.
+
+    Applied where the content is produced (not in the formatter) so every
+    ``Intervention`` consumer sees the same bounded value.
+    """
+    text = text.strip()
+    return text[:limit].rstrip() + "…" if len(text) > limit else text
 
 
 @dataclass
@@ -187,6 +203,11 @@ class DendriticIndex:
         for err in errors:
             error_words.update(word.lower() for word in err.split() if len(word) > 2)
 
+        # Nothing to compare. Without this, ``_jaccard(∅, ∅) == 1.0`` scores every
+        # stored signature 1.0 and boosts every skill by 2.0 on a context-free turn.
+        if not tools and not error_words and not task_keywords:
+            return []
+
         results: list[tuple[str, float]] = []
         for sig in self._signatures:
             score = self._compute_similarity(sig, tools, error_words, task_keywords)
@@ -207,7 +228,15 @@ class DendriticIndex:
             return
         if not isinstance(data, dict):
             return
-        for item in data.get("signatures", []):
+        stored = data.get("signatures")
+        # A hand-edited or corrupted file may hold a string/int here; iterating
+        # one yields characters/raises, and connecting the index to the router
+        # would turn that into a crash on every request.
+        if not isinstance(stored, list):
+            return
+        for item in stored:
+            if not isinstance(item, dict):
+                continue
             try:
                 self._signatures.append(StructuralSignature.from_dict(item))
             except (ValueError, TypeError, KeyError):
@@ -241,13 +270,24 @@ class DendriticIndex:
         errors: set[str],
         task_keywords: set[str],
     ) -> float:
-        """计算综合相似度分数。"""
-        tool_sim = DendriticIndex._jaccard(tools, set(sig.tools))
-        error_sim = DendriticIndex._jaccard(errors, set(sig.error_keywords))
-        task_sim = DendriticIndex._jaccard(task_keywords, set(sig.task_keywords))
-        return (WEIGHT_TOOLS * tool_sim
-                + WEIGHT_ERRORS * error_sim
-                + WEIGHT_TASK * task_sim)
+        """计算综合相似度分数。
+
+        某维度两边都为空时跳过：``_jaccard(∅, ∅) == 1.0`` 会把"都没提"读成
+        "完全一致"，让一个没有错误关键词的签名白拿 ``WEIGHT_ERRORS`` 分。跳过
+        既不贡献分数，也不把该维度的权重算进来。
+        """
+        score = 0.0
+        if tools or sig.tools:
+            score += WEIGHT_TOOLS * DendriticIndex._jaccard(tools, set(sig.tools))
+        if errors or sig.error_keywords:
+            score += WEIGHT_ERRORS * DendriticIndex._jaccard(
+                errors, set(sig.error_keywords)
+            )
+        if task_keywords or sig.task_keywords:
+            score += WEIGHT_TASK * DendriticIndex._jaccard(
+                task_keywords, set(sig.task_keywords)
+            )
+        return score
 
     @staticmethod
     def _jaccard(a: set[str], b: set[str]) -> float:
@@ -321,12 +361,20 @@ class SOPRouter:
 
     def __init__(self, skills: SkillRegistry, threshold: float = DEFAULT_THRESHOLD,
                  max_matches: int = DEFAULT_MAX_MATCHES,
-                 dendritic_path: str | Path | None = None):
+                 dendritic_path: str | Path | None = None,
+                 *, denied: frozenset[str] = frozenset()):
         self._skills = skills
         self._threshold = threshold
         self._max_matches = max_matches
         # F3: dendritic index for cross-domain matching
         self._dendritic = DendriticIndex(dendritic_path) if dendritic_path else None
+        #: E-5: the operator's deny list, resolved to canonical ids. The router
+        #: must not offer what the catalog, the mention block and the tool gate
+        #: already refuse — including automatic recovery, which injects content.
+        self._denied = denied
+
+    def _blocked(self, skill: Skill) -> bool:
+        return skill.id in self._denied
 
     def route(self, user_input: str, recent_tools: list[str], task_goal: str,
               recent_failures: list[str],
@@ -348,9 +396,25 @@ class SOPRouter:
                 if obs.error and not obs.success
             )
         stats = stats or {}
+        # F3: the dendritic context is the same for every skill, so match once
+        # instead of once per skill (skills × signatures became the cost).
+        dendritic_best: dict[str, float] = {}
+        if self._dendritic is not None:
+            for match_name, match_score in self._dendritic.match(
+                tools=set(recent_tools),
+                errors=set(all_failures),
+                task_keywords=set(task_goal.lower().split()),
+            ):
+                dendritic_best[match_name] = max(
+                    dendritic_best.get(match_name, 0.0), match_score
+                )
         matches: list[SkillMatch] = []
         for skill in self._skills.all():
             name = skill.id
+            # E-5: an operator deny is a boundary, not a hint. Checked before
+            # triggers/scoring so a denied skill is neither scored nor recorded.
+            if self._blocked(skill):
+                continue
             triggers = skill.triggers
             if not triggers:
                 continue
@@ -359,7 +423,9 @@ class SOPRouter:
             # it must not do is occupy the tail block every turn.
             if not skill.is_auto_invocable:
                 continue
-            # F2: phase filtering — skip skills locked to a different phase
+            # F2: phase filtering — skip skills locked to a different phase.
+            # ``skill.phase`` is validated at load: unknown/misspelled values
+            # arrive as "" (no lock), so a typo cannot hide a skill forever.
             if phase and skill.phase and skill.phase != phase:
                 continue
             base_score, dimensions = self._score(
@@ -375,17 +441,8 @@ class SOPRouter:
             # price=0.5 → multiplier=1.0 (neutral), price=1.0 → 1.5, price=0.0 → 0.5
             price = stats.get(name, SkillStats()).price
             total_score = base_score * (0.5 + price) + freshness
-            # F3: dendritic index matching — boost skill score if context
-            # matches past successful executions
-            if self._dendritic:
-                dendritic_matches = self._dendritic.match(
-                    tools=set(recent_tools),
-                    errors=set(all_failures),
-                    task_keywords=set(task_goal.lower().split()),
-                )
-                for match_name, match_score in dendritic_matches:
-                    if name == match_name:
-                        total_score += match_score * SIGNATURE_MATCH_WEIGHT
+            # F3: dendritic boost from past successful executions
+            total_score += dendritic_best.get(name, 0.0) * SIGNATURE_MATCH_WEIGHT
             if total_score >= self._threshold:
                 matches.append(SkillMatch(
                     name=name,
@@ -474,7 +531,7 @@ class SOPRouter:
             return Intervention(mode="none", skill_name="", content="", triggers={})
 
         for skill in self._skills.all():
-            if not skill.is_auto_invocable:
+            if self._blocked(skill) or not skill.is_auto_invocable:
                 continue
             failure_patterns = skill.triggers.failure_patterns
             if not failure_patterns:
@@ -493,10 +550,10 @@ class SOPRouter:
                     content=content, triggers=_as_dict(skill.triggers),
                 )
             elif len(matching_errors) >= 1 and skill.pattern_dna:
-                # Soft intervention — inject pattern_dna
+                # Soft intervention — inject pattern_dna (bounded like steps)
                 return Intervention(
                     mode="soft", skill_name=skill.id,
-                    content=skill.pattern_dna, triggers=_as_dict(skill.triggers),
+                    content=_clip(skill.pattern_dna), triggers=_as_dict(skill.triggers),
                 )
         return Intervention(mode="none", skill_name="", content="", triggers={})
 
@@ -512,10 +569,11 @@ class SOPRouter:
                 # Find next section or end
                 next_section = body.find("\n## ", start + len(marker))
                 if next_section == -1:
-                    return body[start:].strip()
-                return body[start:next_section].strip()
-        # No steps section found — return first 500 chars
-        return body[:500].strip()
+                    return _clip(body[start:])
+                return _clip(body[start:next_section])
+        # No steps section found — bounded head of the body. ``_clip`` owns the
+        # ceiling, so slicing first would make the cut silent (no ellipsis).
+        return _clip(body)
 
     # ---- F1: Error recovery (via skill pattern_dna fallback) -------------------
 
@@ -528,11 +586,11 @@ class SOPRouter:
             return None
         latest_error = recent_failures[-1]
         for skill in self._skills.all():
-            if not skill.is_auto_invocable:
+            if self._blocked(skill) or not skill.is_auto_invocable:
                 continue
             if any(fp in latest_error for fp in skill.triggers.failure_patterns):
                 if skill.pattern_dna:
-                    return skill.pattern_dna
+                    return _clip(skill.pattern_dna)
         return None
 
     # ---- I2: Cross-turn duplicate failure detection --------------------------
@@ -647,7 +705,10 @@ class SOPRouter:
                  "Based on your current task, these skills may be helpful:"]
         for m in matches:
             dim_str = ", ".join(m.matched_dimensions)
-            lines.append(f"- {m.name}: {m.description} (confidence: {int(m.price * 100)}%)")
+            lines.append(
+                f"- {m.name}: {shorten_description(m.description)} "
+                f"(confidence: {int(m.price * 100)}%)"
+            )
             trigger_hint = _format_trigger_hint(m.triggers)
             if trigger_hint:
                 lines.append(f"  When: {trigger_hint}")

@@ -176,8 +176,20 @@ def canonical_request(
         calls = ""
         if message.tool_calls:
             calls = "|".join(f"{c.id}:{c.name}:{c.arguments}" for c in message.tool_calls)
+        # CTX-07b: an image is request content.  Marking its count keeps two
+        # requests that differ only by an attachment from sharing a digest; the
+        # cost itself is added by the reporter (``image_tokens``), not here, so
+        # the prefix comparison stays about identity instead of bytes.
+        images = getattr(message, "images", ()) or ()
+        image_mark = ""
+        if images:
+            measured = sum(
+                1 for ref in images if int(getattr(ref, "bytes", 0) or 0) > 0
+            )
+            image_mark = f"|images:{measured}"
         parts.append(
-            f"{message.role}:{message.tool_call_id or ''}:{message.content or ''}:{calls}"
+            f"{message.role}:{message.tool_call_id or ''}:{message.content or ''}:"
+            f"{calls}{image_mark}"
         )
     return "\n".join(parts)
 
@@ -659,6 +671,15 @@ class TraceRecorder:
     # ---- internals ---------------------------------------------------------
 
     def _record(self, event: Any) -> None:
+        # No session yet means "not yet bound", not a session named "unknown".
+        # The recorder is built at world start (before the first session has an
+        # id), so early MCP/lifecycle events arrive here first.  Until an id
+        # exists there is nowhere honest to put them: drop them and never create
+        # an ``unknown/`` directory (X-02a).  The trade-off is recorded in the
+        # B6 implementation notes: events before the session is established are
+        # not persisted.
+        if not self.session_id:
+            return
         # Streamed tool output is not recorded.  A call still appears twice —
         # ToolStarted with its params, ToolFinished with its result — so the
         # timeline keeps the call and its outcome; a chunk only adds volume, one

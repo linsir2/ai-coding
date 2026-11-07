@@ -770,6 +770,142 @@ def test_rescan_rebases_an_old_relative_log_path(tmp_path):
     assert job.log_path == str(root / "job_old.log")
 
 
+def _settled_row(
+    root: Path,
+    job_id: str,
+    *,
+    finished: str,
+    status: str = "completed",
+    pid: int = 0,
+    start_ticks: int | None = None,
+) -> None:
+    log = root / f"{job_id}.log"
+    log.write_text(f"{job_id}\n", encoding="utf-8")
+    (root / f"{job_id}.json").write_text(
+        json.dumps(
+            {
+                "id": job_id,
+                "command": "echo " + job_id,
+                "pid": pid,
+                "log_path": str(log),
+                "started_at": finished,
+                "finished_at": finished,
+                "status": status,
+                "start_ticks": start_ticks,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_the_settled_history_is_capped_to_the_newest_rows(tmp_path):
+    """X-03a: running jobs were bounded, settled history was not."""
+    from datetime import datetime, timedelta, timezone
+
+    root = tmp_path / "jobs"
+    root.mkdir()
+    now = datetime.now(timezone.utc)
+    for index in range(250):
+        stamp = (now - timedelta(minutes=250 - index)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        _settled_row(root, f"job_{index:03d}", finished=stamp)
+
+    second = JobRegistry(root=root)
+
+    remaining = {job.id for job in second.list()}
+    assert len(remaining) == 200
+    assert "job_249" in remaining and "job_050" in remaining
+    assert sorted(remaining) == [f"job_{index:03d}" for index in range(50, 250)]
+    assert not (root / "job_000.json").exists()
+    assert not (root / "job_000.log").exists()
+    assert (root / "job_050.json").exists()
+
+
+def test_settled_rows_older_than_the_window_are_removed(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    root = tmp_path / "jobs"
+    root.mkdir()
+    now = datetime.now(timezone.utc)
+    _settled_row(
+        root,
+        "job_old",
+        finished=(now - timedelta(days=8)).isoformat().replace("+00:00", "Z"),
+    )
+    _settled_row(
+        root,
+        "job_recent",
+        finished=(now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+    )
+
+    second = JobRegistry(root=root)
+
+    assert second.get("job_old") is None
+    assert not (root / "job_old.json").exists()
+    assert not (root / "job_old.log").exists()
+    assert second.get("job_recent") is not None
+
+
+def test_a_running_row_is_never_pruned_even_when_its_stamp_is_old(tmp_path):
+    """A live process is not history, whatever its ``started_at`` says."""
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    from ai_coding.core.jobs import _process_start_ticks
+
+    root = tmp_path / "jobs"
+    root.mkdir()
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    pid = os.getpid()
+    _settled_row(
+        root,
+        "job_alive",
+        finished=old,
+        status="running",
+        pid=pid,
+        start_ticks=_process_start_ticks(pid),
+    )
+
+    second = JobRegistry(root=root)
+
+    inherited = second.get("job_alive")
+    assert inherited is not None and inherited.status == "running"
+    assert (root / "job_alive.json").exists()
+
+
+def test_rows_without_a_usable_timestamp_are_kept_not_guessed(tmp_path):
+    """No clock is not evidence of age; deleting on a guess loses output."""
+    root = tmp_path / "jobs"
+    root.mkdir()
+    (root / "job_nostamp.log").write_text("x\n", encoding="utf-8")
+    (root / "job_nostamp.json").write_text(
+        json.dumps(
+            {
+                "id": "job_nostamp",
+                "command": "echo x",
+                "pid": 0,
+                "log_path": str(root / "job_nostamp.log"),
+                "status": "completed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    second = JobRegistry(root=root)
+
+    assert second.get("job_nostamp") is not None
+    assert (root / "job_nostamp.json").exists()
+
+
+def test_a_missing_jobs_root_starts_cleanly(tmp_path):
+    registry = JobRegistry(root=tmp_path / "never-created")
+
+    assert registry.list() == []
+
+
 def test_descendants_walks_the_proc_ppid_tree():
     """``no-proc`` has no pid namespace and ``--new-session`` moves the shell
     out of our group, so ``kill`` must find children by PPid."""

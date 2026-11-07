@@ -5,7 +5,9 @@ from ai_coding.ai.prompt import (
     METHODS_SECTION,
     TOOL_GUIDANCE,
     PromptAssembler,
+    render_agents_block,
 )
+from ai_coding.domain.agents import AgentSpec
 
 
 def _assembler() -> PromptAssembler:
@@ -22,14 +24,44 @@ def test_base_only():
 def test_appends_project_and_skills_sections():
     out = _assembler().build(
         project_instructions="always use tabs",
-        skills_catalog="- bash: run a shell\n- read: read a file",
+        skills_catalog="<skills>- bash: run a shell\n- read: read a file</skills>",
     )
     assert "<system-reminder>Project instructions:" in out
     assert "always use tabs" in out
-    assert "<skills>Available skills:" in out
+    assert "<skills>" in out
     assert "- bash: run a shell" in out
     # section order: base(skill block) after project block
     assert out.index("<system-reminder>") < out.index("<skills>")
+
+
+def test_a_real_catalog_is_not_wrapped_twice(tmp_path):
+    """The catalog already owns its tags; the prompt must add no second pair."""
+    from ai_coding.skills.catalog import build_catalog
+    from ai_coding.skills.registry import parse_skill
+
+    (tmp_path / "bash").mkdir()
+    target = tmp_path / "bash" / "SKILL.md"
+    target.write_text(
+        "---\nname: bash\ndescription: run shell commands\n---\nbody\n",
+        encoding="utf-8",
+    )
+    catalog = build_catalog([parse_skill(target)])
+
+    out = _assembler().build(skills_catalog=catalog)
+
+    assert out.count("<skills>") == 1
+    assert out.count("</skills>") == 1
+    assert "<skills>Available skills:\n<skills>" not in out
+
+
+def test_a_bare_catalog_string_is_still_wrapped():
+    """Backwards compatibility: callers that pass the listing without tags must
+    still get one tagged section, not untagged prose the model cannot place."""
+    out = _assembler().build(skills_catalog="- bash: run a shell")
+
+    assert out.count("<skills>") == 1
+    assert out.count("</skills>") == 1
+    assert "<skills>Available skills:\n- bash: run a shell</skills>" in out
 
 
 def test_blank_optional_sections_omitted():
@@ -49,7 +81,7 @@ def test_blank_optional_sections_omitted():
 def test_methods_section_joins_between_project_and_skills():
     out = _assembler().build(
         project_instructions="always use tabs",
-        skills_catalog="- bash: run a shell",
+        skills_catalog="<skills>- bash: run a shell</skills>",
     )
     assert "<methods>" in out
     assert "Read before write" in out
@@ -133,7 +165,7 @@ def test_an_unknown_mode_reads_as_normal():
 
 def test_methods_section_sits_before_the_plan_mode_segment():
     out = _assembler().build(
-        project_instructions="p", skills_catalog="s", mode="plan"
+        project_instructions="p", skills_catalog="<skills>s</skills>", mode="plan"
     )
     assert out.index("<methods>") < out.index("<plan-mode>") < out.index("<skills>")
 
@@ -333,3 +365,85 @@ def test_the_plan_segment_says_the_block_is_text_not_a_tool():
     assert "not a tool" in PLAN_TEXT_RULE
     for name in ("propose_plan", "proposed_plan", "present_plan"):
         assert name in PLAN_TEXT_RULE
+
+
+# ---- SUB-04: the delegation targets reach the model -------------------------
+
+
+def _agents() -> list[AgentSpec]:
+    return [
+        AgentSpec(
+            id="general",
+            name="General",
+            description="General-purpose subagent.",
+            kind="subagent",
+        ),
+        AgentSpec(
+            id="explore",
+            name="Explore",
+            description="Read-only exploration subagent.",
+            kind="subagent",
+        ),
+    ]
+
+
+def test_agents_block_lists_delegation_targets():
+    out = _assembler().build(agents=_agents(), tools=("read", "subAgent"))
+
+    assert "<agents>" in out
+    assert "general — General-purpose subagent." in out
+    assert "explore — Read-only exploration subagent." in out
+
+
+def test_agents_block_is_omitted_without_the_tool():
+    """Regression guard: a surface without a delegation tool never advertises
+    targets (so the two halves of the pruned surface cannot drift apart)."""
+    out = _assembler().build(agents=_agents(), tools=("read",))
+
+    assert "<agents>" not in out
+
+
+def test_agents_block_is_bounded():
+    specs = [
+        AgentSpec(id=f"agent{i}", description="x" * 500, kind="subagent")
+        for i in range(20)
+    ]
+
+    out = render_agents_block(specs)
+
+    assert len(out) <= 600
+    rows = [row for row in out.splitlines() if row.startswith("- ")]
+    assert rows, "at least one target must fit"
+    assert all(len(row) <= 120 for row in rows)
+    assert len(rows) < len(specs)
+
+
+def test_agents_block_is_after_skills():
+    out = _assembler().build(
+        skills_catalog="<skills>- probe: run it</skills>",
+        agents=_agents(),
+        tools=("subAgent",),
+    )
+
+    assert out.index("<skills>") < out.index("<agents>")
+
+
+def test_agents_block_default_is_byte_identical():
+    """Regression guard: the new parameter must not move a single byte when
+    the caller does not pass an agent table."""
+    expected = "you are a coding assistant.\n\n" + METHODS_SECTION
+    assert _assembler().build() == expected
+    assert _assembler().build(agents=None) == expected
+
+
+def test_an_empty_agent_list_adds_nothing():
+    assert render_agents_block([]) == ""
+    assert "<agents>" not in _assembler().build(agents=[], tools=("subAgent",))
+
+
+def test_a_hidden_subagent_is_not_advertised():
+    out = render_agents_block(
+        [AgentSpec(id="secret", description="hidden", kind="subagent", hidden=True)]
+    )
+
+    assert out == ""

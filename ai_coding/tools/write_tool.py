@@ -19,6 +19,11 @@ from ai_coding.tools.base import BaseTool, ToolContext, resolve_ctx
 from ai_coding.tools.stale_read import must_read_message, stale_message
 
 _DEFAULT_MAX_CHARS = 2_000_000  # 2M chars
+#: Above this size, append stops rebuilding the whole file.  Reading and
+#: rewriting a multi-megabyte file to add one small chunk is O(size) I/O for an
+#: O(1)-sized change; in-place append is the honest tradeoff (with a version
+#: recheck and fsync) past this point.
+_APPEND_REWRITE_MAX_BYTES = 8 * 1024 * 1024
 #: One call's content cap.  Measured (trace 2026-10-31, session f1d881ee):
 #: a model asked to write a 30k-char document sends the whole body in one tool
 #: call, the provider truncates the arguments, the JSON is invalid, and the
@@ -123,19 +128,27 @@ class WriteTool(BaseTool):
         """Refuse an overwrite whose body is an exact slice from mid-file.
 
         The model's body is compared to the current file with surrounding
-        whitespace stripped: found at a positive offset and shorter than the
-        old text means "you copied a section and are about to replace the
-        whole file with it".  A legitimate rewrite is not an exact substring
-        of the old file, so it passes.
+        whitespace stripped: found at an offset **after** the first character
+        and shorter than the old text means "you copied a section and are about
+        to replace the whole file with it".  Offset 0 is deliberately allowed:
+        a body that is a prefix of the old file is exactly what dropping the
+        tail of a file looks like, and that is a legitimate whole-file rewrite.
         """
         try:
             old = target.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
         body = content.strip()
-        if not body or len(body) >= len(old):
+        # Compare against the *stripped* old text: a re-submission of the whole
+        # file must not be refused just because the stored file ends with a
+        # newline that ``strip`` removed from both sides of the comparison.
+        old_body = old.strip()
+        if not body or len(body) >= len(old_body):
             return None
         offset = old.find(body)
+        # ``offset == 0`` means the body is a prefix (e.g. the model dropped
+        # trailing lines), not a mid-file splice; only a strict interior slice
+        # is the accident this guard exists for.
         if offset <= 0:
             return None
         line = old.count("\n", 0, offset) + 1
@@ -173,6 +186,9 @@ class WriteTool(BaseTool):
             target = self._sandbox.resolve(path_str)
         except SandboxViolation as exc:
             return ToolResult(success=False, output=str(exc), error="sandbox_violation")
+        # ``resolve`` follows symlinks and clamps the result to a root, so every
+        # write below targets the real file: ``os.replace`` replaces that file,
+        # never the user's symlink itself.
 
         # The tracker is shared by every session the process serves; the
         # "read it first" verdict must describe *this* conversation.
@@ -190,6 +206,12 @@ class WriteTool(BaseTool):
                 path_str, relative, content, target,
                 append=mode == "append", scope=scope,
             )
+
+        # The version the stale check below approves.  Captured before that
+        # check and compared again inside ``write_text_atomic`` immediately
+        # before the rename, so the check-to-write window is as small as the
+        # whole-file read that append now performs (X-01b).
+        before = file_version(target)
 
         # Stale-read check for existing files (append included: adding to a
         # file the model has not read is the same blind edit).
@@ -223,15 +245,51 @@ class WriteTool(BaseTool):
                     error="overwrite_would_truncate",
                 )
 
-        # The version the stale check just approved.  ``write_text_atomic``
-        # compares it again immediately before the rename, so a concurrent
-        # writer in the check-to-write window is reported instead of clobbered.
-        before = file_version(target)
+        large_append = False
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             if mode == "append":
-                with target.open("ab") as handle:
-                    handle.write(content.encode("utf-8"))
+                size = 0
+                if target.exists():
+                    try:
+                        size = target.stat().st_size
+                    except OSError:
+                        size = 0
+                if size > _APPEND_REWRITE_MAX_BYTES:
+                    # Past the cap, rebuilding the file (``old + content``)
+                    # would read and rewrite every byte to add a few.  Append in
+                    # place instead: re-check the base version immediately before
+                    # the first byte, then flush + fsync so a crash can never
+                    # leave a buffered half-line behind.  The bytes of a large
+                    # file are not decoded here -- doing so is the O(size) read
+                    # this branch exists to avoid -- and appending cannot
+                    # re-encode or corrupt the existing ones.
+                    if file_version(target) != before:
+                        raise FileConflict(
+                            f"{target} changed while it was being edited"
+                        )
+                    with target.open("ab") as handle:
+                        handle.write(content.encode("utf-8"))
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    large_append = True
+                else:
+                    old = ""
+                    if target.exists():
+                        try:
+                            old = target.read_bytes().decode("utf-8")
+                        except UnicodeDecodeError:
+                            return ToolResult(
+                                success=False,
+                                output=(
+                                    f"error: 无法以 append 模式写入 {path_str}："
+                                    "现有文件不是 UTF-8 编码，追加会损坏内容"
+                                    "（文件未写入）。请先用 read 确认编码，"
+                                    "或改用 overwrite 写入完整的 UTF-8 内容。"
+                                ),
+                                error="write_error",
+                            )
+                    write_text_atomic(target, old + content, expected_version=before)
             else:
                 write_text_atomic(target, content, expected_version=before)
         except FileConflict:
@@ -256,9 +314,10 @@ class WriteTool(BaseTool):
                 call_id=resolve_ctx(ctx).call_id,
             )
         verb = "appended" if mode == "append" else "wrote"
+        suffix = " (large-file in-place append)" if large_append else ""
         return ToolResult(
             success=True,
-            output=f"{verb} {len(content)} chars to {path_str}",
+            output=f"{verb} {len(content)} chars to {path_str}{suffix}",
             # r18/F4: the path we actually wrote, normalised to the workspace.
             # Undo needs the list of files a turn created, and this is the only
             # place that knows it -- git cannot tell "the model wrote this" from

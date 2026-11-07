@@ -72,16 +72,32 @@ class SafeObserver:
 
 
 class Braid:
-    """Forward every event to each observer, isolating their failures."""
+    """Forward every event to each observer, isolating their failures.
+
+    ``failures`` aggregates its own swallows with every child's counter, so the
+    TurnReporter -- which sees only this object -- can still report that a
+    renderer broke (X-02c).  Reading it is cumulative, like
+    :attr:`SafeObserver.failures`; the reporter compares it across a turn.
+    """
 
     def __init__(self, *observers: LoopObserver) -> None:
         self._observers: list[LoopObserver] = list(observers)
+        self._failures = 0
+
+    @property
+    def failures(self) -> int:
+        """Own swallows plus every child's count; nested braids count once."""
+        return self._failures + sum(
+            int(getattr(observer, "failures", 0) or 0)
+            for observer in self._observers
+        )
 
     def on_event(self, event: LoopEvent) -> None:
         for observer in self._observers:
             try:
                 observer.on_event(event)
             except Exception:  # noqa: BLE001 — observation must never break the turn
+                self._failures += 1
                 _log.debug(
                     "observer %s failed on %s",
                     type(observer).__name__,

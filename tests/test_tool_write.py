@@ -142,3 +142,123 @@ async def test_write_stale_after_external_modification(setup):
     assert result.detail == "stale_read", "the card must say why, not a bare '?'"
     assert "stale" in result.output.lower() or "modified" in result.output.lower()
     assert "older version" in result.output, "name why the context copy is useless"
+
+
+@pytest.mark.asyncio
+async def test_dropping_the_tail_of_a_file_is_a_legitimate_rewrite(setup):
+    """A prefix body means "remove trailing lines", not an accidental splice.
+
+    Only a strict *interior* slice is refused (see the mid-file case); the old
+    offset-0 rejection mistook this ordinary rewrite for truncation.
+    """
+    tmp_path, _, fst, tool = setup
+    old = "a\nb\nc\n"
+    target = tmp_path / "m.py"
+    target.write_text(old, encoding="utf-8")
+    fst.record(target)
+
+    result = await tool.execute({"path": "m.py", "content": "a\n"})
+
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == "a\n"
+
+
+@pytest.mark.asyncio
+async def test_resubmitting_the_whole_file_is_not_a_slice(setup):
+    """A full rewrite -- even with the trailing newline trimmed -- still passes."""
+    tmp_path, _, fst, tool = setup
+    old = "a\nb\nc\n"
+    target = tmp_path / "m.py"
+    target.write_text(old, encoding="utf-8")
+    fst.record(target)
+
+    result = await tool.execute({"path": "m.py", "content": old})
+
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == old
+
+
+@pytest.mark.asyncio
+async def test_append_rechecks_the_base_version_before_replacing(setup, monkeypatch):
+    """X-01b: append is a new version, not a blind ``ab`` write."""
+    tmp_path, _, fst, tool = setup
+    p = tmp_path / "f.txt"
+    p.write_text("v1")
+    fst.record(p)
+    from ai_coding.tools import write_tool as write_tool_module
+
+    # ``before`` is captured from this, while ``write_text_atomic`` compares the
+    # real version -- exactly the check-to-write race the old append ignored.
+    monkeypatch.setattr(
+        write_tool_module, "file_version", lambda _path: "changed-late"
+    )
+
+    result = await tool.execute(
+        {"path": "f.txt", "content": "+more", "mode": "append"}
+    )
+
+    assert result.success is False
+    assert result.detail == "stale_read"
+    assert p.read_text() == "v1"
+    assert list(tmp_path.glob(".f.txt.*.tmp")) == []
+
+
+@pytest.mark.asyncio
+async def test_append_preserves_crlf_and_mode(setup):
+    tmp_path, _, fst, tool = setup
+    p = tmp_path / "f.txt"
+    p.write_bytes(b"one\r\ntwo\r\n")
+    p.chmod(0o600)
+    fst.record(p)
+
+    result = await tool.execute(
+        {"path": "f.txt", "content": "three\r\n", "mode": "append"}
+    )
+
+    assert result.success is True
+    assert p.read_bytes() == b"one\r\ntwo\r\nthree\r\n"
+    assert p.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_append_refuses_a_non_utf8_file_without_touching_it(setup):
+    """A lossy decode would silently rewrite the old bytes; refusing is honest."""
+    tmp_path, _, fst, tool = setup
+    p = tmp_path / "f.bin"
+    original = b"\xff\xfeold bytes"
+    p.write_bytes(original)
+    fst.record(p)
+
+    result = await tool.execute(
+        {"path": "f.bin", "content": "more", "mode": "append"}
+    )
+
+    assert result.success is False
+    assert result.detail == "write_error"
+    assert "UTF-8" in result.output
+    assert p.read_bytes() == original, "the refused call must not modify the file"
+
+
+@pytest.mark.asyncio
+async def test_append_on_a_large_file_does_not_rewrite_the_whole_file(setup):
+    """Past the cap, append is an in-place write with fsync, not O(size) rebuild."""
+    import os
+
+    from ai_coding.tools.write_tool import _APPEND_REWRITE_MAX_BYTES
+
+    tmp_path, _, fst, tool = setup
+    p = tmp_path / "big.log"
+    p.write_bytes(b"a" * (_APPEND_REWRITE_MAX_BYTES + 1))
+    fst.record(p)
+    before_size = p.stat().st_size
+
+    result = await tool.execute(
+        {"path": "big.log", "content": "tail", "mode": "append"}
+    )
+
+    assert result.success is True
+    assert "large-file in-place append" in result.output
+    assert p.stat().st_size == before_size + len("tail")
+    with p.open("rb") as handle:
+        handle.seek(-len("tail"), os.SEEK_END)
+        assert handle.read() == b"tail"

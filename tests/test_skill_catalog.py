@@ -7,8 +7,10 @@ Pure functions over parsed skills, so the bound can be tested without a request
 from pathlib import Path
 
 from ai_coding.skills.catalog import (
+    MAX_DESCRIPTION_CHARS,
     SKILL_CATALOG_BUDGET_CHARS,
     build_catalog,
+    shorten_description,
     superseded_note,
 )
 from ai_coding.skills.registry import parse_skill
@@ -98,6 +100,24 @@ def test_the_default_budget_matches_the_mcp_catalogs(tmp_path):
     from ai_coding.core.mcp import _CATALOG_BUDGET_CHARS
 
     assert SKILL_CATALOG_BUDGET_CHARS == _CATALOG_BUDGET_CHARS
+
+
+# ---- SKL-03: the description ceiling is shared with the router ------------
+
+
+def test_a_description_at_the_limit_is_kept_verbatim():
+    text = "d" * MAX_DESCRIPTION_CHARS
+
+    assert shorten_description(text) == text
+
+
+def test_a_description_past_the_limit_is_cut_with_an_ellipsis():
+    text = "d" * (MAX_DESCRIPTION_CHARS + 1)
+
+    shortened = shorten_description(text)
+
+    assert shortened == "d" * MAX_DESCRIPTION_CHARS + "…"
+    assert len(shortened) == MAX_DESCRIPTION_CHARS + 1
 
 
 # ---- archived -------------------------------------------------------------

@@ -86,7 +86,8 @@ def test_strategy_l3_lapse_finishes_no_progress():
     )
     d = iv.select(_snap(iteration=8, failed_streak=8, intervention_ledger=ledger),
                   phase=iv.PRE, limits=LIMITS)
-    assert (d.level, d.kind) == (4, "finish")
+    # The finish names the level that actually finished (L3), not a fixed L4.
+    assert (d.level, d.kind) == (3, "finish")
     assert "no progress" in d.reason
 
 
@@ -110,6 +111,76 @@ def test_strategy_beats_fatigue_in_one_iteration():
     snap = _snap(failed_streak=3, fatigue_index=99.0)
     d = iv.select(snap, phase=iv.PRE, limits=LIMITS)
     assert d.gate == "strategy"
+
+
+# ---- ORC-02: max_strategy_nudges is a *level* cap, not a dead knob ----------
+
+
+def test_strategy_budget_three_is_the_default_and_matches_the_old_ladder():
+    """3 nudging rungs (L1 → L2 → L3), then the failed L3 window finishes.  Pinned
+    so the default cannot drift down and silently shorten the ladder."""
+    limits = iv.LadderLimits()
+    assert limits.strategy_l1 == 3
+
+    first = iv.select(_snap(failed_streak=2), phase=iv.PRE, limits=limits)
+    assert (first.level, first.kind) == (1, "nudge")
+    second = iv.select(
+        _snap(iteration=5, failed_streak=3,
+              intervention_ledger=_fired("strategy", 1, outcome="failed", at=(3, 5))),
+        phase=iv.PRE, limits=limits,
+    )
+    assert (second.level, second.kind) == (2, "nudge")
+    third = iv.select(
+        _snap(iteration=7, failed_streak=3,
+              intervention_ledger=_fired("strategy", 2, outcome="failed", at=(5, 7))),
+        phase=iv.PRE, limits=limits,
+    )
+    assert (third.level, third.kind) == (3, "nudge")
+    last = iv.select(
+        _snap(iteration=9, failed_streak=3,
+              intervention_ledger=_fired("strategy", 3, outcome="failed", at=(7, 9))),
+        phase=iv.PRE, limits=limits,
+    )
+    assert (last.level, last.kind) == (3, "finish")
+
+
+def test_strategy_budget_two_allows_l1_and_l2_then_finishes():
+    limits = iv.LadderLimits(strategy_l1=2)
+    first = iv.select(_snap(failed_streak=2), phase=iv.PRE, limits=limits)
+    assert (first.level, first.kind) == (1, "nudge")
+    second = iv.select(
+        _snap(iteration=5, failed_streak=3,
+              intervention_ledger=_fired("strategy", 1, outcome="failed", at=(3, 5))),
+        phase=iv.PRE, limits=limits,
+    )
+    assert (second.level, second.kind) == (2, "nudge")
+    # A failed L2 window is at the cap, so the turn finishes instead of
+    # spending a third nudge.  The finish reports the actual level (2), not L4.
+    last = iv.select(
+        _snap(iteration=7, failed_streak=3,
+              intervention_ledger=_fired("strategy", 2, outcome="failed", at=(5, 7))),
+        phase=iv.PRE, limits=limits,
+    )
+    assert (last.level, last.kind) == (2, "finish")
+
+
+def test_strategy_budget_zero_disables_the_whole_gate():
+    """0 means off: no nudge *and* no early stop -- the two halves are one gate."""
+    limits = iv.LadderLimits(strategy_l1=0)
+    snap = _snap(failed_streak=9, attempted_calls=9, successful_calls=0)
+    assert iv.select(snap, phase=iv.PRE, limits=limits) is None
+
+
+def test_strategy_budget_above_three_is_clamped_to_l3():
+    """L3 is the last level that nudges, so 9 behaves like 3 rather than
+    inventing a non-existent L9."""
+    limits = iv.LadderLimits(strategy_l1=9)
+    last = iv.select(
+        _snap(iteration=9, failed_streak=3,
+              intervention_ledger=_fired("strategy", 3, outcome="failed", at=(7, 9))),
+        phase=iv.PRE, limits=limits,
+    )
+    assert (last.level, last.kind) == (3, "finish")
 
 
 # ---- fatigue ladder ----
@@ -301,6 +372,26 @@ def test_search_outcome_is_audit_only_not_a_decision_input():
 def test_search_threshold_zero_disables_the_gate():
     limits = iv.LadderLimits(search_streak_threshold=0)
     assert iv.select(_snap(search_streak=99), phase=iv.PRE, limits=limits) is None
+
+
+def test_search_threshold_zero_disables_the_repeat_rung_too():
+    """ORC-03: ``repeat_output`` used to bypass the switch and still nag.
+
+    The docs promise "0 disables the gate"; the repeat branch sat above the
+    guard, so a ``repeat_streak`` kept it alive.
+    """
+    limits = iv.LadderLimits(search_streak_threshold=0)
+    assert iv.select(_snap(repeat_streak=5), phase=iv.PRE, limits=limits) is None
+
+
+def test_search_repeat_is_off_in_plan_and_read_only_postures():
+    """ORC-03 follow-up: with the guard moved below the posture check, a
+    repeated output no longer nags a turn that is *supposed* to be look-only."""
+    for posture in ({"mode": "plan"}, {"readonly": True}):
+        assert (
+            iv.select(_snap(repeat_streak=5, **posture), phase=iv.PRE, limits=LIMITS)
+            is None
+        )
 
 
 def test_strategy_wins_over_search_when_both_trigger():
@@ -608,6 +699,42 @@ def test_the_hard_stop_is_independent_of_the_count_switch():
         limits=limits,
     )
     assert (d.gate, d.level, d.kind) == ("search", 3, "finish")
+
+
+def test_the_stale_hard_stop_is_independent_of_the_count_switch():
+    """ORC-03 review fix: ``threshold=0`` must still reach stale L3.
+
+    ``_triggered`` returned False on the threshold guard before the stale hard
+    stop, so the default ``stale_l3=6`` was unreachable whenever the advice
+    rungs were switched off.  The stale stop has its own switch.
+    """
+    limits = iv.LadderLimits(search_streak_threshold=0)
+    d = iv.select(
+        _snap(stale_streak=6, repeated_nonempty=2), phase=iv.PRE, limits=limits
+    )
+    assert (d.gate, d.level, d.kind) == ("search", 3, "finish")
+    assert d.trigger == "stale_evidence"
+    # Repeated *empty* reads are a survey of empty places, not a stall.
+    assert (
+        iv.select(
+            _snap(stale_streak=6, repeated_nonempty=1),
+            phase=iv.PRE,
+            limits=limits,
+        )
+        is None
+    )
+
+
+def test_the_stale_hard_stop_keeps_its_own_zero_switch():
+    limits = iv.LadderLimits(search_streak_threshold=0, stale_l3=0)
+    assert (
+        iv.select(
+            _snap(stale_streak=99, repeated_nonempty=9),
+            phase=iv.PRE,
+            limits=limits,
+        )
+        is None
+    )
 
 
 # ---- C-3 follow-up: repeated successful output is a no-progress signal -------

@@ -48,6 +48,34 @@ CHILD_ERRORS = {
 _TIMEOUT_GRACE = 15.0
 
 
+def _artifact_lines(result: SubagentResult) -> list[str]:
+    """产物清单：隔离运行的产物目录已被删除，必须说明它现在在哪里。
+
+    An isolated child writes to a worktree that ``temporary()`` removes on the
+    way out, so a bare ``- path`` line reads like a live file in the parent's
+    own workspace.  Without a branch (the degraded / non-isolated path) the
+    output stays byte-identical to the old one.
+    """
+    if not result.artifacts:
+        return []
+    if result.worktree_branch:
+        if result.commit_error:
+            header = (
+                "产物（隔离工作区已删除，且提交失败："
+                f"{result.commit_error}，以下文件已丢失）:"
+            )
+        elif result.commit:
+            header = f"产物（隔离工作区已删除，路径相对分支 {result.worktree_branch}）:"
+        else:
+            header = (
+                f"产物（隔离工作区已删除，未提交；路径相对分支 "
+                f"{result.worktree_branch}）:"
+            )
+    else:
+        header = "产物:"
+    return [header, *(f"  - {artifact.path}" for artifact in result.artifacts[:10])]
+
+
 def _render(result: SubagentResult, name: str) -> str:
     """The model-facing report: only what shapes the parent's next decision.
 
@@ -84,9 +112,7 @@ def _render(result: SubagentResult, name: str) -> str:
     if open_items:
         lines.append(f"未完成项 ({len(open_items)}):")
         lines.extend(f"  - {entry.get('id')}. {entry.get('content')}" for entry in open_items[:10])
-    if result.artifacts:
-        lines.append("产物:")
-        lines.extend(f"  - {artifact.path}" for artifact in result.artifacts[:10])
+    lines.extend(_artifact_lines(result))
     # r25/v2: isolated writes live on a branch now; the worktree path is gone.
     if result.worktree_branch:
         suffix = f"，{result.commit[:7]}" if result.commit else ""

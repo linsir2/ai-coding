@@ -134,7 +134,13 @@ class BudgetLedger:
             self._cached_reported = True
 
     def record_assembly(self, estimated_tokens: int, prefix_ratio: float) -> None:
-        """Record what this request *looked* like before the call."""
+        """Record what this request *looked* like before the call.
+
+        CTX-06: diagnostic only.  ``estimated_tokens`` and
+        ``prefix_shared_ratio`` have no production consumer (the events carry
+        their own copies); they are kept because the ledger's tests and
+        calibration scripts read them.
+        """
         self._estimated_tokens = int(estimated_tokens)
         self._prefix_ratio = float(prefix_ratio)
 
@@ -151,26 +157,35 @@ class BudgetLedger:
 
     @property
     def latency_ms(self) -> int:
+        """Diagnostic only (CTX-06): no production consumer."""
         return self._latency_ms
 
     @property
     def estimated_tokens(self) -> int:
+        """Diagnostic only (CTX-06): no production consumer."""
         return self._estimated_tokens
 
     @property
     def prefix_shared_ratio(self) -> float:
+        """Diagnostic only (CTX-06): no production consumer."""
         return self._prefix_ratio
 
     @property
     def calibration(self) -> float | None:
-        """Reported prompt tokens divided by our estimate (``None`` if either is 0)."""
+        """Reported prompt tokens divided by our estimate (``None`` if either is 0).
+
+        Diagnostic only (CTX-06): no production consumer.
+        """
         if self._estimated_tokens <= 0 or self._prompt <= 0:
             return None
         return self._prompt / self._estimated_tokens
 
     @property
     def cache_hit_ratio(self) -> float | None:
-        """``cached_tokens / prompt_tokens`` — ``None`` when nobody reported it."""
+        """``cached_tokens / prompt_tokens`` — ``None`` when nobody reported it.
+
+        Diagnostic only (CTX-06): no production consumer.
+        """
         if not self._cached_reported or self._prompt <= 0:
             return None
         return self._cached / self._prompt
@@ -179,11 +194,16 @@ class BudgetLedger:
         """Token usage per model, for "did the fallback cost more or less".
 
         A copy, so a caller rendering it cannot rewrite what was recorded.
+        Diagnostic only (CTX-06): no production consumer.
         """
         return {name: dict(spend) for name, spend in self._by_model.items()}
 
     def cost(self, pricing: Pricing | None) -> float | None:
-        """Money spent, or ``None`` when no price is configured."""
+        """Money spent, or ``None`` when no price is configured.
+
+        Diagnostic only (CTX-06): no production consumer; ``Pricing`` itself is
+        read by the CLI and the trace renderer.
+        """
         if pricing is None or not pricing.configured:
             return None
         cached = min(self._cached, self._prompt) if self._cached_reported else 0

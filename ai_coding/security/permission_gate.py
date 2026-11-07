@@ -478,6 +478,17 @@ class PermissionGate:
                     PermissionDecision.DENY,
                     f"bash command blocked: {reason}",
                 )
+        # X-01a: a read-only shell that asks for the host network is a
+        # contradiction, and DENY (rather than WARN) means the operator is never
+        # asked to approve something the tool will refuse anyway.  The *key*
+        # matters, not its value: ``network_permissions: null`` is still a
+        # request, and testing ``is not None`` let it through (matching
+        # ``shell_read_tool.precheck``, which has always checked key presence).
+        if name == "shell_read" and "network_permissions" in params:
+            return Decision(
+                PermissionDecision.DENY,
+                "shell_read never requests host network; use bash with approval",
+            )
         if tool_name in self._denied_tools:
             return Decision(
                 PermissionDecision.DENY,
@@ -878,6 +889,20 @@ class PermissionGate:
         key = self.grant_key(tool_name, params)
         if key is not None:
             self._once_grants.add(key)
+
+    def consume_once(
+        self, tool_name: str, params: Mapping[str, Any]
+    ) -> None:
+        """Discard the one-off approval for exactly this call, if any.
+
+        The dispatcher calls this at the end of the call the human answered
+        ``yes`` to.  Without it the key would live for the whole process, and
+        ``authorized_roots`` would keep turning one approval into a permanent
+        writable bind root (X-01d).
+        """
+        key = self.grant_key(tool_name, params)
+        if key is not None:
+            self._once_grants.discard(key)
 
     def path_allowed(self, path: str | Path) -> bool:
         """Whether the operator has already authorized this path (B).

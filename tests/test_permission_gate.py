@@ -568,6 +568,72 @@ def test_bash_inherit_network_does_not_warn_when_default_is_inherit():
     assert "host network" not in d.reason
 
 
+def test_shell_read_with_a_network_key_is_denied_outright():
+    """X-01a: DENY, not WARN -- asking the operator first would waste a prompt
+    on a call the tool refuses anyway."""
+    gate = PermissionGate(network_mode="deny")
+
+    d = gate.check(
+        "shell_read",
+        {
+            "command": "ls",
+            "network_permissions": "inherit",
+            "justification": "local dev server",
+        },
+    )
+
+    assert d == PermissionDecision.DENY
+    assert "bash" in d.reason, "the reason must name the approval path that works"
+
+
+def test_shell_read_with_a_null_network_key_is_still_denied():
+    """Presence, not truthiness: ``null`` is still a request for the field."""
+    gate = PermissionGate(network_mode="deny")
+
+    d = gate.check(
+        "shell_read",
+        {"command": "ls", "network_permissions": None},
+    )
+
+    assert d == PermissionDecision.DENY
+
+
+def test_plan_mode_ls_is_still_allowed():
+    """The gate's new branch fires on the field, never on the tool name alone."""
+    gate = PermissionGate()
+
+    assert gate.check("shell_read", {"command": "ls"}) == PermissionDecision.ALLOW
+
+
+def test_a_one_off_yes_opens_the_path_until_it_is_consumed(tmp_path):
+    gate = PermissionGate(workspace=str(tmp_path))
+    outside = tmp_path.parent / "one-off-outside"
+    params = {"path": str(outside / "a.py")}
+
+    gate.allow_once("read", params)
+
+    assert gate.path_allowed(outside / "a.py") is True
+    assert gate.grants == (), "a one-off answer is not a standing permission"
+
+    gate.consume_once("read", params)
+
+    assert gate.path_allowed(outside / "a.py") is False
+    assert gate._once_grants == set()
+
+
+def test_consuming_one_off_does_not_touch_an_always_grant(tmp_path):
+    gate = PermissionGate(workspace=str(tmp_path))
+    outside = tmp_path.parent / "always-outside"
+    params = {"path": str(outside / "a.py")}
+
+    gate.grant("read", params, posture="build")
+    gate.allow_once("read", params)
+    gate.consume_once("read", params)
+
+    assert gate.path_allowed(outside / "a.py") is True
+    assert gate.grants != ()
+
+
 def test_bash_inherit_network_does_not_warn_when_default_is_off():
     gate = PermissionGate(network_mode="off")
     d = gate.check(

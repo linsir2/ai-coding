@@ -135,6 +135,8 @@ def build_subagent_runner(
         roots = tuple(sandbox_roots)
         if workdir:
             roots = (Path(workdir).expanduser().resolve(),)
+        # MCP-10b: a sub-agent never registers MCP tools -- ``mcp_call`` is
+        # added to the parent's registry only, so this stack has none to gate.
         registry = build_tool_registry(
             app_cfg,
             workdir or main_ws,

@@ -902,3 +902,82 @@ async def test_a_remote_server_without_a_token_still_asks_for_one(monkeypatch):
         assert manager.servers()[0]["status"] != "connected"
     finally:
         await manager.aclose()
+
+
+# ---- MCP-09: a busy callback port falls back instead of failing ------------
+
+
+async def test_a_busy_callback_port_falls_back_to_an_os_port():
+    from ai_coding.core.mcp import _CallbackServer
+
+    holder = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    busy = holder.sockets[0].getsockname()[1]
+    callback = _CallbackServer(busy)
+    try:
+        await callback.start()
+        assert callback.fell_back is True
+        assert callback.port != busy
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", callback.port)
+        writer.write(b"GET /?code=c1&state=s1 HTTP/1.1\r\nHost: x\r\n\r\n")
+        await writer.drain()
+        status = await reader.readline()
+        writer.close()
+        assert b"200" in status
+        assert await callback.result(1.0) == ("c1", "s1")
+    finally:
+        await callback.stop()
+        holder.close()
+        await holder.wait_closed()
+
+
+async def test_port_zero_still_reports_the_actual_port():
+    from ai_coding.core.mcp import _CallbackServer
+
+    callback = _CallbackServer(0)
+    try:
+        await callback.start()
+        assert callback.port > 0
+        assert callback.fell_back is False
+    finally:
+        await callback.stop()
+
+
+async def test_the_callback_stops_cleanly_after_a_fallback():
+    from ai_coding.core.mcp import _CallbackServer
+
+    holder = await asyncio.start_server(lambda r, w: None, "127.0.0.1", 0)
+    busy = holder.sockets[0].getsockname()[1]
+    callback = _CallbackServer(busy)
+    await callback.start()
+    chosen = callback.port
+    await callback.stop()
+    holder.close()
+    await holder.wait_closed()
+
+    rebound = await asyncio.start_server(lambda r, w: None, "127.0.0.1", chosen)
+    rebound.close()
+    await rebound.wait_closed()
+
+
+async def test_a_fallback_forgets_the_cached_client_registration(tmp_path, monkeypatch):
+    """MCP-09 ruling: a registration is bound to the redirect URI it was
+    registered with, so a changed port must drop it (tokens stay)."""
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+    from ai_coding.core.mcp import _TokenStore
+
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    store = _TokenStore("remote")
+    await store.set_tokens(OAuthToken(access_token="t1", token_type="Bearer"))
+    await store.set_client_info(
+        OAuthClientInformationFull(
+            client_id="cid",
+            redirect_uris=["http://127.0.0.1:19876/mcp/oauth/callback"],
+        )
+    )
+
+    store.clear_client_info()
+
+    assert await store.get_client_info() is None
+    assert (await store.get_tokens()).access_token == "t1"

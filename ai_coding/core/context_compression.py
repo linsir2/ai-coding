@@ -72,6 +72,9 @@ _DELTA_KEEP_TAIL = 20
 #: refresh must never undo the shrink that made it necessary.
 _REINJECT_FILE_TOKENS = 8_000
 _REINJECT_MAX_FILES = 5
+#: The snapshot's first line.  Matching on it is how a re-attached view is kept
+#: single-copy even if a future caller applies two mount points.
+_REINJECT_HEADER = "[压缩后重新载入的文件快照]"
 _L4_BREAKER_THRESHOLD = 3
 _MIN_PAGE_MESSAGES = 4
 #: How much of the tail budget a user boundary must preserve to be worth
@@ -351,7 +354,17 @@ def _elide_tool_results(
             # tokens; dropping it costs the turn, so leave it.
             continue
         note = previous_result_note(m.tool_name or "tool", len(body), path)
-        out[i] = _tool_copy(m, _elided_body(body, note, window))
+        candidate = _elided_body(body, note, window)
+        # CMP-04: compare the real strings, not a constant allowance.  The note
+        # carries the artifact's absolute path, which can be longer than 160 on a
+        # deep workspace and then the "shrink" would make the request bigger.
+        # The artifact was already written; it is content-addressed and reusable,
+        # so leaving it unreferenced costs one file on disk, never correctness.
+        # CJK text makes this a character comparison, not a token one; a body
+        # that is shorter in characters is never longer in tokens here.
+        if len(candidate) >= len(body):
+            continue
+        out[i] = _tool_copy(m, candidate)
         budget -= window
     return out
 
@@ -576,6 +589,16 @@ def sanitize_pairs(messages: list[ChatMessage]) -> list[ChatMessage]:
             continue
         out.append(m)
     return out
+
+
+def _history_chars(messages: Sequence[ChatMessage]) -> int:
+    """Content length, the cheap measure a view comparison can afford.
+
+    ``checkpoint_view`` runs at least twice per request; comparing views with
+    ``_history_tokens`` paid for tool arguments and image accounting just to
+    answer "is this smaller".  The character count answers that in one pass.
+    """
+    return sum(len(message.content or "") for message in messages)
 
 
 def _history_tokens(messages: list[ChatMessage]) -> int:
@@ -948,6 +971,43 @@ def _ensure_pinned(
     return messages
 
 
+def _same_history(
+    left: Sequence[ChatMessage], right: Sequence[ChatMessage]
+) -> bool:
+    """Content equality, ignoring object identity.
+
+    Every pass works on a copy, so identity says nothing.  Used by ``/compact``
+    to tell "the history changed" from "this pass was a no-op": a no-op must not
+    grow the list with a snapshot, nor be reported as a compaction.
+    """
+    if len(left) != len(right):
+        return False
+    for first, second in zip(left, right, strict=False):
+        if (
+            first.role,
+            first.content or "",
+            first.tool_call_id,
+            first.tool_name,
+        ) != (
+            second.role,
+            second.content or "",
+            second.tool_call_id,
+            second.tool_name,
+        ):
+            return False
+        first_calls = tuple(
+            (call.id, call.name, call.arguments)
+            for call in (first.tool_calls or ())
+        )
+        second_calls = tuple(
+            (call.id, call.name, call.arguments)
+            for call in (second.tool_calls or ())
+        )
+        if first_calls != second_calls:
+            return False
+    return True
+
+
 def _trailing_tool_batch(messages: list[ChatMessage]) -> list[ChatMessage]:
     """The trailing run of ``role == "tool"`` messages — L3's whole input.
 
@@ -1057,6 +1117,10 @@ class ContextManager:
         #: keeps every existing caller (and every test) unchanged.
         self._file_reader = file_reader
         self._l4_failures = 0
+        #: CMP-02: the last ``checkpoint_view`` L0 result, keyed by everything
+        #: that can change it (see ``_l0_view``).  The same view is asked for at
+        #: least twice per request; the second answer must not cost a rescan.
+        self._view_memo: tuple[tuple[Any, ...], list[ChatMessage]] | None = None
         #: The last L4 summary call's own usage (prompt/completion/total), for
         #: the compaction funnel's Ended event.  Never fed to the meter.
         self.last_summary_usage: dict[str, int] | None = None
@@ -1116,6 +1180,21 @@ class ContextManager:
             )
         )
 
+    def _microcompact_protect_tokens(self) -> int:
+        """How much recent tool output L0 must keep, for *this* window (CMP-03).
+
+        A flat 40k was a Claude-Code-scale number: on a 6k window it protected
+        more than the whole context (L0 never fired), and on a 48k window it kept
+        83% of it.  A third of the window, clamped to 8k..40k, scales both ends.
+
+        **Only windows below 120k behave differently**: ``window // 3`` is at
+        least 40k from 120k up, so the upper clamp leaves every large window
+        exactly as it was; the 8k floor only lifts windows below 24k.
+        """
+        return max(
+            8_000, min(_MICROCOMPACT_PROTECT_TOKENS, self._max_context_tokens // 3)
+        )
+
     @property
     def summarizer(self) -> Callable[[str], Awaitable[str | None]] | None:
         """The L4 summarizer; writable so ``/model`` can repoint it (H3).
@@ -1149,6 +1228,14 @@ class ContextManager:
         ``compress_if_needed`` can own both the trim and its single
         ``[上下文超限]`` declaration instead of announcing twice.
 
+        The returned list does **not** carry the post-compaction file snapshot
+        (CMP-01).  The snapshot belongs to the request, not to the pass: it is
+        mounted by ``checkpoint_view`` and by ``compress_if_needed`` after the
+        hard trim, so it is present on every request that has a checkpoint
+        instead of only on the one that paid for a summary.  A caller that
+        invokes this method directly gets the compressed history and nothing
+        else.
+
         I2 changes *what L4 is shown*, not the layer order (L3→L1→L2→L4 is
         still the invariant M-E2 pinned).  Two things are new:
 
@@ -1179,6 +1266,7 @@ class ContextManager:
         l0_in = out
         out = microcompact_old_results(
             out,
+            protect_tokens=self._microcompact_protect_tokens(),
             elide_root=self._root,
             window_chars=self._l2_window_chars,
             window_budget=self._l2_window_budget,
@@ -1318,7 +1406,6 @@ class ContextManager:
                     )
                     out = [
                         _checkpoint_note(fresh),
-                        *self._reinject_recent_files(session),
                         *tail,
                     ]
                 else:
@@ -1438,7 +1525,6 @@ class ContextManager:
                 )
                 out = [
                     _checkpoint_note(fresh),
-                    *self._reinject_recent_files(session),
                     *kept_tail,
                 ]
                 l2_after = l2_before - (tail_before - _history_tokens(kept_tail))
@@ -1581,6 +1667,58 @@ class ContextManager:
                 return False
         return True
 
+    def _l0_view(
+        self,
+        messages: list[ChatMessage],
+        used: int,
+        *,
+        anchor: str,
+        session_id: str = "",
+    ) -> list[ChatMessage]:
+        """The L0 pass over the checkpoint's tail (or the whole history).
+
+        Memoised on everything that can change the answer: the session, where
+        the checkpoint starts, which checkpoint it is, the message count, the
+        last message's id, the L2 window and the protect budget.  ``messages``
+        is append-only, so a new message changes the length (or the last id); a
+        changed checkpoint changes ``anchor``.  A same-length in-place rewrite
+        (undo, rewind) is not detected — that path replaces the whole list and
+        its anchor, so it takes the no-checkpoint branch with a new key.
+
+        ``session_id`` is part of the key (P2-3): one ``ContextManager`` serves
+        every session in the process, and a view built for one session must
+        never be handed to another.
+
+        The cached list is copied on return; the messages inside are shared and
+        never mutated in place by the later passes.
+        """
+        source = (
+            list(messages[used:]) if 0 < used <= len(messages) else list(messages)
+        )
+        last = source[-1].id if source else ""
+        protect = self._microcompact_protect_tokens()
+        key = (
+            session_id,
+            used,
+            anchor,
+            len(source),
+            last,
+            self._l2_window_chars,
+            self._l2_window_budget,
+            protect,
+        )
+        if self._view_memo is not None and self._view_memo[0] == key:
+            return list(self._view_memo[1])
+        out = microcompact_old_results(
+            source,
+            protect_tokens=protect,
+            elide_root=self._root,
+            window_chars=self._l2_window_chars,
+            window_budget=self._l2_window_budget,
+        )
+        self._view_memo = (key, out)
+        return list(out)
+
     def checkpoint_view(
         self,
         messages: list[ChatMessage],
@@ -1610,8 +1748,10 @@ class ContextManager:
         """
         if session is None or not messages:
             return None
+        session_id = str(getattr(session, "session_id", "") or "")
         previous, used = read_checkpoint(session, messages)
-        if previous and 0 < used <= len(messages):
+        has_checkpoint = bool(previous and 0 < used <= len(messages))
+        if has_checkpoint:
             # 2026-11 real machine: the messages after a checkpoint are not a
             # small tail — they are everything the turn added since, and during
             # exploration that is a wall of tool output.  Measured on a continued
@@ -1625,14 +1765,13 @@ class ContextManager:
             #
             # L0 is stateless, idempotent and free (content-addressed artifacts,
             # no model call), which is exactly what a per-request view can
-            # afford.
-            tail = microcompact_old_results(
-                list(messages[used:]),
-                elide_root=self._root,
-                window_chars=self._l2_window_chars,
-                window_budget=self._l2_window_budget,
-            )
-            out = [_checkpoint_note(previous), *tail]
+            # afford.  CMP-02 memoises it per request shape.
+            core = [
+                _checkpoint_note(previous),
+                *self._l0_view(
+                    messages, used, anchor=previous, session_id=session_id
+                ),
+            ]
         else:
             # No checkpoint — either a first compaction or one whose anchor no
             # longer matches.  L0 is still *per-request* work: ``compress``
@@ -1645,15 +1784,28 @@ class ContextManager:
             # out as the raw **161k** — past a 131k window.  Applying L0 here
             # makes the request reproducible on every iteration instead of for
             # exactly one.
-            out = microcompact_old_results(
-                list(messages),
-                elide_root=self._root,
-                window_chars=self._l2_window_chars,
-                window_budget=self._l2_window_budget,
-            )
-        out = _ensure_pinned(out, pinned)
+            core = self._l0_view(messages, 0, anchor="", session_id=session_id)
+        # Decide "smaller" on the L0 result, *before* mounting the snapshot:
+        # the snapshot is a request aid, not evidence that L0 shrank anything.
+        # Measuring after it would let a large snapshot turn a real view into
+        # ``None`` and lose L0 as well.
+        if _history_chars(core) >= _history_chars(messages):
+            return None
+        # P1-1: the snapshot only rides a *checkpoint* view.  Without one, L0
+        # may have bought a few thousand tokens and the snapshot then put 8k
+        # back -- measured 45,025 -> 48,696 tokens, a "compressed" request
+        # larger than the raw history.  A checkpoint has already replaced the
+        # prefix wholesale, so the snapshot cannot undo it.
+        if has_checkpoint:
+            mounted = self._attach_reinjection(core, session)
+            if _history_chars(mounted) <= _history_chars(messages):
+                core = mounted
+        out = _ensure_pinned(core, pinned)
         out = sanitize_pairs(out)
-        if _history_tokens(out) >= _history_tokens(list(messages)):
+        # The invariant `checkpoint_view` promises its caller: a view is never
+        # larger than the history it replaces (pinned messages can only be
+        # re-appended, sanitize only removes).
+        if _history_chars(out) > _history_chars(messages):
             return None
         return out
 
@@ -1722,8 +1874,50 @@ class ContextManager:
             trimmed = hard_trim(trimmed, max(_MIN_PAGE_MESSAGES, len(trimmed) // 2))
             guard += 1
         out = self._announce_omissions(out, trimmed)
+        # CMP-01: the snapshot belongs to the request, not to the pass that paid
+        # for the summary.  Mounted **after** the hard trim (the trim keeps only
+        # the tail, so a snapshot inserted before it would be cut away) and only
+        # when this pass actually changed something -- a ``/compact`` that found
+        # nothing must not look like a compaction, and must not grow the list.
+        # P1-1: and only when a *checkpoint* exists.  A pass that shrank without
+        # one bought a few thousand tokens; adding 8k of snapshot back could
+        # leave the request larger than the history it replaced.
+        if not _same_history(out, messages):
+            previous, used = (
+                read_checkpoint(session, out) if session is not None else ("", 0)
+            )
+            if previous and 0 < used <= len(out):
+                mounted = self._attach_reinjection(out, session)
+                if _history_chars(mounted) <= _history_chars(messages):
+                    out = mounted
         out = _ensure_pinned(out, pinned)
         return out
+
+    def _attach_reinjection(
+        self, messages: list[ChatMessage], session: Any
+    ) -> list[ChatMessage]:
+        """Put the file snapshot into a request view, at most once.
+
+        The snapshot is a *request* block, not a compaction side effect: the
+        checkpoint carries references, not bytes, so every request built from it
+        needs the same refresh.  It goes right after the checkpoint note (where
+        the model reads it as context), or at the end when there is no note.
+
+        Any snapshot already in ``messages`` is dropped first, so the two mount
+        points (``checkpoint_view`` and ``compress_if_needed``) can never stack
+        two copies, even if a future caller applies both.
+        """
+        snapshot = self._reinject_recent_files(session)
+        if not snapshot:
+            return messages
+        body = [
+            message
+            for message in messages
+            if not (message.content or "").startswith(_REINJECT_HEADER)
+        ]
+        if body and _is_checkpoint_note(body[0]):
+            return [body[0], *snapshot, *body[1:]]
+        return [*body, *snapshot]
 
     def _reinject_recent_files(self, session: Any) -> list[ChatMessage]:
         """The files this session read most recently, at their current on-disk state.
@@ -1782,7 +1976,8 @@ class ContextManager:
             ChatMessage(
                 role="user",
                 content=(
-                    "[压缩后重新载入的文件快照] 以下是压缩前最近读过的文件在当前磁盘上的内容；"
+                    f"{_REINJECT_HEADER} "
+                    "以下是压缩前最近读过的文件在当前磁盘上的内容；"
                     "可以直接据此继续，不必重新读取这些文件。需要未包含的行再按 offset 读。\n\n"
                     + "\n\n".join(blocks)
                 ),

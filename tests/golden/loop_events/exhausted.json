@@ -75,7 +75,7 @@
       "system_chars": 0,
       "tools_chars": 116,
       "history_messages": 3,
-      "history_chars": 48,
+      "history_chars": 50,
       "tail_blocks": [
         [
           "environment",
@@ -132,9 +132,9 @@
       "type": "ContextAssembled",
       "iteration": 3,
       "system_chars": 0,
-      "tools_chars": 116,
+      "tools_chars": 0,
       "history_messages": 5,
-      "history_chars": 94,
+      "history_chars": 98,
       "tail_blocks": [
         [
           "environment",

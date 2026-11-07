@@ -57,6 +57,9 @@ def main(
     ),
 ) -> None:
     """ai-coding : an AI coding assistant."""
+    # Subcommands read their shared options from here; Typer does not pass a
+    # parent callback's parameters down to a child command's function.
+    ctx.obj = {"path": path, "workspace": workspace, "skills": skills}
     if ctx.invoked_subcommand is not None:
         # A subcommand owns the invocation. Falling through here would launch
         # the TUI underneath `ai-coding skill list`.
@@ -314,6 +317,27 @@ def _build_loop(
     )
 
 
+def _trace_root(app_cfg: Any, workspace: str | Path) -> Path:
+    """The one resolved trace root the recorder and ``trace overview`` share.
+
+    ``tracing.dir`` is optional; when set it is expanded and resolved here, so
+    the writer and the reader cannot disagree about ``~`` or a relative path
+    (they used to: the recorder honoured the setting and the overview did not,
+    which made an empty table look like "nothing was traced" -- X-02b).
+    """
+    base = Path(workspace).expanduser().resolve()
+    configured = str(getattr(getattr(app_cfg, "tracing", None), "dir", "") or "").strip()
+    if configured:
+        target = Path(configured).expanduser()
+        # A relative ``tracing.dir`` belongs to the workspace, not to whatever
+        # directory the process happened to start in: the recorder and the
+        # reader must agree even when the command is run from elsewhere.
+        if not target.is_absolute():
+            target = base / target
+        return target.resolve()
+    return base / ".ai-coding" / "traces"
+
+
 def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
     """Build a trace recorder for this run, or ``None`` when tracing is off."""
     tracing = getattr(app_cfg, "tracing", None)
@@ -321,8 +345,7 @@ def _make_recorder(app_cfg: Any, workspace: str, session: Any) -> Any | None:
         return None
     from ai_coding.core.trace import Redactor, TraceRecorder, TraceStore
 
-    default_root = Path(workspace).expanduser().resolve() / ".ai-coding" / "traces"
-    root = getattr(tracing, "dir", "") or default_root
+    root = _trace_root(app_cfg, workspace)
     store = TraceStore(
         root,
         max_turn_bytes=int(getattr(tracing, "max_turn_bytes", 2_000_000)),
@@ -597,6 +620,7 @@ trace_app = typer.Typer(help="Inspect traced sessions.", no_args_is_help=True)
 
 @trace_app.command("overview")
 def trace_overview(
+    ctx: typer.Context,
     workspace: str = typer.Option(".", "--workspace", "-w"),
     since: int = typer.Option(
         0,
@@ -609,6 +633,11 @@ def trace_overview(
 ) -> None:
     """One table for every traced session in this workspace (R9b, restored in M-G2).
 
+    Reads the same root the recorder writes: ``tracing.dir`` from the layered
+    config, or ``<workspace>/.ai-coding/traces`` when it is unset.  If the
+    configuration cannot be loaded the command says so and uses that default
+    directory rather than showing an empty table.
+
     ``render_overview`` already existed and was exported; R10 deleted the command
     that called it and left it with no consumer.  Reusing it here rather than
     writing a second renderer is the point -- a copy would drift.
@@ -617,8 +646,10 @@ def trace_overview(
     from dataclasses import asdict
 
     from ai_coding.app.trace_text import render_overview
+    from ai_coding.config.loader import ConfigLoader
     from ai_coding.core.aggregate import build_report
     from ai_coding.core.trace import TraceStore
+    from ai_coding.paths import Paths
 
     if output_format not in ("table", "json"):
         typer.secho(
@@ -628,8 +659,30 @@ def trace_overview(
         )
         raise typer.Exit(code=2)
 
-    ws = Path(workspace).expanduser().resolve()
-    root = ws / ".ai-coding" / "traces"
+    paths = Paths.for_workspace(workspace)
+    # Same layering the recorder is built from (``_make_recorder`` receives the
+    # CLI-loaded ``app_cfg``), so ``tracing.dir`` cannot point the writer one
+    # place and the reader another.  The parent callback's ``-p/--path`` is
+    # honoured too: without it an explicit config file only affected the
+    # recorder, and the overview read the layered default instead (X-02b).
+    config_path: str | None = None
+    if isinstance(ctx.obj, dict):
+        raw_path = ctx.obj.get("path")
+        config_path = str(raw_path) if raw_path else None
+    try:
+        app_cfg: Any | None = ConfigLoader.load_layers_report(
+            paths, config_path
+        ).config
+    except Exception:  # noqa: BLE001 — a broken config must not hide the traces
+        app_cfg = None
+    ws = paths.workspace
+    if app_cfg is None:
+        typer.echo(
+            "warning: could not load configuration; using the default trace "
+            "directory (.ai-coding/traces)",
+            err=True,
+        )
+    root = _trace_root(app_cfg, ws)
     report = build_report(TraceStore(root, workspace=ws), since_days=since)
     if output_format == "json":
         # An empty store is still a JSON document: `--format json | jq .sessions`

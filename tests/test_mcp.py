@@ -268,7 +268,7 @@ async def test_execute_marks_is_error():
     result = await adapter.execute({})
 
     assert result.success is False
-    assert result.detail == "mcp_error"
+    assert result.detail == "mcp_tool_error"
     assert "boom" in result.output
 
 
@@ -280,7 +280,7 @@ async def test_execute_call_failure_is_tool_result():
     result = await adapter.execute({})
 
     assert result.success is False
-    assert result.detail == "mcp_error"
+    assert result.detail == "mcp_tool_error"
     assert "transport died" in result.output
 
 
@@ -481,7 +481,7 @@ async def test_an_execution_timeout_bounds_one_hanging_tool_call():
     elapsed = time.monotonic() - started
 
     assert result.success is False
-    assert result.detail == "mcp_error"
+    assert result.detail == "mcp_timeout"
     assert elapsed < 2.0
 
 
@@ -960,3 +960,387 @@ async def test_wait_ready_is_capped_when_a_server_never_settles():
 
     assert elapsed < 2.0, f"the cap must bound the wait ({elapsed})"
     await manager.aclose()
+
+
+# ---- MCP-01: a local server's argv can go through the process sandbox ------
+#
+# ``spawn_argv`` is the one entry point bash and jobs already use; a local MCP
+# child was the one process that never reached it.  The switch is off by
+# default, so an existing config behaves exactly as before.
+
+
+class _FakeBackend:
+    """Just enough of ``SandboxBackend`` for ``spawn_argv``."""
+
+    network_mode = "off"
+    tier = "full"
+
+    def __init__(self, available: bool = True) -> None:
+        self._available = available
+
+    def available(self) -> bool:
+        return self._available
+
+    def gap(self) -> str:
+        return "bwrap.unavailable"
+
+    def wrap(self, argv, roots, network=None):
+        return ["bwrap", "--", *argv]
+
+
+def _sandboxed_manager(policy, backend, *, sandbox: bool = True):
+    import ai_coding.core.mcp as mcp_module
+
+    return MCPManager(
+        MCPConfig(enabled=True, sandbox=sandbox, servers=[_server()]),
+        sandbox=(policy, backend),
+        sandbox_roots=(),
+        session_factory=mcp_module._default_session_factory,
+    )
+
+
+def test_sandbox_is_off_by_default():
+    assert MCPConfig().sandbox is False
+    # Per-server switching was deliberately not added: this is a batch-wide
+    # switch, and a server field would widen the config surface instead.
+    assert not hasattr(MCPServerConfig(), "sandbox")
+
+
+def test_sandbox_flag_off_keeps_the_exact_original_argv():
+    import ai_coding.core.mcp as mcp_module
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    server = MCPServerConfig(name="fs", command=["/usr/bin/python3", "-m", "server"])
+    manager = _sandboxed_manager(
+        ProcessSandboxPolicy(mode="enforce"), _FakeBackend(), sandbox=False
+    )
+
+    assert manager._factory_for(server, interactive=False) is mcp_module._default_session_factory
+    params = mcp_module._server_parameters(server)
+    assert params.command == "/usr/bin/python3"
+    assert params.args == ["-m", "server"]
+
+
+def test_sandboxed_stdio_command_goes_through_the_backend():
+    from ai_coding.security.process_sandbox import SHELL_ARGV0, ProcessSandboxPolicy
+
+    server = MCPServerConfig(
+        name="fs", command=["/usr/bin/python3", "-m", "server", "--flag", "a b"]
+    )
+    manager = _sandboxed_manager(ProcessSandboxPolicy(mode="enforce"), _FakeBackend())
+
+    params = manager._stdio_parameters(server)
+
+    # Asserted element by element, not as a joined string: the argv is what
+    # gets spawned, and a quoting bug is exactly a list-shape bug.
+    assert params.command == "bwrap"
+    assert params.args[0] == "--"
+    assert params.args[1] == SHELL_ARGV0
+    assert params.args[2] == "-c"
+    assert params.args[3] == "/usr/bin/python3 -m server --flag 'a b'"
+    assert params.env is None
+
+
+def test_a_missing_sandbox_backend_falls_back_and_reports_degraded():
+    """MCP-01: warn + no mechanism runs the server, but never silently."""
+    from ai_coding.core.events import Degraded, RecordingObserver
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    observer = RecordingObserver()
+    manager = MCPManager(
+        MCPConfig(enabled=True, sandbox=True, servers=[_server()]),
+        observer=observer,
+        sandbox=(ProcessSandboxPolicy(mode="warn"), _FakeBackend(available=False)),
+        session_factory=_factory({}),
+    )
+
+    params = manager._stdio_parameters(MCPServerConfig(name="fs", command=["mcp-fs"]))
+    # The original argv still runs — the fallback is a report, not a refusal.
+    assert params.command == "mcp-fs"
+    assert params.args == []
+    degraded = observer.of_type(Degraded)
+    assert [event.component for event in degraded] == ["mcp_sandbox"]
+    assert degraded[0].reason == "bwrap.unavailable"
+    assert "without the OS process sandbox" in degraded[0].fallback
+
+    # Reported once per server, not once per reconnect.
+    manager._stdio_parameters(MCPServerConfig(name="fs", command=["mcp-fs"]))
+    assert len(observer.of_type(Degraded)) == 1
+
+
+@pytest.mark.asyncio
+async def test_enforce_refuses_a_server_it_cannot_wrap(monkeypatch):
+    """MCP-01: fail-closed.  ``enforce`` must not spawn what it cannot wrap."""
+    import ai_coding.core.mcp as mcp_module
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    built: list = []
+    monkeypatch.setattr(
+        mcp_module, "_server_parameters", lambda *args, **kwargs: built.append(args)
+    )
+    manager = MCPManager(
+        MCPConfig(enabled=True, sandbox=True, servers=[_server()]),
+        sandbox=(ProcessSandboxPolicy(mode="enforce"), None),
+    )
+
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    try:
+        # Nothing was spawned: the factory never even built parameters.
+        assert built == []
+        assert manager.available() == []
+        row = _rows(manager)["fs"]
+        assert row["status"] == "failed"
+        assert "sandbox.backend.missing" in row["detail"]
+    finally:
+        await manager.aclose()
+
+
+def test_an_empty_sandboxed_command_is_refused():
+    from ai_coding.core.mcp import _sandboxed_command
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy, SandboxGap
+
+    with pytest.raises(SandboxGap) as caught:
+        _sandboxed_command([], ProcessSandboxPolicy(mode="enforce"), _FakeBackend(), ())
+
+    assert caught.value.reason == "mcp.sandbox.command.missing"
+
+
+# ---- MCP-03: an execution timeout retires the session ---------------------
+#
+# A timed-out ``call_tool`` is abandoned, not stopped, and may still deliver a
+# response into a session that looks healthy.  The session is retired through
+# the same path as a transport death.
+
+
+@pytest.mark.asyncio
+async def test_an_execution_timeout_retires_the_session_and_reconnects(monkeypatch):
+    import ai_coding.core.mcp as mcp_module
+    from ai_coding.tools.mcp_call import MCPCallTool
+
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MIN", 0.01)
+    monkeypatch.setattr(mcp_module, "_BACKOFF_MAX", 0.05)
+    slow = _Session(tools=[_tool()], call_delay=30)
+    fast = _Session(tools=[_tool()], call_result=_result(texts=["ok"]))
+    attempts = {"n": 0}
+
+    def factory(server):
+        @asynccontextmanager
+        async def _cm():
+            attempts["n"] += 1
+            yield slow if attempts["n"] == 1 else fast
+
+        return _cm()
+
+    manager = MCPManager(
+        _cfg(_server("fs", timeout=MCPTimeout(execution=50))),
+        session_factory=factory,
+    )
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    assert manager.available()
+
+    result = await MCPCallTool(manager).execute(
+        {"server": "fs", "tool": "read_file", "input": {}}
+    )
+
+    assert result.success is False
+    assert result.detail == "mcp_timeout"
+    # Retired on the same step the call failed: the catalog stops offering it.
+    assert manager.available() == []
+    assert "重连" in _rows(manager)["fs"]["detail"]
+    # ...and the supervisor rebuilds it, which is the other half of retiring.
+    assert await until_mcp_settled(manager)
+    assert await _until_available(manager)
+    assert attempts["n"] == 2
+    await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_zero_execution_budget_does_not_retire_a_healthy_session():
+    """MCP-03 ruling: retire only when ``execution > 0``.
+
+    ``execution=0`` already fails every call; retiring the session as well
+    would turn one bad setting into a reconnect loop.
+
+    Regression guard: it passed before the fix (nothing retired sessions at
+    all); it pins the boundary the new path must not cross.
+    """
+    from ai_coding.tools.mcp_call import MCPCallTool
+
+    session = _Session(tools=[_tool()], call_result=_result(texts=["ok"]))
+    manager = MCPManager(
+        _cfg(_server("fs", timeout=MCPTimeout(execution=0))),
+        session_factory=_factory({"fs": session}),
+    )
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    try:
+        result = await MCPCallTool(manager).execute(
+            {"server": "fs", "tool": "read_file", "input": {}}
+        )
+        assert result.success is False
+        assert result.detail == "mcp_timeout"
+        assert manager._owner("fs").dead is None
+        assert manager.available() != []
+    finally:
+        await manager.aclose()
+
+
+async def _until_available(manager, timeout: float = 5.0) -> bool:
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        if manager.available():
+            return True
+        await asyncio.sleep(0.005)
+    return bool(manager.available())
+
+
+# ---- MCP-04: a remote result is bounded -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_huge_remote_output_is_head_tail_truncated():
+    from ai_coding.core.mcp import _MAX_RESULT_CHARS
+
+    session = _Session(
+        call_result=_result(texts=["A" * 150_000 + "B" * 150_000])
+    )
+    adapter = MCPToolAdapter(server="fs", tool=_tool(), session=session)
+
+    result = await adapter.execute({})
+
+    assert len(result.output) <= _MAX_RESULT_CHARS + 100
+    assert result.output.startswith("A")
+    assert result.output.endswith("B")
+    assert "[truncated" in result.output
+
+
+@pytest.mark.asyncio
+async def test_a_small_result_is_byte_identical():
+    """Regression guard: the cap must be inert below the limit."""
+    session = _Session(call_result=_result(texts=["line one", "line two"]))
+    adapter = MCPToolAdapter(server="fs", tool=_tool(), session=session)
+
+    result = await adapter.execute({})
+
+    assert result.output == "line one\nline two"
+
+
+# ---- MCP-05: tools/list is paginated --------------------------------------
+
+
+class _PagedSession:
+    """A session whose ``list_tools`` answers a scripted page per cursor."""
+
+    def __init__(self, pages) -> None:
+        self._pages = list(pages)
+        self.calls: list[str | None] = []
+
+    async def list_tools(self, cursor=None):
+        self.calls.append(cursor)
+        # Pages answer in order: the first call has no cursor, every later one
+        # names the previous page's ``nextCursor``.
+        index = min(len(self.calls) - 1, len(self._pages) - 1)
+        return self._pages[index]
+
+
+def _page(names, next_cursor=None):
+    return SimpleNamespace(
+        tools=[_tool(name) for name in names], nextCursor=next_cursor
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_tools_follows_next_cursor_across_pages():
+    session = _PagedSession([_page(["a", "b"], "1"), _page(["c"], None)])
+    manager = MCPManager(_cfg(_server("fs")), session_factory=_factory({"fs": session}))
+
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    try:
+        assert [h.name for _s, handles in manager.available() for h in handles] == [
+            "a",
+            "b",
+            "c",
+        ]
+        owner = manager._owner("fs")
+        assert owner.tools_pages == 2
+        assert owner.tools_incomplete is False
+        # First call without a cursor keeps a fake/SDK whose signature is bare.
+        assert session.calls == [None, "1"]
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_listing_stops_at_twenty_pages_and_declares_it():
+    from ai_coding.core.mcp import _LIST_TOOLS_MAX_PAGES, build_mcp_catalog
+
+    pages = [_page([f"t{i}"], str(i + 1)) for i in range(25)]
+    session = _PagedSession(pages)
+    manager = MCPManager(_cfg(_server("fs")), session_factory=_factory({"fs": session}))
+
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    try:
+        handles = [h for _s, hs in manager.available() for h in hs]
+        assert len(handles) == _LIST_TOOLS_MAX_PAGES
+        assert manager._owner("fs").tools_pages == _LIST_TOOLS_MAX_PAGES
+        assert manager.incomplete_servers() == (("fs", _LIST_TOOLS_MAX_PAGES),)
+        assert "不完整" in _rows(manager)["fs"]["detail"]
+        catalog = build_mcp_catalog(
+            manager.available(), incomplete=manager.incomplete_servers()
+        )
+        assert "catalog incomplete" in catalog and "20 pages" in catalog
+    finally:
+        await manager.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_cursor_cannot_loop_forever():
+    session = _PagedSession([_page(["a"], "same"), _page(["b"], "same")])
+    manager = MCPManager(_cfg(_server("fs")), session_factory=_factory({"fs": session}))
+
+    await manager.open_all()
+    assert await until_mcp_settled(manager)
+    try:
+        # Two calls: the repeat is detected on the second, not twenty later.
+        assert session.calls == [None, "same"]
+        assert manager._owner("fs").tools_incomplete is True
+        assert [h.name for _s, hs in manager.available() for h in hs] == ["a", "b"]
+        assert "不完整" in _rows(manager)["fs"]["detail"]
+    finally:
+        await manager.aclose()
+
+
+# ---- MCP-07: the leaves are distinguishable -------------------------------
+
+
+def test_the_mcp_leaves_map_to_the_families_the_retry_policy_uses():
+    from ai_coding.domain.error_codes import family_of, is_retryable
+
+    assert family_of("mcp_timeout") == "DEADLINE_EXCEEDED"
+    assert family_of("mcp_transport") == "UNAVAILABLE"
+    assert family_of("mcp_tool_error") == "UNAVAILABLE"
+    assert family_of("mcp_error") == "UNAVAILABLE"  # old traces keep working
+    assert is_retryable("mcp_timeout") is True
+    # Deliberately NOT_FOUND: an unknown server/tool must stay retryable
+    # rather than flipping into the non-retryable family.
+    assert family_of("mcp_tool_error") != "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_a_transport_failure_has_its_own_detail():
+    import anyio
+
+    session = _Session(raise_on_call=anyio.ClosedResourceError())
+    adapter = MCPToolAdapter(server="fs", tool=_tool(), session=session)
+
+    result = await adapter.execute({})
+
+    assert result.error == "UNAVAILABLE"
+    assert result.detail == "mcp_transport"
+

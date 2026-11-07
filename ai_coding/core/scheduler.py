@@ -52,6 +52,14 @@ current_task_id: ContextVar[str] = ContextVar("current_task_id", default="")
 _MIN_REAP_SECONDS = 10.0
 _MAX_REAP_SECONDS = 120.0
 
+#: SUB-02: upper bound for closing one child during shutdown.  ``close`` may
+#: run git (the worktree manager's own ceiling is 60s); a timed-out close
+#: leaves an orphaned worktree behind, but never loses already-committed work.
+_SHUTDOWN_CLOSE_SECONDS = 20.0
+#: P2-1: the whole shutdown close pass is bounded too -- N children must not
+#: turn into N × _SHUTDOWN_CLOSE_SECONDS of waiting.
+_SHUTDOWN_TOTAL_SECONDS = 30.0
+
 
 class IdempotencyConflict(RuntimeError):
     """The same idempotency key arrived with a different payload."""
@@ -150,10 +158,20 @@ class Scheduler:
         emit: Any = None,
     ) -> SubagentResult:
         """Run one child in a cancellable task under one slot."""
+        if self._closed:
+            raise RuntimeError("scheduler is closed")
         cached = self._idem_lookup(request)
         if cached is not None:
             if cached.get("result") is not None:
                 return cast(SubagentResult, cached["result"])
+            if cached.get("status") in TERMINAL_EVENTS:
+                # P2-3: the pre-registered claim is already settled but kept no
+                # result; say so instead of reporting a run that never existed
+                # as "in flight" forever.
+                raise IdempotencyConflict(
+                    f"idempotency key {request.idempotency_key!r} already "
+                    "finished without a cached result"
+                )
             raise IdempotencyConflict(
                 f"idempotency key {request.idempotency_key!r} is already in flight"
             )
@@ -162,10 +180,21 @@ class Scheduler:
         if observer is None and callable(emit):
             observer = EmitObserver(emit)
         token = current_task_id.set(request.id)
-        task = asyncio.create_task(
-            self._execute_child(request, record, parent, observer),
-            name=f"task:{request.id}",
+        # SUB-03: claim the key *before* the first await, so the window between
+        # the lookup above and ``await task`` cannot start a second run.  A
+        # completed run overwrites this entry with its result in ``_settle``.
+        self._idem_put(
+            record.key, record.digest, request_id=request.id, status="running",
         )
+        try:
+            task = asyncio.create_task(
+                self._execute_child(request, record, parent, observer),
+                name=f"task:{request.id}",
+            )
+        except BaseException:
+            self._idem_forget(record.key)
+            current_task_id.reset(token)
+            raise
         record.task = task
         self._tasks[request.id] = task
         try:
@@ -174,9 +203,11 @@ class Scheduler:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             self._settle(record, status="cancelled", error="cancelled")
+            self._idem_forget(record.key)
             raise
         except Exception as exc:  # noqa: BLE001 — view must not stay running
             self._settle(record, status="error", error=str(exc))
+            self._idem_forget(record.key)
             raise
         finally:
             current_task_id.reset(token)
@@ -228,6 +259,8 @@ class Scheduler:
         emit: Any = None,
     ) -> tuple[str, str]:
         """Reserve a slot, start a background child, return its two ids."""
+        if self._closed:
+            raise RuntimeError("scheduler is closed")
         cached = self._idem_lookup(request)
         if cached is not None:
             if cached.get("run_id"):
@@ -292,6 +325,8 @@ class Scheduler:
         idempotency_key: str = "",
     ) -> list[Any]:
         """Run the existing fan-out as one cancellable task and journal it."""
+        if self._closed:
+            raise RuntimeError("scheduler is closed")
         token = parent_span or uuid.uuid4().hex[:12]
         parent_record = self._begin_fanout(token, origin_session, idempotency_key)
         keys = {
@@ -668,7 +703,14 @@ class Scheduler:
             except RuntimeError:
                 loop = None
             if callable(stop_run) and loop is not None:
-                loop.create_task(stop_run(run_id))
+                key = f"stop:{run_id}"
+                stop_task = loop.create_task(stop_run(run_id), name=key)
+                self._tasks[key] = stop_task
+
+                def _drop(_task: asyncio.Task[Any]) -> None:
+                    self._tasks.pop(key, None)
+
+                stop_task.add_done_callback(_drop)
             else:
                 self._runner.cancel(run_id)
         return bool(run_id or record is not None)
@@ -832,6 +874,8 @@ class Scheduler:
     # ---- internals --------------------------------------------------------
 
     def _begin(self, request: TaskRequest, *, kind: str) -> _Record:
+        if self._closed:
+            raise RuntimeError("scheduler is closed")
         record = _Record(
             task_id=request.id,
             parent_id=request.parent_id or current_task_id.get(),
@@ -850,6 +894,8 @@ class Scheduler:
     def _begin_fanout(
         self, token: str, origin_session: str, key: str
     ) -> _Record:
+        if self._closed:
+            raise RuntimeError("scheduler is closed")
         record = _Record(
             task_id=token,
             parent_id=current_task_id.get(),
@@ -926,11 +972,21 @@ class Scheduler:
                 result.commit_error if result is not None else None
             ),
         )
-        if record.request is not None and result is not None:
-            self._idem_put(
-                record.key, record.digest, request_id=record.task_id,
-                run_id=record.run_id, result=result,
-            )
+        if record.key and record.key in self._idem:
+            # P2-3: overwrite the pre-registered ``running`` claim with the
+            # terminal status (and the result when there is one).  Leaving it
+            # at "running" made every later ``run()`` with the same key report
+            # "already in flight" forever.
+            payload: dict[str, Any] = {
+                "request_id": record.task_id,
+                "run_id": record.run_id,
+                "status": event,
+            }
+            if result is not None:
+                payload["result"] = result
+            if error:
+                payload["error"] = error
+            self._idem_put(record.key, record.digest, **payload)
 
     def _register_result(
         self, request: TaskRequest, started: float, result: SubagentResult
@@ -1068,6 +1124,11 @@ class Scheduler:
         if len(self._idem) > 200:
             self._idem.pop(next(iter(self._idem)))
 
+    def _idem_forget(self, key: str) -> None:
+        """Drop an in-flight claim after a start that never settled (SUB-03)."""
+        if key:
+            self._idem.pop(key, None)
+
     def _cached_fanout(
         self, keys: dict[str, str], digests: dict[str, str]
     ) -> list[Any] | None:
@@ -1161,7 +1222,49 @@ class Scheduler:
                 fence=record.fence, run_id=record.run_id,
             )
 
+    async def shutdown(self) -> None:
+        """Cancel in-flight turns and close every live child (SUB-02).
+
+        ``_closed`` is set first: a turn admitted while this runs would either
+        restart the reaper or keep a child alive past the loop that owns its
+        engine.  The task list is materialised before cancelling because each
+        ``run``/``fanout`` pops its own entry in ``finally``.
+        """
+        self._closed = True
+        tasks = [task for _, task in list(self._tasks.items())]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        deadline = time.monotonic() + _SHUTDOWN_TOTAL_SECONDS
+        close = getattr(self._runner, "close", None)
+        if callable(close):
+            for run_id in self._live_run_ids():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        close(run_id),
+                        timeout=min(_SHUTDOWN_CLOSE_SECONDS, remaining),
+                    )
+                except Exception:  # noqa: BLE001 — shutdown is best-effort
+                    pass
+        # P1-2: a retirement task already scheduled by the runner must be
+        # awaited here, or the loop closes under it.
+        drain = getattr(self._runner, "drain_retirements", None)
+        if callable(drain):
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    await asyncio.wait_for(drain(), timeout=remaining)
+                except Exception:  # noqa: BLE001 — shutdown is best-effort
+                    pass
+
     async def aclose(self) -> None:
+        await self.shutdown()
         self._closed = True
         if self._reaper is not None:
             self._reaper.cancel()
@@ -1182,6 +1285,38 @@ class Scheduler:
     def task_list(self) -> list[BackgroundTask]:
         lister = getattr(self._runner, "task_list", None)
         return list(lister()) if callable(lister) else []
+
+    def _live_run_ids(self) -> list[str]:
+        """Every *non-terminal* child id shutdown must close, deduplicated.
+
+        P2-1: a settled row is already closed for lifecycle purposes; running
+        its teardown again would re-commit, delete a worktree the operator is
+        inspecting, and rewrite the row to ``cancelled``.  The background rows
+        are the addressable handles' projection, and ``_request_runs`` covers
+        a child whose row was already pruned.
+        """
+        ids: list[str] = []
+        seen: set[str] = set()
+        for row in self.task_list():
+            if not row.run_id:
+                continue
+            record = self._record_for(row.run_id)
+            live = (
+                record.state not in TERMINAL_EVENTS
+                if record is not None
+                else row.status == "running"
+            )
+            if live and row.run_id not in seen:
+                seen.add(row.run_id)
+                ids.append(row.run_id)
+        for request_id, run_id in self._request_runs.items():
+            record = self._records.get(request_id)
+            if record is not None and record.state in TERMINAL_EVENTS:
+                continue
+            if run_id and run_id not in seen:
+                seen.add(run_id)
+                ids.append(run_id)
+        return ids
 
     def tasks(self) -> TaskRegistry:
         return self._registry

@@ -9,15 +9,25 @@ renderer consumed without asserting on source text.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from ai_coding.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config(tmp_path, monkeypatch):
+    """Never read the machine's real config while judging config behaviour."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.delenv("AI_CODING_TRUST_PROJECT", raising=False)
 
 
 def _iso(epoch: float) -> str:
@@ -145,3 +155,113 @@ def test_the_trace_overview_cli_since_filters(tmp_path):
     assert result.exit_code == 0, result.output
     assert "new" in result.output
     assert "old" not in result.output
+
+
+def _seed_store(root: Path, sessions: dict[str, tuple[float, int]]) -> None:
+    for name, (stamp, turns) in sessions.items():
+        directory = root / name
+        directory.mkdir(parents=True)
+        for turn in range(1, turns + 1):
+            (directory / f"turn-{turn}.jsonl").write_text(
+                json.dumps({"v": 1, "ts": _iso(stamp + turn), "evt": "X"}) + "\n",
+                encoding="utf-8",
+            )
+
+
+def test_the_overview_reads_the_configured_trace_dir(tmp_path, monkeypatch):
+    """X-02b: the writer honours ``tracing.dir``, so the reader must too.
+
+    Both stores are populated on purpose: reading the default one would still
+    print a table, and only asserting which session appears can fail.
+    """
+    custom = tmp_path / "custom-traces"
+    _seed_store(custom, {"configured-session": (time.time(), 1)})
+    ws = _workspace(tmp_path, sessions={"default-session": (time.time(), 1)})
+
+    config_home = Path(os.environ["XDG_CONFIG_HOME"]) / "ai-coding"
+    config_home.mkdir(parents=True)
+    (config_home / "config.yaml").write_text(
+        f"tracing:\n  dir: {custom}\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "configured-session" in result.output
+    assert "default-session" not in result.output
+
+
+def test_without_a_configured_dir_the_default_store_is_still_read(tmp_path):
+    ws = _workspace(tmp_path, sessions={"default-session": (time.time(), 1)})
+
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "default-session" in result.output
+
+
+def test_the_overview_honours_an_explicit_config_path(tmp_path):
+    """X-02b: ``-p`` must reach the reader as well as the recorder.
+
+    The explicit file is the only layer, so nothing under the user config home
+    can make this pass by accident.
+    """
+    custom = tmp_path / "explicit-traces"
+    _seed_store(custom, {"explicit-session": (time.time(), 1)})
+    ws = _workspace(tmp_path, sessions={"default-session": (time.time(), 1)})
+    config = tmp_path / "custom.yaml"
+    config.write_text(f"tracing:\n  dir: {custom}\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app, ["-p", str(config), "trace", "overview", "--workspace", str(ws)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "explicit-session" in result.output
+    assert "default-session" not in result.output
+
+
+def test_a_relative_trace_dir_is_resolved_against_the_workspace(
+    tmp_path, monkeypatch
+):
+    """A relative ``tracing.dir`` belongs to the workspace, not the process CWD."""
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    _seed_store(ws / "custom-traces", {"workspace-relative": (time.time(), 1)})
+    # The same relative name beside the process CWD: without the fix this is
+    # the store the reader would pick, so the assertion below can fail.
+    _seed_store(tmp_path / "custom-traces", {"process-cwd": (time.time(), 1)})
+
+    config_home = Path(os.environ["XDG_CONFIG_HOME"]) / "ai-coding"
+    config_home.mkdir(parents=True)
+    (config_home / "config.yaml").write_text(
+        "tracing:\n  dir: custom-traces\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "workspace-relative" in result.output
+    assert "process-cwd" not in result.output
+
+
+def test_the_overview_says_when_it_falls_back_to_the_default_directory(
+    tmp_path, monkeypatch
+):
+    from ai_coding.config.loader import ConfigLoader
+
+    ws = _workspace(tmp_path, sessions={"s1": (time.time(), 1)})
+
+    def _broken(*args, **kwargs):
+        raise ValueError("unreadable config")
+
+    monkeypatch.setattr(
+        ConfigLoader, "load_layers_report", staticmethod(_broken)
+    )
+
+    result = runner.invoke(app, ["trace", "overview", "--workspace", str(ws)])
+
+    assert result.exit_code == 0, result.output
+    assert "default trace directory" in result.output
+    assert "s1" in result.output, "a broken config must not hide the traces"

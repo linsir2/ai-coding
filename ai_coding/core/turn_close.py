@@ -42,6 +42,7 @@ __all__ = [
     "failed_outcome",
     "stopped_outcome",
     "terminal_outcome",
+    "terminal_status",
 ]
 
 _log = logging.getLogger(__name__)
@@ -49,8 +50,32 @@ _log = logging.getLogger(__name__)
 #: Once a session is longer than the persist limit, write every Nth iteration.
 LONG_SESSION_STRIDE = 3
 
+#: ORC-05: gates whose terminal reason does not already name the ladder it came
+#: from.  ``task``/``fatigue`` say "todo/fatigue ladder exhausted" themselves
+#: (and their strings are pinned by goldens); the token-budget reason is not a
+#: ladder at all.  The suffix, not a prefix, because ``domain/turn_digest.py``
+#: labels a turn with ``reason.startswith("no progress")`` / ``"search
+#: unconverged"`` -- a prefix would turn both labels into "iterations exhausted".
+_LADDER_SOURCE_GATES = ("strategy", "search")
+
 
 # ---- "stop, but why" -------------------------------------------------------
+
+
+def terminal_status(reason: str, *, budget_expired: bool) -> TurnStatus:
+    """The status a FINISH reason names (R2/R4b).
+
+    Shared with ORC-04's POST-nudge conversion: the conversion ends the turn on
+    the *next* PRE decision, so it must map that decision's reason the same way
+    instead of assuming the iteration ceiling.  A deadline (flag or reason) is
+    ``TIMEOUT``; the token mouth is ``BUDGET``; everything else -- including the
+    iteration budget and the intervention ladders -- is ``MAX_ITERATIONS``.
+    """
+    if budget_expired or reason == "turn deadline exceeded":
+        return TurnStatus.TIMEOUT
+    if reason == "turn token budget exhausted":
+        return TurnStatus.BUDGET
+    return TurnStatus.MAX_ITERATIONS
 
 
 def terminal_outcome(
@@ -61,17 +86,18 @@ def terminal_outcome(
     iterations: int,
 ) -> TurnOutcome:
     """Translate "stop, but why" into the turn's terminal state (R2/R4b)."""
-    if budget_expired:
-        status = TurnStatus.TIMEOUT
-    elif decision.reason == "turn token budget exhausted":
-        status = TurnStatus.BUDGET
-    else:
-        status = TurnStatus.MAX_ITERATIONS
+    status = terminal_status(decision.reason, budget_expired=budget_expired)
+    reason = decision.reason
+    gate = str(decision.intervention or "")
+    if gate in _LADDER_SOURCE_GATES:
+        level = int(decision.level or 0)
+        source = f"{gate} ladder L{level}" if level else f"{gate} ladder"
+        reason = f"{reason} [{source}]" if reason else source
     return TurnOutcome(
         status=status,
         text=last_text,
         iterations=iterations,
-        reason=decision.reason,
+        reason=reason,
         # A4: the guard's terminal line rides the decision, so a turn that
         # ended on a budget mouth says what it left undone (no plan
         # submitted) the same way a turn that ended on the model's own stop

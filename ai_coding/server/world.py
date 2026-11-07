@@ -266,7 +266,14 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
         default_readonly=is_plan_agent(default_agent),
     )
     recorder = _make_recorder(app_cfg, str(paths.workspace), None)
-    mcp_manager = MCPManager(app_cfg.mcp, observer=recorder)
+    mcp_manager = MCPManager(
+        app_cfg.mcp,
+        observer=recorder,
+        # MCP-01: a local server's argv goes through the same sandbox entry
+        # point bash and jobs use.  Inert unless ``mcp.sandbox`` is on.
+        sandbox=(sandbox_policy, sandbox_backend),
+        sandbox_roots=sandbox.live_roots,
+    )
     await mcp_manager.open_all()
     # R2-7: give the first attempt a short, capped head start so the model's
     # first request sees the tools that are already up instead of a catalog
@@ -292,7 +299,9 @@ async def build_world(path: str | None, workspace: str, skills: str | None) -> A
     cancel = asyncio.Event()
     loop = _build_loop(
         engine, sessions, registry, app_cfg, str(paths.workspace), skill_registry,
-        catalog_builder=lambda: build_mcp_catalog(mcp_manager.available()),
+        catalog_builder=lambda: build_mcp_catalog(
+            mcp_manager.available(), incomplete=mcp_manager.incomplete_servers()
+        ),
         approval=approval,
         observer=None,
         trace=recorder,

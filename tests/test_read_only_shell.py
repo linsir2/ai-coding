@@ -103,6 +103,83 @@ def test_the_tool_returns_a_machine_code_for_a_refused_command():
     assert result.detail == "read_only_shell_required"
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"network_permissions": "inherit", "justification": "needs the network"},
+        {"network_permissions": "off"},
+        {"justification": "just a note"},
+    ],
+)
+def test_shell_read_refuses_every_network_key_in_precheck(extra):
+    """X-01a: the read-only shell is not a way to obtain the host network.
+
+    Refusing at ``precheck`` means the dispatcher never spends an approval on a
+    call the execution layer will not honour.
+    """
+    tool = ShellReadTool()
+
+    result = tool.precheck({"command": "ls", **extra})
+
+    assert result is not None and result.success is False
+    assert result.detail == "read_only_shell_required"
+    assert "network" in result.output
+
+
+def test_an_ordinary_plan_mode_inspection_is_still_allowed():
+    """The guard is keyed on the network fields, not on shell_read itself."""
+    tool = ShellReadTool()
+
+    assert tool.precheck({"command": "ls"}) is None
+
+
+@pytest.mark.asyncio
+async def test_execute_never_passes_the_host_network_to_the_backend(tmp_path):
+    """Even a direct ``execute`` (tests, other assemblies) cannot inherit.
+
+    The dispatcher/gate half is not involved here: this is the execution-layer
+    guarantee that ``_requested_network`` always answers ``None``.
+    """
+    from ai_coding.security.process_sandbox import ProcessSandboxPolicy
+
+    class _Backend:
+        name = "capture"
+        tier = "full"
+        network_mode = "deny"
+        networks: list[str | None] = []
+
+        def available(self) -> bool:
+            return True
+
+        def gap(self) -> str:
+            return ""
+
+        def wrap(self, argv, roots, *, network=None):  # noqa: ANN001
+            self.networks.append(network)
+            return list(argv)
+
+    backend = _Backend()
+    tool = ShellReadTool(
+        policy=ProcessSandboxPolicy(mode="enforce"),
+        backend=backend,
+        roots=[tmp_path],
+    )
+
+    result = await tool.execute(
+        {
+            "command": "ls",
+            "network_permissions": "inherit",
+            "justification": "local dev server",
+        },
+        ToolContext(workspace=str(tmp_path)),
+    )
+
+    assert result.success is True, result.output
+    assert "inherit" not in backend.networks, (
+        "shell_read must never ask for the host network"
+    )
+
+
 @pytest.mark.asyncio
 async def test_an_outside_path_is_a_sandbox_violation():
     tool = ShellReadTool()

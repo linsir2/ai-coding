@@ -10,7 +10,9 @@ memory block is not a section here: it rides the volatile tail
 
 from __future__ import annotations
 
-from ai_coding.domain.agents import PLAN_TEXT_RULE
+from collections.abc import Iterable
+
+from ai_coding.domain.agents import PLAN_TEXT_RULE, AgentSpec
 
 #: The composition root's default system prompt.  A sub-agent in ``task_only`` mode
 #: gets exactly this instead of its parent's assembled prompt (R7e-4), so the text
@@ -108,6 +110,47 @@ def _render_methods(tools: tuple[str, ...] | None) -> str:
 #: byte-exactness tests). Derived from the table above, never hand-written.
 METHODS_SECTION = _render_methods(None)
 
+#: SUB-04: one agent row's ceiling, including its ``- `` prefix and the ellipsis.
+_AGENT_LINE_CHARS = 120
+#: SUB-04: the whole ``<agents>`` block's ceiling.  A row that would overflow it
+#: is skipped so later, shorter rows can still fit (no "and N more" line: the
+#: list is bounded by the catalog).
+_AGENTS_TOTAL_CHARS = 600
+
+_AGENTS_HEADER = (
+    "<agents>\nAvailable sub-agents (pass the id as the subAgent / "
+    "spawn_agent `agent` argument):\n"
+)
+_AGENTS_FOOTER = "\n</agents>"
+
+
+def render_agents_block(specs: Iterable[AgentSpec]) -> str:
+    """Render the delegation targets as an ``<agents>`` section.
+
+    Nothing is emitted for an empty (or fully hidden) catalog, which is what
+    keeps ``build(agents=None)`` byte-identical to the old output.  The
+    section is static per session, like ``<skills>``, so it does not disturb
+    prefix caching.
+    """
+    lines: list[str] = []
+    for spec in specs:
+        agent_id = str(getattr(spec, "id", "") or "")
+        if not agent_id or bool(getattr(spec, "hidden", False)):
+            continue
+        label = str(getattr(spec, "description", "") or "") or str(
+            getattr(spec, "name", "") or ""
+        )
+        line = f"- {agent_id} — {label}" if label else f"- {agent_id}"
+        if len(line) > _AGENT_LINE_CHARS:
+            line = line[: _AGENT_LINE_CHARS - 1] + "…"
+        candidate = _AGENTS_HEADER + "\n".join([*lines, line]) + _AGENTS_FOOTER
+        if len(candidate) > _AGENTS_TOTAL_CHARS:
+            continue
+        lines.append(line)
+    if not lines:
+        return ""
+    return _AGENTS_HEADER + "\n".join(lines) + _AGENTS_FOOTER
+
 
 class PromptAssembler:
     """Build the single system-prompt string from optional sections.
@@ -126,6 +169,9 @@ class PromptAssembler:
     def build(
         self,
         project_instructions: str = "",
+        #: The complete ``<skills>...</skills>`` block from ``build_catalog``.
+        #: A bare listing is wrapped once for older callers; an empty string
+        #: adds no section.
         skills_catalog: str = "",
         #: M1b: the current agent's own instructions.  Empty (the default,
         #: and the case for build/plan/general today) produces no section.
@@ -138,6 +184,11 @@ class PromptAssembler:
         #: must not silently lose discipline. A tuple prunes the rows of every
         #: tool that is not in it.
         tools: tuple[str, ...] | None = None,
+        #: SUB-04: the sub-agents the model may delegate to.  ``None``/empty
+        #: emits nothing, which keeps the default output byte-identical.  Only
+        #: rendered when the surface can actually call a delegation tool (or
+        #: when the caller does not know its surface).
+        agents: Iterable[AgentSpec] | None = None,
     ) -> str:
         sections: list[str] = [self._base.strip()]
         if project_instructions.strip():
@@ -185,9 +236,26 @@ class PromptAssembler:
                 "approval.</plan-mode>"
             )
         if skills_catalog.strip():
-            sections.append(
-                f"<skills>Available skills:\n{skills_catalog.strip()}</skills>"
-            )
+            # ``skills_catalog`` is normally the complete block, tags included
+            # (``skills/catalog.py::build_catalog``); wrapping it again produced
+            # ``<skills>Available skills:<skills>Available skills...</skills>``.
+            # A bare listing -- an older caller that predates the contract -- is
+            # still wrapped, so the model keeps seeing one tagged section rather
+            # than untagged prose. Empty input adds nothing, so a project without
+            # skills has no empty tag either.
+            block = skills_catalog.strip()
+            if not block.startswith("<skills"):
+                block = f"<skills>Available skills:\n{block}</skills>"
+            sections.append(block)
+        # SUB-04: the delegation targets follow <skills>.  A surface without a
+        # delegation tool must not advertise targets; ``tools is None`` keeps
+        # the conservative pre-existing behaviour.
+        if agents is not None and (
+            tools is None or "subAgent" in tools or "spawn_agent" in tools
+        ):
+            agent_block = render_agents_block(agents)
+            if agent_block:
+                sections.append(agent_block)
         return "\n\n".join(s for s in sections if s)
 
 
@@ -197,4 +265,5 @@ __all__ = [
     "METHODS_SECTION",
     "TOOL_GUIDANCE",
     "PromptAssembler",
+    "render_agents_block",
 ]

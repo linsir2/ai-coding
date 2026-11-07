@@ -8,7 +8,7 @@ import pytest
 from ai_coding.ai.engine import ChatEngine
 from ai_coding.config.models import AIConfig
 from ai_coding.core.agent_loop import AgentLoop
-from ai_coding.domain.loop import StepResult
+from ai_coding.domain.loop import StepResult, TurnStatus
 from ai_coding.domain.message import ToolCallRef, ToolResult
 from ai_coding.domain.task import TaskState, TodoItem
 from ai_coding.security.approval import AutoApproveCallback
@@ -404,7 +404,7 @@ async def test_a_look_only_turn_gets_the_static_check_output(tmp_path, monkeypat
     # I1/R-7: twelve reads with byte-identical results are stale evidence, so
     # the same turn must also reach the hard stop and finish unconverged.
     assert 3 in levels, "repeated evidence must earn the L3 stop"
-    assert loop.last_outcome.reason == "search unconverged"
+    assert loop.last_outcome.reason == "search unconverged [search ladder L3]"
 
 
 @pytest.mark.asyncio
@@ -452,7 +452,7 @@ async def test_the_static_check_output_is_readable_under_the_default_budget(
     assert any(
         e.level == 3 for e in events if type(e).__name__ == "SearchStalled"
     )
-    assert loop.last_outcome.reason == "search unconverged"
+    assert loop.last_outcome.reason == "search unconverged [search ladder L3]"
 
 
 # ---- I1/R-7: the L3 hard stop, end to end ----
@@ -546,7 +546,7 @@ async def test_a_turn_of_only_looks_ends_itself(tmp_path):
 
     stalled = [e for e in observer.events if type(e).__name__ == "SearchStalled"]
     assert any(e.level == 3 for e in stalled), "the hard stop never fired"
-    assert loop.last_outcome.reason == "search unconverged"
+    assert loop.last_outcome.reason == "search unconverged [search ladder L3]"
     assert loop.last_outcome.handoff, "the turn must leave the operator a report"
     assert "模型收尾" in loop.last_outcome.handoff
 
@@ -581,7 +581,7 @@ async def test_the_finish_path_carries_the_intervention(tmp_path):
     assert stalled, "a ladder FINISH must still emit its SearchStalled"
     assert (stalled[-1].level, stalled[-1].unconverged) == (3, True)
     assert stalled[-1].reason == "search unconverged"
-    assert loop.last_outcome.reason == "search unconverged"
+    assert loop.last_outcome.reason == "search unconverged [search ladder L3]"
     assert loop.last_outcome.note, "the FINISH decision's note must reach the outcome"
 
 
@@ -689,3 +689,79 @@ async def test_narration_between_looks_does_not_swallow_the_closing(tmp_path):
     assert "收尾：结论如上" in answer, "the closing word must reach the operator"
     assert "让我先读下一个文件" not in answer, "narration must not stand in for it"
     assert "回合未完成" in answer, "a cut-short turn must say that it was cut short"
+
+
+# ---- ORC-04: a POST nudge on the last allowed iteration becomes the note ----
+
+
+@pytest.mark.asyncio
+async def test_the_last_round_turns_a_post_nudge_into_the_terminal_note(tmp_path):
+    """A nudge written when the next PRE decision finishes is never read.
+
+    The token budget is what closes the turn here: unlike the iteration-budget
+    mouth, G8-2 does not spend a closing call on it, so the message would sit in
+    the transcript unread.  It must ride ``TurnOutcome.note`` instead.
+    """
+    engine = _ScriptedEngine([
+        StepResult(
+            text="先停一下",
+            finish_reason="stop",
+            # Real token usage is what the token mouth counts; the estimate in
+            # the ledger is separate (``tokens_spent`` sums prompt+completion).
+            usage={"prompt_tokens": 10, "completion_tokens": 1},
+        )
+    ])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine,
+        sessions,
+        max_tool_iterations=10,
+        max_auto_continuations=0,
+        turn_token_budget=1,
+    )
+    session = sessions.create()
+    session.task = TaskState(
+        goal="g", items=[TodoItem(id="1", content="still open", status="pending")]
+    )
+
+    await loop.process_input(session, "go")
+
+    assert loop.last_outcome is not None
+    # ORC-04 review fix: the conversion maps the *next* PRE decision's reason,
+    # not the iteration ceiling.  This turn closes on the token mouth, so the
+    # verdict is BUDGET.
+    assert loop.last_outcome.status is TurnStatus.BUDGET
+    assert "[task-gate]" in (loop.last_outcome.note or "")
+    assert "1. still open" in (loop.last_outcome.note or "")
+    injected = [
+        m for m in session.messages
+        if m.synthetic and "[task-gate]" in (m.content or "")
+    ]
+    assert injected == [], "a nudge the model cannot read must not be written"
+    assert session.intervention_state["task"]["outcome"] == "exhausted"
+    assert len(engine.requests) == 1, "no wasted model call either"
+
+
+@pytest.mark.asyncio
+async def test_the_iteration_budget_mouth_still_injects_because_it_reads_it(tmp_path):
+    """The exemption: on ``iteration budget exhausted`` G8-2 asks for a closing
+    word, and that extra model call *does* read the nudge -- converting it there
+    would drop the last instruction the model actually sees."""
+    engine = _ScriptedEngine([_text("a"), _text("收尾")])
+    sessions = SessionService(tmp_path / "sessions")
+    loop = _loop(
+        engine, sessions, max_tool_iterations=1, max_auto_continuations=0
+    )
+    session = sessions.create()
+    session.task = TaskState(goal="g", items=[TodoItem(id="1", content="still open")])
+
+    await loop.process_input(session, "go")
+
+    injected = [
+        m for m in session.messages
+        if m.synthetic and "[task-gate]" in (m.content or "")
+    ]
+    assert len(injected) == 1
+    assert len(engine.requests) == 2, "the closing call reads the injected nudge"
+    assert loop.last_outcome is not None
+    assert loop.last_outcome.status is TurnStatus.MAX_ITERATIONS

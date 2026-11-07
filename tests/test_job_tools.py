@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -117,6 +118,9 @@ async def test_listing_stays_bounded_and_says_when_it_truncated(tmp_path):
     """A workspace with a year of jobs must not turn one tool call into a log."""
     root = tmp_path / "jobs"
     root.mkdir(parents=True)
+    # Recent on purpose: X-03a's startup retention removes settled history older
+    # than a week, and this case is about the *listing* bound, not retention.
+    stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     for index in range(30):
         (root / f"job_old{index:03d}.json").write_text(
             json.dumps(
@@ -125,10 +129,10 @@ async def test_listing_stays_bounded_and_says_when_it_truncated(tmp_path):
                     "command": f"old job {index}",
                     "pid": 999_999,
                     "log_path": str(root / f"job_old{index:03d}.log"),
-                    "started_at": "2026-01-01T00:00:00Z",
+                    "started_at": stamp,
                     "origin_session": "s",
                     "status": "completed",
-                    "finished_at": "2026-01-01T00:05:00Z",
+                    "finished_at": stamp,
                     "exit_code": 0,
                     "detail": "exit 0",
                 }

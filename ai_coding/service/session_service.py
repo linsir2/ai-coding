@@ -155,16 +155,17 @@ class SessionService:
         and a failure to clear only costs a spurious re-ask after a crash.
         """
         path = self._pending_path(session_id)
-        try:
-            if request is None:
-                path.unlink(missing_ok=True)
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(to_json_pretty(dict(request)), encoding="utf-8")
-            os.replace(tmp, path)
-        except OSError:
-            pass  # the turn's own answer still stands; only durability is lost
+        with self._lock:
+            try:
+                if request is None:
+                    path.unlink(missing_ok=True)
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(to_json_pretty(dict(request)), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                pass  # the turn's own answer still stands; only durability is lost
 
     def _read_pending_approval(self, session_id: str) -> dict[str, Any] | None:
         path = self._pending_path(session_id)
@@ -199,16 +200,17 @@ class SessionService:
         to clear only costs a stale flip after a crash.
         """
         path = self._pending_posture_path(session_id)
-        try:
-            if payload is None:
-                path.unlink(missing_ok=True)
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(to_json_pretty(dict(payload)), encoding="utf-8")
-            os.replace(tmp, path)
-        except OSError:
-            pass
+        with self._lock:
+            try:
+                if payload is None:
+                    path.unlink(missing_ok=True)
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(to_json_pretty(dict(payload)), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                pass
 
     def _read_pending_posture(self, session_id: str) -> dict[str, Any] | None:
         path = self._pending_posture_path(session_id)
@@ -235,16 +237,17 @@ class SessionService:
     ) -> None:
         """Record (or clear) the reminders one session has queued."""
         path = self._pending_reminder_path(session_id)
-        try:
-            if payload is None:
-                path.unlink(missing_ok=True)
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(to_json_pretty(list(payload)), encoding="utf-8")
-            os.replace(tmp, path)
-        except OSError:
-            pass
+        with self._lock:
+            try:
+                if payload is None:
+                    path.unlink(missing_ok=True)
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(to_json_pretty(list(payload)), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                pass
 
     def _read_pending_reminder(self, session_id: str) -> list[dict[str, Any]] | None:
         path = self._pending_reminder_path(session_id)
@@ -281,16 +284,17 @@ class SessionService:
         and a failure to clear only costs a spurious reuse after a crash.
         """
         path = self._write_ahead_path(session_id)
-        try:
-            if not records:
-                path.unlink(missing_ok=True)
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(to_json_pretty(list(records)), encoding="utf-8")
-            os.replace(tmp, path)
-        except OSError:
-            pass
+        with self._lock:
+            try:
+                if not records:
+                    path.unlink(missing_ok=True)
+                    return
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(to_json_pretty(list(records)), encoding="utf-8")
+                os.replace(tmp, path)
+            except OSError:
+                pass
 
     def _read_write_ahead(self, session_id: str) -> list[WriteAheadIntent] | None:
         path = self._write_ahead_path(session_id)
@@ -309,7 +313,8 @@ class SessionService:
         ]
 
     def clear_write_ahead(self, session_id: str) -> None:
-        self._write_ahead_path(session_id).unlink(missing_ok=True)
+        with self._lock:
+            self._write_ahead_path(session_id).unlink(missing_ok=True)
 
     def create(self, title: str = "") -> SessionData:
         ts = now_utc()

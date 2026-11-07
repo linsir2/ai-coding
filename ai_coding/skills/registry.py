@@ -45,6 +45,12 @@ _SKILL_FILE = "SKILL.md"
 SKILL_STATUSES = ("active", "archived")
 DEFAULT_VERSION = "1"
 
+#: The phases ``RequestAssembler`` computes and the router can filter on. A
+#: declared value outside this set is a typo, not a lock: loading it as ``""``
+#: keeps a misspelled ``phase: debuging`` from excluding the skill from every
+#: phase forever (with no diagnostics anywhere).
+SKILL_PHASES = ("planning", "executing", "debugging", "reviewing")
+
 #: Frontmatter keys this module reads.  Everything else goes to
 #: :attr:`Skill.extra` — see the module docstring on why.
 _KNOWN_KEYS = frozenset(
@@ -172,6 +178,16 @@ def _as_bool(value: object) -> bool:
     return False
 
 
+def _valid_phase(value: str) -> str:
+    """A declared phase the router actually distinguishes, or ``""``.
+
+    Unknown values (a typo such as ``debuging``) become "no lock" rather than a
+    permanent exclusion: ``SOPRouter`` filters known phases, and a value it
+    cannot match would otherwise hide the skill from every turn.
+    """
+    return value if value in SKILL_PHASES else ""
+
+
 def _parse_triggers(value: object) -> SkillTriggers:
     if not isinstance(value, dict):
         return SkillTriggers()
@@ -213,7 +229,7 @@ def parse_skill(path: Path | str) -> Skill:
         disable_model_invocation=_as_bool(data.get("disable-model-invocation")),
         version=as_str(data.get("version")) or DEFAULT_VERSION,
         status=status if status in SKILL_STATUSES else "active",
-        phase=as_str(data.get("phase")),
+        phase=_valid_phase(as_str(data.get("phase"))),
         pattern_dna=as_str(data.get("pattern_dna")),
         triggers=_parse_triggers(data.get("triggers")),
         extra={k: v for k, v in data.items() if k not in _KNOWN_KEYS},

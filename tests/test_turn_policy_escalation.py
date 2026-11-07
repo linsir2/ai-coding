@@ -130,3 +130,42 @@ def test_from_ai_config_reads_the_new_keys():
         config.max_strategy_nudges,
         config.stall_iterations,
     ) == (3, 2, 5)
+
+
+def test_max_strategy_nudges_two_caps_the_ladder():
+    """ORC-02: 2 means L1 and L2 speak, then a failed L2 window finishes."""
+    policy = _policy(max_strategy_nudges=2)
+    second = policy.decide_next_iteration(
+        TurnSnapshot(
+            iteration=5,
+            failed_streak=3,
+            intervention_ledger={
+                "strategy": {"level": 1, "at": [3, 5], "outcome": "failed",
+                             "fires": 1, "ref": {}}
+            },
+        )
+    )
+    assert (second.action, second.level) == (TurnAction.NUDGE, 2)
+
+    finish = policy.decide_next_iteration(
+        TurnSnapshot(
+            iteration=7,
+            failed_streak=3,
+            intervention_ledger={
+                "strategy": {"level": 2, "at": [5, 7], "outcome": "failed",
+                             "fires": 1, "ref": {}}
+            },
+        )
+    )
+    assert finish.action is TurnAction.FINISH
+    assert finish.level == 2
+    assert finish.reason.startswith("no progress")
+
+
+def test_max_strategy_nudges_zero_silences_the_gate():
+    """0 turns the nudge and the early stop off together."""
+    policy = _policy(max_strategy_nudges=0)
+    decision = policy.decide_next_iteration(
+        TurnSnapshot(iteration=3, failed_streak=9, attempted_calls=9, successful_calls=0)
+    )
+    assert decision.action is TurnAction.ITERATE

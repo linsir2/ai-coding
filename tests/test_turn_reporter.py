@@ -19,7 +19,7 @@ from ai_coding.core.events import (
 from ai_coding.core.trace import canonical_request
 from ai_coding.core.turn_report import TurnReporter, report_degraded
 from ai_coding.domain.loop import StepResult, TurnOutcome, TurnStatus
-from ai_coding.domain.message import ChatMessage
+from ai_coding.domain.message import ChatMessage, ImageRef, ToolCallRef
 
 TOOLS_TEXT = '[{"type":"function","function":{"name":"read"}}]'
 
@@ -225,6 +225,45 @@ def test_finish_turn_stays_quiet_when_nothing_failed():
     assert [type(e).__name__ for e in sink.events] == ["TurnFinished"]
 
 
+def test_a_braid_wrapped_renderer_failure_is_reported_as_degraded():
+    """X-02c: the loop hands the reporter a ``Braid``, so the reporter can only
+    see a failure if the braid aggregates its children's counters."""
+    from ai_coding.core.observers import Braid, SafeObserver
+
+    class _Boom:
+        def on_event(self, event):  # type: ignore[no-untyped-def]
+            raise RuntimeError("renderer exploded")
+
+    reporter, sink = _reporter()
+    braid = Braid(SafeObserver(_Boom()), RecordingObserver())
+    reporter.begin_turn(braid)
+
+    braid.on_event(ModelStepFinished(index=1, usage=None, latency_ms=1))
+    reporter.finish_turn(TurnOutcome(status=TurnStatus.COMPLETED), braid)
+
+    assert [type(e).__name__ for e in sink.events] == ["Degraded", "TurnFinished"]
+    assert sink.of_type(Degraded)[0].component == "observer"
+
+
+def test_a_safe_observer_wrapping_a_braid_still_reports_degraded():
+    """The wrapper chain is walked, so an inner braid's counter is not hidden."""
+    from ai_coding.core.observers import Braid, SafeObserver
+
+    class _Boom:
+        def on_event(self, event):  # type: ignore[no-untyped-def]
+            raise RuntimeError("renderer exploded")
+
+    reporter, sink = _reporter()
+    observer = SafeObserver(Braid(SafeObserver(_Boom()), RecordingObserver()))
+    reporter.begin_turn(observer)
+
+    observer.on_event(ModelStepFinished(index=1, usage=None, latency_ms=1))
+    reporter.finish_turn(TurnOutcome(status=TurnStatus.COMPLETED), observer)
+
+    assert [type(e).__name__ for e in sink.events] == ["Degraded", "TurnFinished"]
+    assert sink.of_type(Degraded)[0].component == "observer"
+
+
 @pytest.mark.parametrize("status", [TurnStatus.COMPLETED, TurnStatus.ERROR])
 def test_finish_turn_preserves_the_status_and_text(status):
     reporter, _ = _reporter()
@@ -265,3 +304,103 @@ def test_begin_turn_resets_the_ledger_so_usage_is_per_turn():
         "context_tokens": 7,
     }
     assert reporter.tokens_spent() == 10
+
+
+# ---- CTX-07a/07b/07c: what a request actually costs -------------------------
+
+
+def test_history_chars_counts_tool_call_arguments():
+    reporter, sink = _reporter()
+    history = [
+        ChatMessage(
+            role="assistant",
+            content="go",
+            timestamp="",
+            tool_calls=[ToolCallRef(id="c1", name="read", arguments='{"a":1}')],
+        )
+    ]
+
+    reporter.report_context(
+        iteration=1,
+        instructions="SYS",
+        history=history,
+        request=history,
+        tail_blocks=(),
+        previous=None,
+    )
+
+    event = sink.of_type(ContextAssembled)[0]
+    assert event.history_chars == len("go") + len('{"a":1}')
+
+
+def test_images_add_to_the_estimated_tokens():
+    plain = _messages()
+    with_image = [
+        *plain,
+        ChatMessage(
+            role="user",
+            content="看图",
+            timestamp="",
+            images=(ImageRef(path="shot.png", mime="image/png", name="shot.png", bytes=10),),
+        ),
+    ]
+
+    plain_reporter, plain_sink = _reporter()
+    image_reporter, image_sink = _reporter()
+    for reporter, history in (
+        (plain_reporter, plain),
+        (image_reporter, with_image),
+    ):
+        reporter.report_context(
+            iteration=1,
+            instructions="SYS",
+            history=history,
+            request=history,
+            tail_blocks=(),
+            previous=None,
+        )
+
+    plain_tokens = plain_sink.of_type(ContextAssembled)[0].estimated_tokens
+    image_tokens = image_sink.of_type(ContextAssembled)[0].estimated_tokens
+    assert image_tokens - plain_tokens >= 1_600
+
+
+def test_offered_tools_false_does_not_poison_the_cached_schema():
+    reporter, sink = _reporter()
+    history = _messages()
+
+    full = reporter.report_context(
+        iteration=1,
+        instructions="SYS",
+        history=history,
+        request=history,
+        tail_blocks=(),
+        previous=None,
+    )
+    assert full == canonical_request("SYS", list(history), TOOLS_TEXT)
+    bare = reporter.report_context(
+        iteration=2,
+        instructions="SYS",
+        history=history,
+        request=history,
+        tail_blocks=(),
+        previous=None,
+        offered_tools=False,
+    )
+    restored = reporter.report_context(
+        iteration=3,
+        instructions="SYS",
+        history=history,
+        request=history,
+        tail_blocks=(),
+        previous=None,
+    )
+
+    events = sink.of_type(ContextAssembled)
+    assert events[1].tools_chars == 0
+    assert events[1].estimated_tokens < events[0].estimated_tokens
+    assert bare == canonical_request("SYS", list(history), "")
+    assert events[2].tools_chars == len(TOOLS_TEXT), (
+        "the closing step must not permanently erase the schema from the reporter"
+    )
+    assert restored == canonical_request("SYS", list(history), TOOLS_TEXT)

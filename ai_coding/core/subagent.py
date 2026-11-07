@@ -101,6 +101,11 @@ _SUMMARY_TAIL = 200
 #: first.  Restarts lose the whole table anyway (documented, Hermes rule).
 _MAX_BACKGROUND_ROWS = 200
 
+#: SUB-02: how long an idle (or interrupted) handle is kept.  This is a module
+#: constant rather than a settings key on purpose: ``config/models.py`` is out
+#: of this batch's scope, and a key nobody reads is a dead configuration.
+_MAX_IDLE_HANDLE_SECONDS = 1800.0
+
 #: C-5a: the hard ceiling ``wait`` applies (the tool clamps to the same value).
 _MAX_WAIT_SECONDS = 600.0
 
@@ -213,6 +218,10 @@ class AgentHandle:
     #: Set when ``loop`` is attached; ``send_message`` waits for it.
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     status: str = "running"  # running | idle | interrupted | closed
+    #: SUB-02: monotonic start of the current idle/interrupted period.  Every
+    #: transition into a resting status refreshes it; the idle TTL reads only
+    #: this field (never the projection row's timestamps).
+    idle_since: float = 0.0
     last_status: str = "completed"  # completed | error | timeout | interrupted
     mailbox: deque[str] = field(default_factory=deque)
     turn_task: asyncio.Task[Any] | None = None
@@ -340,6 +349,9 @@ class SubAgentRunner:
         )
         self._meta_root = agents_base / "meta"
         self._handles: dict[str, AgentHandle] = {}
+        #: SUB-02: run ids whose ``close`` is already in flight, so a second
+        #: concurrent close (shutdown + an operator command) is a no-op.
+        self._closing: set[str] = set()
 
     @property
     def timeout_seconds(self) -> float:
@@ -884,6 +896,7 @@ class SubAgentRunner:
             followup.close()
             self._release_slot(handle.run_id)
             handle.status = "idle"
+            handle.idle_since = time.monotonic()
             handle.turn_task = None
             row = self._background.get(handle.run_id)
             if row is not None:
@@ -919,6 +932,7 @@ class SubAgentRunner:
             # P2-B2: the interrupted turn had a slot from ``_schedule_turn``.
             self._release_slot(handle.run_id)
             handle.status = "interrupted"
+            handle.idle_since = time.monotonic()
             handle.last_status = "interrupted"
             row = self._background.get(handle.run_id)
             if row is not None:
@@ -941,6 +955,7 @@ class SubAgentRunner:
                     _log.debug("child loop close after interrupt failed", exc_info=True)
         else:
             handle.status = "idle"
+            handle.idle_since = time.monotonic()
             result = await self._commit_turn(
                 result,
                 handle.worktree_manager,
@@ -1004,6 +1019,7 @@ class SubAgentRunner:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         handle.status = "interrupted"
+        handle.idle_since = time.monotonic()
         handle.last_status = "interrupted"
         loop = handle.loop
         handle.loop = None
@@ -1045,6 +1061,9 @@ class SubAgentRunner:
                 )
             self._clear_runtime_markers(handle.session)
             handle.status = "idle"
+            # SUB-02: a resume starts a fresh idle window -- restoring must not
+            # inherit the idle clock that expired before the close.
+            handle.idle_since = time.monotonic()
             if not handle.ephemeral:
                 self._session_store.save(handle.session)
                 self._write_meta(handle)
@@ -1109,6 +1128,7 @@ class SubAgentRunner:
                 str(meta["degraded"]) if meta.get("degraded") is not None else None
             ),
             status="idle",
+            idle_since=time.monotonic(),
             last_status=str(meta.get("lastStatus") or "completed"),
         )
         await self._attach_loop(handle, handle.worktree_path or handle.workdir)
@@ -1117,7 +1137,7 @@ class SubAgentRunner:
         self._write_meta(handle)
         return "idle", run_id
 
-    async def close(self, target: str) -> bool:
+    async def close(self, target: str, *, retiring: bool = False) -> bool:
         """Close a child for good: cancel its turn, close its loop, drop it.
 
         The disk state survives (session + sidecar), which is what makes
@@ -1127,62 +1147,81 @@ class SubAgentRunner:
         handle = self._handle_for(target)
         if handle is None:
             return False
-        # P2-B2: closing cancels the turn, so its admission ends here too.
-        self._release_slot(handle.run_id)
-        task = handle.turn_task
-        if task is None or task.done():
-            # The spawning turn lives in ``_tasks`` (its slot is ``turn_task``
-            # only for continuation turns); closing must stop it all the same.
-            task = self._tasks.get(handle.run_id)
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        # A turn that queued a follow-up while the first one was being cut.
-        followup = handle.turn_task
-        if followup is not None and not followup.done():
-            followup.cancel()
-            await asyncio.gather(followup, return_exceptions=True)
-        handle.status = "closed"
-        loop = handle.loop
-        handle.loop = None
-        if loop is not None:
-            try:
-                await loop.aclose()
-            except Exception:  # noqa: BLE001 — closing must not fail on a dead loop
-                _log.debug("child loop close failed", exc_info=True)
-        # P2-A: the last commit is the operator's safety net, and its sha must
-        # reach the sidecar *before* the worktree is deleted.  A failure is
-        # recorded, never swallowed into "no commit".
-        worktree_path = handle.worktree_path
-        if handle.worktree_manager is not None and worktree_path:
-            try:
-                sha, error = await handle.worktree_manager.commit_if_dirty(
-                    worktree_path, f"subagent: {handle.name}"
+        # SUB-02: shutdown and an operator command may race; the second close
+        # must not run the worktree/git teardown a second time.
+        if handle.run_id in self._closing:
+            return False
+        # P1-3: a retirement candidate can be handed a new turn in the same
+        # tick (``send_message`` sets ``running`` and ``turn_task`` in one
+        # synchronous block), so a *retirement* re-checks the resting state
+        # here, before adding to ``_closing``.  An explicit operator close
+        # still cancels a running turn (that is its documented job).
+        if retiring and (
+            handle.status not in ("idle", "interrupted")
+            or handle.turn_task is not None
+        ):
+            return False
+        self._closing.add(handle.run_id)
+        try:
+            # P2-B2: closing cancels the turn, so its admission ends here too.
+            self._release_slot(handle.run_id)
+            task = handle.turn_task
+            if task is None or task.done():
+                # The spawning turn lives in ``_tasks`` (its slot is
+                # ``turn_task`` only for continuation turns); closing must stop
+                # it all the same.
+                task = self._tasks.get(handle.run_id)
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            # A turn that queued a follow-up while the first one was being cut.
+            followup = handle.turn_task
+            if followup is not None and not followup.done():
+                followup.cancel()
+                await asyncio.gather(followup, return_exceptions=True)
+            handle.status = "closed"
+            loop = handle.loop
+            handle.loop = None
+            if loop is not None:
+                try:
+                    await loop.aclose()
+                except Exception:  # noqa: BLE001 — closing must not fail on a dead loop
+                    _log.debug("child loop close failed", exc_info=True)
+            # P2-A: the last commit is the operator's safety net, and its sha
+            # must reach the sidecar *before* the worktree is deleted.  A
+            # failure is recorded, never swallowed into "no commit".
+            worktree_path = handle.worktree_path
+            if handle.worktree_manager is not None and worktree_path:
+                try:
+                    sha, error = await handle.worktree_manager.commit_if_dirty(
+                        worktree_path, f"subagent: {handle.name}"
+                    )
+                    if sha:
+                        handle.commit = sha
+                        handle.commit_error = None
+                    elif error:
+                        handle.commit_error = error
+                except Exception:  # noqa: BLE001 — the disk state is what matters
+                    _log.debug("child worktree commit failed", exc_info=True)
+            if not handle.ephemeral:
+                self._session_store.save(handle.session)
+                self._write_meta(handle)
+            if handle.worktree_manager is not None and worktree_path:
+                try:
+                    await handle.worktree_manager.remove(worktree_path)
+                except Exception:  # noqa: BLE001 — the disk state is what matters
+                    _log.debug("child worktree cleanup failed", exc_info=True)
+            self._handles.pop(handle.run_id, None)
+            self._tasks.pop(handle.run_id, None)
+            self._announce.pop(handle.run_id, None)
+            row = self._background.get(handle.run_id)
+            if row is not None:
+                self._background[handle.run_id] = replace(
+                    row, status="cancelled", ended=time.monotonic()
                 )
-                if sha:
-                    handle.commit = sha
-                    handle.commit_error = None
-                elif error:
-                    handle.commit_error = error
-            except Exception:  # noqa: BLE001 — the disk state is what matters
-                _log.debug("child worktree commit failed", exc_info=True)
-        if not handle.ephemeral:
-            self._session_store.save(handle.session)
-            self._write_meta(handle)
-        if handle.worktree_manager is not None and worktree_path:
-            try:
-                await handle.worktree_manager.remove(worktree_path)
-            except Exception:  # noqa: BLE001 — the disk state is what matters
-                _log.debug("child worktree cleanup failed", exc_info=True)
-        self._handles.pop(handle.run_id, None)
-        self._tasks.pop(handle.run_id, None)
-        self._announce.pop(handle.run_id, None)
-        row = self._background.get(handle.run_id)
-        if row is not None:
-            self._background[handle.run_id] = replace(
-                row, status="cancelled", ended=time.monotonic()
-            )
-        return True
+            return True
+        finally:
+            self._closing.discard(handle.run_id)
 
     def close_info(self, run_id: str) -> dict[str, Any]:
         """The commit facts a closed child left in its sidecar (tools echo them).
@@ -1322,7 +1361,14 @@ class SubAgentRunner:
         C-5b-1: a row whose run id still has a handle is never pruned — the
         handle stays addressable after it settles, and dropping its row would
         make ``/tasks``/``list_agents`` forget a child that is still usable.
+
+        SUB-02: idle handles are retired by TTL *before* the row pass, so a
+        long-lived process does not keep a session, an ``AgentLoop`` and a
+        persistent worktree for every child it ever spawned.  Only
+        ``spawn_background`` / ``resume`` call this, so a session that never
+        spawns again keeps its idle children (bounded, accepted).
         """
+        self._retire_idle_handles()
         terminal = sorted(
             (
                 row
@@ -1333,6 +1379,70 @@ class SubAgentRunner:
         )
         while len(self._background) > _MAX_BACKGROUND_ROWS and terminal:
             self._background.pop(terminal.pop(0).run_id, None)
+
+    def _retire_idle_handles(self) -> list[asyncio.Task[None]]:
+        """Schedule ``close`` for handles idle past _MAX_IDLE_HANDLE_SECONDS.
+
+        The idle clock is ``handle.idle_since`` -- never the projection row's
+        ``started/ended``.  A resumed handle refreshes it, so reopening an old
+        child cannot retire it on the next prune.  Returns the scheduled tasks
+        so a caller (a test, or shutdown) can await them.
+        """
+        now = time.monotonic()
+        scheduled: list[asyncio.Task[None]] = []
+        for run_id, handle in list(self._handles.items()):
+            if handle.status not in ("idle", "interrupted"):
+                continue
+            if not handle.idle_since:
+                continue
+            if now - handle.idle_since < _MAX_IDLE_HANDLE_SECONDS:
+                continue
+            key = f"retire:{run_id}"
+            if key in self._tasks:
+                continue
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                break
+            task = loop.create_task(
+                self._retire(run_id), name=f"subagent-retire:{run_id}"
+            )
+            self._tasks[key] = task
+            task.add_done_callback(functools.partial(self._retire_done, run_id))
+            scheduled.append(task)
+        return scheduled
+
+    async def _retire(self, run_id: str) -> None:
+        if not await self.close(run_id, retiring=True):
+            handle = self._handles.get(run_id)
+            if handle is not None:
+                # P1-3: the handle was picked up by a new turn between the scan
+                # and the close.  Give it a fresh window instead of retrying on
+                # every prune.
+                handle.idle_since = time.monotonic()
+
+    def _retire_done(self, run_id: str, task: asyncio.Task[None]) -> None:
+        self._tasks.pop(f"retire:{run_id}", None)
+        if task.cancelled():
+            return
+        # P1-2: consume the exception.  An unretrieved task exception becomes
+        # "Task exception was never retrieved" noise at shutdown, and a handle
+        # whose close failed must not stay a candidate on every spawn.
+        error = task.exception()
+        if error is not None:
+            _log.debug("idle retirement failed for %s", run_id, exc_info=error)
+            handle = self._handles.get(run_id)
+            if handle is not None:
+                handle.idle_since = time.monotonic()
+
+    async def drain_retirements(self) -> None:
+        """Await any in-flight retirement tasks (shutdown must not orphan them)."""
+        tasks = [
+            task for key, task in list(self._tasks.items())
+            if key.startswith("retire:")
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _supervised(
         self,
@@ -1396,6 +1506,7 @@ class SubAgentRunner:
             handle.status = "interrupted"
         elif result.status != "interrupted":
             handle.status = "idle"
+        handle.idle_since = time.monotonic()
         self._write_meta(handle)
         self._finish_background(
             handle.run_id, result, handle.emit, handle.origin_session
@@ -1630,6 +1741,7 @@ class SubAgentRunner:
                 # its status must not be overwritten by this fallback.
                 return
             handle.status = "idle"
+            handle.idle_since = time.monotonic()
             self._write_meta(handle)
         if announce is None:
             # C-5b review: ``_announce`` is popped by the previous turn's
@@ -1722,6 +1834,13 @@ class SubAgentRunner:
 
         # The main workspace, not the worktree: grants are keyed by the path the
         # operator was asked about, and the child has the same authority there.
+        # Known limitation (SUB-05 DEFERRED): a child in a worktree therefore
+        # cannot see project rules that name an absolute path inside it, and a
+        # gate bound to the worktree would make the main tree's "always" grants
+        # invisible to the child (``GrantStore`` reads by workspace).  Fixing
+        # that needs a gate API carrying both roots plus a grants migration;
+        # switching the workspace alone is an authorization regression, so the
+        # main tree stays the gate's workspace.
         return PermissionGate.from_config(
             self._app_config, workspace=self._workspace, skill_resolver=resolve
         )

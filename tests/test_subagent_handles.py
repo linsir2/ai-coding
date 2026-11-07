@@ -8,6 +8,7 @@ so a handle survives the pruning of its projection row.  No new tools exist yet.
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -500,3 +501,119 @@ async def test_resume_tolerates_old_meta_without_task_packet(tmp_path):
     handle = runner._handles[run_id]
     assert handle.request is None
     assert handle.output_schema is None
+
+
+# ---- SUB-02: idle handles are retired; close is single-flight ---------------
+
+
+@pytest.mark.asyncio
+async def test_an_idle_handle_past_its_ttl_is_retired(tmp_path, monkeypatch):
+    import ai_coding.core.subagent as subagent_mod
+
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _e: None)
+    await _settle(runner, run_id)
+    assert runner._handles[run_id].status == "idle"
+
+    monkeypatch.setattr(subagent_mod, "_MAX_IDLE_HANDLE_SECONDS", 0.0)
+
+    tasks = runner._retire_idle_handles()
+    assert len(tasks) == 1
+    await asyncio.gather(*tasks)
+
+    assert run_id not in runner._handles
+    assert [key for key in runner._tasks if key.startswith("retire:")] == []
+    row = next(row for row in runner.task_list() if row.run_id == run_id)
+    assert row.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_recent_idle_handle_is_kept(tmp_path):
+    """Regression guard: the default TTL must not retire a fresh child."""
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _e: None)
+    await _settle(runner, run_id)
+
+    assert runner._retire_idle_handles() == []
+    assert run_id in runner._handles
+    assert runner._handles[run_id].status == "idle"
+
+    await runner.close(run_id)
+
+
+@pytest.mark.asyncio
+async def test_the_idle_ttl_reads_idle_since_not_the_row_time(tmp_path, monkeypatch):
+    """SUB-02 review: a resumed handle gets a fresh idle window.
+
+    The handle's row can be arbitrarily old; only ``idle_since`` may decide
+    retirement, or reopening an old child would retire it on the next prune.
+    """
+    import ai_coding.core.subagent as subagent_mod
+
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _e: None)
+    await _settle(runner, run_id)
+
+    handle = runner._handles[run_id]
+    handle.idle_since = time.monotonic() - 10.0  # idle far longer than any TTL
+    monkeypatch.setattr(subagent_mod, "_MAX_IDLE_HANDLE_SECONDS", 1.0)
+    assert len(runner._retire_idle_handles()) == 1
+
+    # Drain that retirement, then resume and prove the clock was reset.
+    await asyncio.gather(
+        *(task for key, task in runner._tasks.items() if key.startswith("retire:"))
+    )
+    assert run_id not in runner._handles
+
+    await runner.resume(run_id)
+    handle = runner._handles[run_id]
+    assert handle.status == "idle"
+    assert handle.idle_since > 0
+    assert runner._retire_idle_handles() == []
+    assert run_id in runner._handles
+
+    await runner.close(run_id)
+
+
+@pytest.mark.asyncio
+async def test_a_concurrent_close_runs_only_once(tmp_path):
+    manager = _IsolatingWorktreeManager(tmp_path / "wt")
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background(
+        "edit the tree", name="probe", worktree_manager=manager,
+        emit=lambda _e: None,
+    )
+    await _settle(runner, run_id)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_commit(path, message):
+        entered.set()
+        await release.wait()
+        return None, None
+
+    manager.commit_if_dirty = slow_commit  # type: ignore[method-assign]
+
+    first = asyncio.create_task(runner.close(run_id))
+    await entered.wait()
+    assert await runner.close(run_id) is False
+    release.set()
+
+    assert await first is True
+    assert manager.removed == [str(tmp_path / "wt")]
+    assert runner._closing == set()
+
+
+@pytest.mark.asyncio
+async def test_close_releases_the_child_loop_and_handle(tmp_path):
+    """Regression guard for the teardown ``Scheduler.shutdown`` relies on."""
+    runner = _runner(tmp_path)
+    run_id = runner.spawn_background("do it", name="probe", emit=lambda _e: None)
+    await _settle(runner, run_id)
+    loop = runner._handles[run_id].loop
+    assert loop is not None
+
+    assert await runner.close(run_id) is True
+
+    assert run_id not in runner._handles
