@@ -30,6 +30,7 @@ from ai_coding.core.events import (
     CompactionFailed,
     CompactionSkipped,
     CompactionStarted,
+    Degraded,
     RecordingObserver,
 )
 from ai_coding.domain.message import ChatMessage
@@ -287,6 +288,29 @@ async def test_a_single_exchange_compaction_skips_without_billing(tmp_path) -> N
     assert out is history
     assert len(observer.of_type(CompactionSkipped)) == 1
     assert observer.of_type(CompactionFailed) == []
+
+
+@pytest.mark.asyncio
+async def test_a_skip_that_leaves_the_request_over_the_ceiling_is_reported(tmp_path) -> None:
+    """A huge single message cannot be snipped, elided or summarised.
+
+    The skip itself is honest, but it is not benign: the request still goes out
+    above the ceiling.  Before this only a muted ``CompactionSkipped`` said
+    anything -- one real run sent ~265k estimated tokens against a 32k window
+    and reported nothing at all.
+    """
+    manager = ContextManager(_settings(max_context_tokens=400), transcripts_root=tmp_path)
+    compactor, observer = _compactor(manager)
+    history = [ChatMessage(role="user", content="x" * 4_000, timestamp="")]
+
+    out = await compactor.compress(history, deadline=None, reason="auto")
+
+    assert out == history
+    assert len(observer.of_type(CompactionSkipped)) == 1
+    degraded = observer.of_type(Degraded)
+    assert len(degraded) == 1
+    assert degraded[0].component == "context_compress"
+    assert "still above" in degraded[0].reason
 
 
 @pytest.mark.asyncio

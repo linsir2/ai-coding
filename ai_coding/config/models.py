@@ -288,6 +288,20 @@ class ProcessSandboxConfig(BaseModel):
     block_af_unix: bool = False
     network: NetworkConfig = Field(default_factory=NetworkConfig)
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize_yaml_off(cls, value: Any) -> Any:
+        """YAML 1.1 parses bare ``off`` as ``False``; keep the mode name.
+
+        ``mode: off`` is the spelling the docs and the example comments use, so
+        an unquoted value must not turn into a pydantic literal error.  ``True``
+        is not guessed into a mode -- ``warn`` and ``enforce`` are both real
+        choices and the operator has to make one.
+        """
+        if value is False:
+            return "off"
+        return value
+
     @model_validator(mode="after")
     def _proxy_and_block_af_unix_are_exclusive(self) -> ProcessSandboxConfig:
         if self.network.mode == "proxy" and self.block_af_unix:

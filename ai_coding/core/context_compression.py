@@ -1667,6 +1667,16 @@ class ContextManager:
                 return False
         return True
 
+    def context_pressure(self, messages: list[ChatMessage]) -> tuple[int, int]:
+        """``(estimated prompt tokens, ceiling)`` for a request built from ``messages``.
+
+        The gate normally prefers the provider's own count; this is for the
+        opposite question -- after a pass that freed nothing, is the history we
+        are about to send still above the line?  An estimate is the only value
+        that exists for a request no provider has seen yet.
+        """
+        return _history_tokens(messages), compaction_ceiling(self._max_context_tokens)
+
     def _l0_view(
         self,
         messages: list[ChatMessage],

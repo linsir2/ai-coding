@@ -73,23 +73,33 @@ async def main(config_path: str) -> int:
         print(f"replied({len(t2)} chars): {t2[:100]!r}")
         assert t2, "empty follow-up reply"
 
-        # 3) real LLM helpers (flash)
+        # 3) sub-agent delegation
         print(SEP + " [3] sub-agent delegation ")
         t3 = await loop.process_input(
             session,
-            "必须使用 subAgent 工具：让一个子智能体读取 sample.txt 并回报它有几行。",
+            "必须委派给子智能体（subAgent 或 spawn_agent 都可以）："
+            "让一个子智能体读取 sample.txt 并回报它有几行。",
         )
         print(f"replied({len(t3)} chars): {t3[:120]!r}")
+        # The runner has two faces: the one-shot ``subAgent`` call and the
+        # handle API (``spawn_agent`` / ``wait_agent`` / ``send_message``).
+        # Both delegate through the same runner and write the same ledger, so
+        # the smoke test must not demand the one the model happened not to pick
+        # (a real run picked ``spawn_agent`` after being told "必须使用 subAgent").
         sub_msgs = [
             m
             for m in session.messages
-            if m.role == "tool" and m.tool_name == "subAgent"
+            if m.role == "tool"
+            and m.tool_name in ("subAgent", "spawn_agent", "wait_agent", "send_message")
         ]
         ledgers = sorted((ws_dir / "transcripts" / "subagents").glob("*.json"))
-        print(f"subAgent tool messages={len(sub_msgs)} ledgers={len(ledgers)}")
+        print(
+            f"delegation calls={[m.tool_name for m in sub_msgs]} "
+            f"ledgers={len(ledgers)}"
+        )
         if sub_msgs:
             print(f"packet preview: {(sub_msgs[-1].content or '')[:240]!r}")
-        assert sub_msgs, "the model did not delegate through subAgent"
+        assert sub_msgs, "the model did not delegate through subAgent or the handle API"
         assert ledgers, "sub-agent packet was not written back to the ledger"
 
         # 4) real LLM helpers (shared model config)

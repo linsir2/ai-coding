@@ -57,6 +57,23 @@ def test_load_from_yaml_file_overrides(tmp_path):
     assert app.ai.snip_keep_tail == 30
 
 
+def test_yaml_bare_off_is_the_off_mode(tmp_path):
+    """PyYAML 1.1 turns bare ``off`` into ``False``; the docs spell the mode ``off``.
+
+    Both sandbox tiers accept it unquoted: a literal-error here is a config
+    trap, not a safety check (``True`` is still rejected because there is no
+    unambiguous mode behind it).
+    """
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "process_sandbox:\n  mode: off\n  network:\n    mode: off\n",
+        encoding="utf-8",
+    )
+    app = ConfigLoader.load_app(cfg)
+    assert app.process_sandbox.mode == "off"
+    assert app.process_sandbox.network.mode == "off"
+
+
 def test_load_models_camelcase_compat(tmp_path):
     cfg = tmp_path / "c.yaml"
     cfg.write_text(

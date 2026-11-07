@@ -224,6 +224,7 @@ class Compactor:
                 )
             else:
                 self._emit(CompactionSkipped(reason=reason))
+                self._warn_if_still_over(history, observed_tokens)
             return history
         layers = self._layer_stats()
         # R22/A-8: raise the boundary only when the pipeline actually freed
@@ -301,6 +302,36 @@ class Compactor:
         if not out:
             return None
         return out if isinstance(out, list) else None
+
+    def _warn_if_still_over(
+        self, history: list[ChatMessage], observed_tokens: int
+    ) -> None:
+        """Say so when a pass that freed nothing leaves the request over the line.
+
+        A skip is normally benign: a short session has nothing worth
+        summarising.  It is not benign when the history is *still* above the
+        ceiling -- an oversized single message (a pasted log, a huge prompt)
+        cannot be snipped, elided or summarised, so the request goes out over
+        the window with only a muted ``CompactionSkipped`` in the trace.  One
+        real run sent ~265k estimated tokens against a 32k window and reported
+        nothing at all.  The request is still sent (refusing it would be a new
+        policy), but it is no longer silent.
+        """
+        probe = getattr(self._context, "context_pressure", None)
+        if not callable(probe):
+            return
+        try:
+            estimated, ceiling = probe(history)
+        except Exception:  # noqa: BLE001 — an observation must never fail a turn
+            return
+        tokens = max(int(estimated or 0), int(observed_tokens or 0))
+        if not ceiling or tokens < int(ceiling):
+            return
+        self._degraded(
+            f"still above the context ceiling after a pass freed nothing "
+            f"({tokens} >= {int(ceiling)} estimated tokens)",
+            "sent the history as it is; the provider may reject the request",
+        )
 
     def _should_run(self, history: list[ChatMessage], observed_tokens: int) -> bool:
         """True unless the delegate's own gate says this turn needs nothing.
