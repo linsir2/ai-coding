@@ -15,6 +15,9 @@ name: CI
 #                   so the gate variable is set exactly where it is needed.
 #   frontend     -- the TypeScript TUI: bun install, typecheck, bun test.  Its
 #                   own job because the toolchain is bun, not Python.
+#   floor        -- the declared Python 3.10 floor, on the image's own 3.10 (no
+#                   downloaded artifact).  See the job's comment for why it is
+#                   not a matrix row.
 #
 # No test file is excluded from the unit layer: R2b made every subprocess
 # bounded (thread + process-group kill), so the former hang risks run everywhere.
@@ -22,21 +25,14 @@ name: CI
 #
 # `ubuntu-22.04`, not `ubuntu-latest`, for two measured reasons:
 #
-#  1. the Python 3.10 patch this project tests is the one that image caches (see
-#     the pin below), so `setup-python` needs no network.  On 2026-11-08
-#     `ubuntu-latest` fetched `python-3.10.22-linux-26.04-x64.tar.gz` and died
-#     on three consecutive HTTP 504s before a single test ran;
+#  1. it ships Python 3.10 as the system interpreter, which is what the `floor`
+#     job uses -- `setup-python` cannot supply 3.10 without downloading a release
+#     asset, and on 2026-11-08 that asset returned 504 three times in a row for
+#     every 3.10 job;
 #  2. `unit` installs bubblewrap and exercises the real write boundary.  The
 #     `ubuntu-24.04` image refuses unprivileged user namespaces, so
 #     `BwrapBackend.available()` is False and the mechanism's tests fail -- a
 #     green sandbox gate needs a host where the mechanism actually runs.
-#
-# The 3.10 matrix entry is the exact patch this image caches (`3.10.12`), not
-# the floating `3.10`: the floating spec resolves to the newest patch, which is
-# not cached and must be downloaded from the python-versions release CDN -- on
-# 2026-11-08 that download returned 504 three times in a row for every 3.10
-# job.  The *declared* floor is still 3.10 (`requires-python`, and mypy's
-# `python_version`), this only pins which patch runs the tests.
 #
 # Bump either pin deliberately, and re-check both facts when you do.
 
@@ -53,7 +49,7 @@ jobs:
       matrix:
         # 3.10 is the declared floor (mypy is pinned to it); 3.13 is what the
         # development venv runs.
-        python-version: ["3.10.12", "3.13"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -153,7 +149,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10.12", "3.13"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -192,7 +188,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10.12", "3.13"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -222,7 +218,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10.12", "3.13"]
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -240,6 +236,48 @@ jobs:
       # a red build rather than a green one covering nothing.
       - name: Live tests (real MCP server)
         run: AI_CODING_MCP_STDIO=1 python -m pytest -q -m live
+
+  # The declared floor (`requires-python >= 3.10`, and mypy's `python_version`)
+  # needs a runtime job, but `setup-python` cannot supply one without a network
+  # download: the floating `3.10` resolves to the newest patch, and on
+  # 2026-11-08 that release asset returned 504 three times in a row -- for every
+  # 3.10 job, on both ubuntu-24.04 and ubuntu-22.04, while every 3.13 job (whose
+  # interpreter is already in the image) stayed green.
+  #
+  # Ubuntu 22.04 ships 3.10.12 as its system Python, so the floor is exercised
+  # from the image itself: no artifact, no CDN, nothing to retry.  One job is
+  # enough -- the other four layers run on 3.13, and the floor's question is
+  # "does the code import and pass at 3.10", which the unit suite answers.
+  floor:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the image's Python 3.10 (no download)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3.10-venv
+          python3.10 --version
+          python3.10 -m venv "$RUNNER_TEMP/py310"
+          echo "$RUNNER_TEMP/py310/bin" >> "$GITHUB_PATH"
+
+      - name: Install
+        run: |
+          python --version
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      # Same two mechanisms the unit layer needs: ripgrep for the rg branch,
+      # bubblewrap so the write boundary is exercised rather than skipped.
+      - name: Install ripgrep and bubblewrap
+        run: |
+          sudo apt-get install -y -qq ripgrep bubblewrap
+          rg --version
+          bwrap --version
+
+      - name: Unit tests on the floor
+        run: python -m pytest -q -m "not integration and not live"
 
   # The TUI is TypeScript on bun; nothing in the Python jobs compiles it.  The
   # bun version is pinned to the one that generated bun.lock, because
