@@ -1729,12 +1729,41 @@ class ContextManager:
         self._view_memo = (key, out)
         return list(out)
 
+    def _l0_applies(
+        self, messages: Sequence[ChatMessage], observed_tokens: int = 0
+    ) -> bool:
+        """May L0 rewrite history for this request?
+
+        L0 elides old tool bodies *in place*.  That is a genuine saving when the
+        request is already at the ceiling, and a straight loss when it is not:
+        the provider's prefix cache is keyed on the exact text it was shown, so
+        every elided message invalidates everything after it.  Measured on a
+        real plan turn (262k window, request at 25% of the window): L0 elided
+        one more old result on roughly every other iteration and the cache hit
+        sat at 19-25%, against 60-93% on iterations where nothing moved.
+
+        The line is the compaction ceiling itself, and the measure is the same
+        one ``should_compact`` uses -- the provider's count when the caller has
+        one, the character estimate otherwise.  Below the line, compaction is
+        not due either, so the raw history is what should be sent.
+        """
+        ceiling = compaction_ceiling(self._max_context_tokens)
+        if ceiling <= 0:
+            return True
+        tokens = (
+            int(observed_tokens)
+            if observed_tokens > 0
+            else _history_tokens(list(messages))
+        )
+        return tokens >= ceiling
+
     def checkpoint_view(
         self,
         messages: list[ChatMessage],
         *,
         session: Any | None = None,
         pinned: Sequence[ChatMessage] = (),
+        observed_tokens: int = 0,
     ) -> list[ChatMessage] | None:
         """The request's history with an existing checkpoint applied, or ``None``.
 
@@ -1755,12 +1784,22 @@ class ContextManager:
         view that is not smaller than the raw history).  Without a checkpoint
         the view is the same L0 pass applied to the whole history, so a shrink
         bought while compacting one request is not lost on the next one.
+
+        **L0 only runs near the ceiling** (``_l0_applies``).  L0 rewrites bodies
+        in place, and every rewrite invalidates the provider's prefix cache from
+        that message onward; while the request has headroom, the raw append-only
+        history is both cheaper (cache hits) and trivially reproducible.  The
+        measure is the provider's own count when the caller has one
+        (``observed_tokens``), the character estimate otherwise -- the same
+        choice ``should_compact`` makes, so the two gates cannot drift.
         """
         if session is None or not messages:
             return None
         session_id = str(getattr(session, "session_id", "") or "")
         previous, used = read_checkpoint(session, messages)
         has_checkpoint = bool(previous and 0 < used <= len(messages))
+        # One decision for both branches: may this request pay for a rewrite?
+        l0 = self._l0_applies(messages, observed_tokens)
         if has_checkpoint:
             # 2026-11 real machine: the messages after a checkpoint are not a
             # small tail — they are everything the turn added since, and during
@@ -1776,12 +1815,12 @@ class ContextManager:
             # L0 is stateless, idempotent and free (content-addressed artifacts,
             # no model call), which is exactly what a per-request view can
             # afford.  CMP-02 memoises it per request shape.
-            core = [
-                _checkpoint_note(previous),
-                *self._l0_view(
-                    messages, used, anchor=previous, session_id=session_id
-                ),
-            ]
+            tail = (
+                self._l0_view(messages, used, anchor=previous, session_id=session_id)
+                if l0
+                else list(messages[used:])
+            )
+            core = [_checkpoint_note(previous), *tail]
         else:
             # No checkpoint — either a first compaction or one whose anchor no
             # longer matches.  L0 is still *per-request* work: ``compress``
@@ -1794,6 +1833,13 @@ class ContextManager:
             # out as the raw **161k** — past a 131k window.  Applying L0 here
             # makes the request reproducible on every iteration instead of for
             # exactly one.
+            if not l0:
+                # Below the ceiling there is nothing to reproduce: the raw
+                # history already fits, so sending it unchanged is both honest
+                # and the only shape the provider can serve from its prefix
+                # cache.  L0 here would rewrite a message the provider has
+                # already seen, once per iteration.
+                return None
             core = self._l0_view(messages, 0, anchor="", session_id=session_id)
         # Decide "smaller" on the L0 result, *before* mounting the snapshot:
         # the snapshot is a request aid, not evidence that L0 shrank anything.
@@ -1843,7 +1889,12 @@ class ContextManager:
             # iteration and produced six compactions in one measured turn
             # (trace 2026-10-31, t8: 151→14, 155→11, 162→9, ...).  The view is
             # the request; the raw history is only its source.
-            view = self.checkpoint_view(messages, session=session, pinned=pinned)
+            view = self.checkpoint_view(
+                messages,
+                session=session,
+                pinned=pinned,
+                observed_tokens=observed_tokens,
+            )
             effective = view if view is not None else messages
             # R2-2r: the provider's count is used even when a view exists.
             # ``install_checkpoint`` already cleared the stale reading, and the

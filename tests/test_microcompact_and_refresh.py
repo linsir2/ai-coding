@@ -26,6 +26,7 @@ from ai_coding.core.context_compression import (
     _anchor_of,
     _history_chars,
     _history_tokens,
+    compaction_ceiling,
     estimate_tokens,
     install_checkpoint,
     microcompact_old_results,
@@ -177,17 +178,59 @@ def test_a_checkpointless_view_is_elided_and_reproducible(tmp_path):
     was installed (L4 saw 37k, under the ceiling), and the gate — reading that
     23k as the context — let the next request go out as the raw **161k**, past a
     131k window.  L0 has to apply to the request itself, not only to a
-    compaction's copy, or the shrink lasts exactly one iteration."""
+    compaction's copy, or the shrink lasts exactly one iteration.
+
+    The 154k is the *provider's* reading; it is passed explicitly because L0 now
+    only rewrites history at/above the ceiling (see the next test)."""
     manager = _wide_manager(tmp_path)
     messages = _tool_heavy(20, 20_000)
     session = _real_session(messages)
 
-    first = manager.checkpoint_view(messages, session=session)
-    second = manager.checkpoint_view(messages, session=session)
+    first = manager.checkpoint_view(messages, session=session, observed_tokens=154_000)
+    second = manager.checkpoint_view(messages, session=session, observed_tokens=154_000)
 
     assert first is not None, "L0 must not require a checkpoint"
     assert _history_tokens(first) < _history_tokens(messages) // 2
     assert [m.content for m in first] == [m.content for m in second]
+
+
+def test_below_the_ceiling_the_history_is_sent_unchanged(tmp_path):
+    """L0 is a rewrite, and a rewrite kills the provider's prefix cache.
+
+    Measured on a real plan turn (262k window, request at 25% of the window):
+    L0 elided one more old tool result on roughly every other iteration, always
+    in the middle of the history, and the reported cache hit sat at 19-25%
+    against 60-93% on iterations where nothing moved.  With headroom, the
+    append-only history is both cheaper (cache) and reproducible (nothing to
+    reproduce), so ``checkpoint_view`` must return ``None`` and leave it alone.
+    """
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(20, 20_000)  # ~100k estimated, ceiling is ~115k
+    session = _real_session(messages)
+
+    assert _history_tokens(messages) < compaction_ceiling(131_072)
+    assert manager.checkpoint_view(messages, session=session) is None
+
+    # The provider's own count says the same thing: still room, still no rewrite.
+    assert manager.checkpoint_view(
+        messages, session=session, observed_tokens=60_000
+    ) is None
+
+
+def test_at_the_ceiling_the_view_rewrites_once(tmp_path):
+    """The other half of the rule: at the ceiling the rewrite is worth it, and
+    it must be *stable* across requests (the same view twice, not a new one)."""
+    manager = _wide_manager(tmp_path)
+    messages = _tool_heavy(20, 20_000)
+    session = _real_session(messages)
+    ceiling = compaction_ceiling(131_072)
+
+    first = manager.checkpoint_view(messages, session=session, observed_tokens=ceiling)
+    second = manager.checkpoint_view(messages, session=session, observed_tokens=ceiling)
+
+    assert first is not None
+    assert [m.content for m in first] == [m.content for m in second]
+    assert _history_tokens(first) < _history_tokens(messages)
 
 
 def test_the_cold_start_measurement_uses_the_view_not_the_raw_tail(tmp_path):
@@ -416,8 +459,11 @@ def test_checkpoint_view_scans_once_per_request_shape(tmp_path, monkeypatch):
 
     monkeypatch.setattr(compression, "microcompact_old_results", counting)
 
-    first = manager.checkpoint_view(messages, session=session)
-    second = manager.checkpoint_view(messages, session=session)
+    # The provider's reading is over the ceiling, so L0 is allowed to run; what
+    # is pinned here is that the *same* request shape is scanned only once.
+    observed = compaction_ceiling(131_072)
+    first = manager.checkpoint_view(messages, session=session, observed_tokens=observed)
+    second = manager.checkpoint_view(messages, session=session, observed_tokens=observed)
 
     assert len(calls) == 1, "the same request must not rescan the whole history"
     assert [m.content for m in first or []] == [m.content for m in second or []]
@@ -426,7 +472,7 @@ def test_checkpoint_view_scans_once_per_request_shape(tmp_path, monkeypatch):
         *messages,
         ChatMessage(role="user", content="新的一轮", timestamp=""),
     ]
-    manager.checkpoint_view(grown, session=session)
+    manager.checkpoint_view(grown, session=session, observed_tokens=observed)
     assert len(calls) == 2, "a new message is a new shape"
 
 
@@ -444,10 +490,11 @@ def test_the_memo_key_covers_the_window_and_protect_budget(tmp_path, monkeypatch
         return real(*args, **kwargs)
 
     monkeypatch.setattr(compression, "microcompact_old_results", counting)
-    manager.checkpoint_view(messages, session=session)
+    observed = compaction_ceiling(131_072)
+    manager.checkpoint_view(messages, session=session, observed_tokens=observed)
     manager._max_context_tokens = 6_000  # changes protect and the L2 window
 
-    manager.checkpoint_view(messages, session=session)
+    manager.checkpoint_view(messages, session=session, observed_tokens=observed)
 
     assert len(calls) == 2, "a window change must not reuse the old view"
 
@@ -471,8 +518,9 @@ def test_the_memo_key_covers_the_session(tmp_path, monkeypatch):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(compression, "microcompact_old_results", counting)
-    manager.checkpoint_view(messages, session=first)
-    manager.checkpoint_view(messages, session=second)
+    observed = compaction_ceiling(131_072)
+    manager.checkpoint_view(messages, session=first, observed_tokens=observed)
+    manager.checkpoint_view(messages, session=second, observed_tokens=observed)
 
     assert len(calls) == 2, "a different session is a different view"
 

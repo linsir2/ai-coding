@@ -370,6 +370,29 @@ async def test_spawn_without_readonly_keeps_the_child_writable_and_isolated():
 
 
 @pytest.mark.asyncio
+async def test_a_read_only_parent_forces_its_child_read_only():
+    """A read-only session has no write authority to delegate.
+
+    Measured in a plan-mode run: the model delegated exploration to writable
+    children, each got a HEAD-only worktree, and every absolute path of the live
+    repository was refused -- the parent then gave up and did the reading
+    itself.  The child must inherit the parent's boundary.
+    """
+    runner = _FakeRunner()
+    tool = SpawnAgentTool(runner, worktree_manager="wt/1", isolate=True)
+    ctx = _ctx()
+    ctx.readonly = True
+
+    await tool.execute({"task": "scan"}, ctx)
+
+    call = runner.spawns[0]
+    assert call["task"].readonly is True
+    # ``isolate`` is still forwarded untouched: the runner turns "read-only"
+    # into "no worktree" in one place, and the two flags must not disagree here.
+    assert call["task"].isolate is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false", 0, [], {}])
 async def test_spawn_rejects_a_non_boolean_readonly(value):
     runner = _FakeRunner()

@@ -150,7 +150,8 @@ class SpawnAgentTool(BaseTool):
                     "type": "boolean",
                     "description": (
                         "Run the child read-only: it reads the live workspace "
-                        "(no worktree) and cannot write. Defaults to false."
+                        "(no worktree) and cannot write. Defaults to false; a "
+                        "read-only session always runs its children read-only."
                     ),
                 },
                 "agent": {
@@ -201,6 +202,11 @@ class SpawnAgentTool(BaseTool):
         )
 
         context = resolve_ctx(ctx)
+        # A read-only session has no write authority to delegate.  Without this,
+        # plan-mode exploration was handed to writable children, each of which
+        # got a HEAD-only worktree and refused every absolute path of the live
+        # repository (measured in production).
+        readonly = readonly or bool(context.readonly)
         parent: ParentContext | None = None
         context_mode = "task_only"
         if fork == "all":

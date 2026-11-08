@@ -23,6 +23,9 @@ sessions/
 *.memory/
 .memory
 .memory.scenes.bak
+# A crashed atomic memory write leaves its temp file behind; it is runtime
+# state, never source.
+.memory.*.tmp
 transcripts/
 worktrees/
 # R4a: traces and the hook plugin directory are per-workspace runtime state

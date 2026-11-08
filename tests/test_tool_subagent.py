@@ -355,6 +355,19 @@ async def test_readonly_is_forwarded_to_the_background_runner():
 
 
 @pytest.mark.asyncio
+async def test_a_read_only_parent_forces_the_child_read_only():
+    """The parent's boundary is the child's: no write authority to delegate."""
+    runner = _FakeRunner()
+    tool = SubAgentTool(runner=runner, isolate=True)
+    ctx = _ctx()
+    ctx.readonly = True
+
+    await tool.execute({"task": "scan"}, ctx)
+
+    assert runner.calls[0]["readonly"] is True
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["true", "false", 1, [], {}])
 async def test_a_non_boolean_readonly_is_refused_before_the_runner(value):
     runner = _FakeRunner()

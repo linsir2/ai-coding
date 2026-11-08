@@ -157,7 +157,12 @@ class Compactor:
     ) -> list[ChatMessage]:
         """One funnel pass; the caller holds the lock (see ``compress``)."""
         self.last_was_view = False
-        view = self._checkpoint_view(history, session=session, pinned=pinned)
+        view = self._checkpoint_view(
+            history,
+            session=session,
+            pinned=pinned,
+            observed_tokens=observed_tokens,
+        )
         if not force:
             # Gate on the request the checkpoint will actually send.  The raw
             # list keeps its 200k prefix after a checkpoint; judging it again
@@ -277,6 +282,7 @@ class Compactor:
         *,
         session: Any | None,
         pinned: Sequence[ChatMessage],
+        observed_tokens: int = 0,
     ) -> list[ChatMessage] | None:
         """Ask the delegate for a checkpoint-shaped view, if it has one.
 
@@ -292,10 +298,15 @@ class Compactor:
         except (TypeError, ValueError):
             params = {}
         try:
+            kwargs: dict[str, Any] = {"session": session}
             if pinned and "pinned" in params:
-                out = view(history, session=session, pinned=pinned)
-            else:
-                out = view(history, session=session)
+                kwargs["pinned"] = pinned
+            # CTX/CMP: the delegate decides whether L0 may rewrite history by the
+            # same measure ``should_compact`` uses.  Probe it: an older delegate
+            # without the parameter keeps the old unconditional behaviour.
+            if observed_tokens and "observed_tokens" in params:
+                kwargs["observed_tokens"] = observed_tokens
+            out = view(history, **kwargs)
         except Exception:  # noqa: BLE001 — a view is an optimisation, not a turn
             _log.debug("checkpoint view failed; sending the raw history", exc_info=True)
             return None

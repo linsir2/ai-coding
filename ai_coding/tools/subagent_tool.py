@@ -298,7 +298,8 @@ class SubAgentTool(BaseTool):
                     "type": "boolean",
                     "description": (
                         "Run the child read-only: it reads the live workspace "
-                        "(no worktree) and cannot write. Defaults to false."
+                        "(no worktree) and cannot write. Defaults to false; a "
+                        "read-only session always runs its children read-only."
                     ),
                 },
                 "background": {
@@ -375,6 +376,12 @@ class SubAgentTool(BaseTool):
                 )
 
         context = resolve_ctx(ctx)
+        # A read-only session has no write authority to delegate: a child that
+        # could write would be a way around its own boundary.  Measured in a
+        # plan-mode run: exploration was delegated to writable children, each
+        # got a HEAD-only worktree, and every absolute path of the live
+        # repository was refused -- the parent then did the reading itself.
+        readonly = readonly or bool(context.readonly)
         parent: ParentContext | None = None
         # r25/v2: only the request view and the rule layer travel; the child
         # assembles its own system prompt (inheriting the parent's assembled
