@@ -22,16 +22,23 @@ name: CI
 #
 # `ubuntu-22.04`, not `ubuntu-latest`, for two measured reasons:
 #
-#  1. the Python 3.10 floor is in that image's tool cache, so `setup-python`
-#     needs no network.  On 2026-11-08 `ubuntu-latest` fetched
-#     `python-3.10.22-linux-26.04-x64.tar.gz` and died on three consecutive
-#     HTTP 504s before a single test ran;
+#  1. the Python 3.10 patch this project tests is the one that image caches (see
+#     the pin below), so `setup-python` needs no network.  On 2026-11-08
+#     `ubuntu-latest` fetched `python-3.10.22-linux-26.04-x64.tar.gz` and died
+#     on three consecutive HTTP 504s before a single test ran;
 #  2. `unit` installs bubblewrap and exercises the real write boundary.  The
 #     `ubuntu-24.04` image refuses unprivileged user namespaces, so
 #     `BwrapBackend.available()` is False and the mechanism's tests fail -- a
 #     green sandbox gate needs a host where the mechanism actually runs.
 #
-# Bump this deliberately, and re-check both facts when you do.
+# The 3.10 matrix entry is the exact patch this image caches (`3.10.12`), not
+# the floating `3.10`: the floating spec resolves to the newest patch, which is
+# not cached and must be downloaded from the python-versions release CDN -- on
+# 2026-11-08 that download returned 504 three times in a row for every 3.10
+# job.  The *declared* floor is still 3.10 (`requires-python`, and mypy's
+# `python_version`), this only pins which patch runs the tests.
+#
+# Bump either pin deliberately, and re-check both facts when you do.
 
 on:
   push:
@@ -46,7 +53,7 @@ jobs:
       matrix:
         # 3.10 is the declared floor (mypy is pinned to it); 3.13 is what the
         # development venv runs.
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -146,7 +153,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -185,7 +192,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -215,7 +222,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.10.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
