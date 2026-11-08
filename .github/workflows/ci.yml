@@ -20,12 +20,18 @@ name: CI
 # bounded (thread + process-group kill), so the former hang risks run everywhere.
 # See docs/r2-analysis.md sections 1 and 9.
 #
-# `ubuntu-24.04`, not `ubuntu-latest`: the label is migrating to Ubuntu 26, and
-# the Python 3.10 toolchain there is a fresh release asset -- on 2026-11-08 two
-# jobs died in `setup-python` with three consecutive HTTP 504s fetching
-# `python-3.10.22-linux-26.04-x64.tar.gz` before the tests even started.  24.04
-# serves 3.10 from the runner's tool cache, so the floor is tested without a
-# network dependency on a just-published artifact.  Bump this deliberately.
+# `ubuntu-22.04`, not `ubuntu-latest`, for two measured reasons:
+#
+#  1. the Python 3.10 floor is in that image's tool cache, so `setup-python`
+#     needs no network.  On 2026-11-08 `ubuntu-latest` fetched
+#     `python-3.10.22-linux-26.04-x64.tar.gz` and died on three consecutive
+#     HTTP 504s before a single test ran;
+#  2. `unit` installs bubblewrap and exercises the real write boundary.  The
+#     `ubuntu-24.04` image refuses unprivileged user namespaces, so
+#     `BwrapBackend.available()` is False and the mechanism's tests fail -- a
+#     green sandbox gate needs a host where the mechanism actually runs.
+#
+# Bump this deliberately, and re-check both facts when you do.
 
 on:
   push:
@@ -33,7 +39,7 @@ on:
 
 jobs:
   quality:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -135,7 +141,7 @@ jobs:
           PY
 
   unit:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -174,7 +180,7 @@ jobs:
         run: python -m pytest -q -m "not integration and not live"
 
   integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -204,7 +210,7 @@ jobs:
         run: python -m pytest -q -m integration
 
   live:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -232,7 +238,7 @@ jobs:
   # bun version is pinned to the one that generated bun.lock, because
   # --frozen-lockfile fails on a lockfile written by a different resolver.
   frontend:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
